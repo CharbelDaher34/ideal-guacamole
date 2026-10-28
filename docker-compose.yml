@@ -1,0 +1,25 @@
+services:
+  dss:
+    image: dataiku/dss:15.2.0
+    container_name: dataiku-dss
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:10000:10000"
+    volumes:
+      - ./dss_data:/home/dataiku/dss
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:17
+    container_name: dataiku-postgres
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      retries: 10

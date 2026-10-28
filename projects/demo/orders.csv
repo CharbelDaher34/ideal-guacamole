@@ -1,0 +1,13 @@
+order_id,customer,country,order_date,amount,status
+1001,Acme Corp,Lebanon,2026-09-01,1200.50,paid
+1002,Globex,France,2026-09-02,340.00,paid
+1003,Acme Corp,Lebanon,2026-09-05,89.99,refunded
+1004,Initech,USA,2026-09-07,2300.00,paid
+1005,Globex,France,2026-09-10,150.25,pending
+1006,Umbrella,Germany,2026-09-12,760.00,paid
+1007,Initech,USA,2026-09-15,45.00,cancelled
+1008,Acme Corp,Lebanon,2026-09-18,510.75,paid
+1009,Umbrella,Germany,2026-09-21,1999.99,paid
+1010,Stark Industries,USA,2026-09-25,5400.00,paid
+1011,Globex,France,2026-09-28,220.00,paid
+1012,Stark Industries,USA,2026-10-02,830.40,pending
