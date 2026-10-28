@@ -1,43 +1,39 @@
 ## What this project does
 
-The **scripted** version of `CORP_CASHFLOW`: same data, same goal (forecast each corporate account's
-next 3 months of cash flow, flag liquidity risk, have an LLM write a report), built with **Python and
-SQL recipes** instead of visual recipes and Visual ML. Open both projects side by side to compare.
+The **scripted** version of `CORP_CASHFLOW`: same data, same goal (forecast each account's net cash flow
+for next month, flag liquidity risk, have an LLM write a note), built with **Python and SQL recipes**
+instead of visual recipes and Visual ML. Open both projects side by side to compare; they give the same
+forecasts.
 
-All data is synthetic: 30 corporate accounts, 36 months of transactions (Oct 2023 - Sep 2026).
-The forecast covers **Oct - Dec 2026**.
+Data is synthetic: 10 companies, 24 months of transactions (Oct 2024 - Sep 2026). Forecast: **Oct 2026**.
 
 ## The flow, left to right
 
 | Tag | Recipe | Output | What it does |
 |---|---|---|---|
-| 1-ingest | uploaded CSVs | `accounts_raw`, `transactions_raw` | Raw data |
-| 2-prepare | Python `compute_transactions_prepared` | `transactions_prepared`, `accounts` | Types, de-duplication, signed amount, month |
-| 3-aggregate | SQL `compute_monthly_cashflow` | `monthly_cashflow` | Sums per account and month, *inside* PostgreSQL |
-| 4-ml | Python `compute_training_set` | `training_set` | One row per account and month: features and targets |
-| 4-ml | Python `compute_cashflow_forecast` | `cashflow_forecast`, `model_evaluation`, `feature_importance`, `backtest_predictions` | 6 LightGBM models, backtest vs baselines, forecast |
-| 5-insights | SQL `compute_account_outlook` | `account_outlook` | Balances and risk level per account |
-| 6-genai | Python `compute_cashflow_report` | `cashflow_report` | The report, written by the LLM |
+| 1-input | uploaded CSVs | `accounts`, `transactions` | The data |
+| 2-monthly | Python `compute_monthly_net` | `monthly_net` | Net cash flow per account and month |
+| 3-ml | SQL `compute_features` | `features` | 3-month average, same month last year, next month, row role — *inside* PostgreSQL |
+| 3-ml | Python `compute_forecast` | `account_outlook`, `model_evaluation` | Linear regression: train, test, forecast Oct 2026, risk level |
+| 4-genai | Python `compute_account_notes` | `account_notes` | The LLM's note per account |
 
-## How the "training" works
+## The model
 
-- `training_set`: for each account and month *t*: what was known at *t* (this month, last 2 months,
-  3- and 12-month averages, the same month last year) and what happened at *t+1, t+2, t+3* (the targets).
-- `compute_cashflow_forecast` trains 6 LightGBM models (inflow and outflow x 1/2/3 months ahead), shared
-  by all accounts. Amounts are divided by each account's average monthly inflow.
-- **Backtest**: the recipe replays the last 6 month-ends, training only on data available at that time,
-  and compares with what really happened. `model_evaluation` shows the error (WAPE) of the model and of
-  two simple baselines; `backtest_predictions` lets you chart predicted vs actual.
-- The spread of backtest errors gives the 10%-90% range (`net_lower` / `net_upper`).
-- The final models are retrained on all known history before forecasting.
+- Learns **next month's net** from this month's net, the 3-month average and the same month last year.
+- Trained on the `train` rows, checked on the `test` rows (Jun - Aug 2026). `model_evaluation` compares
+  its average error with two simple baselines.
 
-## The GenAI report
+## Risk level
 
-- `compute_cashflow_report` calls the LLM in the project variable `llm_id` (**... > Variables**), through
-  the **LLM Mesh** connection `openai`. One call per account + one for the portfolio summary.
-- No fallback: if the variable is empty or a call fails, the recipe fails.
+`projected balance = balance today + forecast`: **HIGH** past the overdraft limit, **MEDIUM** below 0,
+**LOW** otherwise.
+
+## The GenAI note
+
+`compute_account_notes` calls the LLM in the project variable `llm_id` (**... > Variables**) through the
+**LLM Mesh** connection `openai`, one call per account. No fallback: if a call fails, the recipe fails.
 
 ## Things to try
 
 - Open a recipe, edit the code, **Run**; use the notebook button to explore it interactively.
-- Compare `model_evaluation` here with the one in `CORP_CASHFLOW` (Visual ML).
+- Add a feature in `features.sql` and use it in `compute_forecast`.

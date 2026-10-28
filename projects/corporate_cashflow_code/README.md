@@ -5,39 +5,36 @@ built with **Python and SQL recipes**. Same synthetic data.
 
 ```bash
 python3 ../corporate_cashflow/generate_data.py   # if ../corporate_cashflow/data/ does not exist yet
-python3 create_project.py                         # (re)creates project CORP_CASHFLOW_CODE and builds it (~2 min)
+python3 create_project.py                         # (re)creates project CORP_CASHFLOW_CODE and builds it (~1 min)
 ```
 
 Open http://localhost:10000/projects/CORP_CASHFLOW_CODE/ — the project **Wiki** walks through it.
 
-## Flow
+## Flow (4 recipes)
 
 ```
-accounts_raw, transactions_raw ─[Python] prepare─► transactions_prepared, accounts
-transactions_prepared ─[SQL] monthly─► monthly_cashflow ─[Python] training set─► training_set
-training_set ─[Python] train + backtest + forecast─► cashflow_forecast, model_evaluation,
-                                                     feature_importance, backtest_predictions
-accounts, monthly_cashflow, cashflow_forecast ─[SQL] outlook─► account_outlook
-account_outlook, cashflow_forecast, model_evaluation ─[Python] LLM report─► cashflow_report
+transactions ─[Python]─► monthly_net ─[SQL]─► features
+features, accounts ─[Python]─► account_outlook, model_evaluation
+account_outlook ─[Python + LLM]─► account_notes
 ```
 
 | File | What |
 |---|---|
 | `create_project.py` | Project definition: datasets, recipes, tags, variables, wiki |
-| `recipes/*.py` | Python recipes |
-| `recipes/*.sql` | SQL recipes, run inside PostgreSQL (`${projectKey}` = table prefix) |
+| `recipes/monthly_net.py` | Net cash flow per account and month (pandas) |
+| `recipes/features.sql` | 3-month average, same month last year, next month, row role (window functions in PostgreSQL) |
+| `recipes/forecast.py` | Linear regression (scikit-learn): train, test vs baselines, forecast, risk level |
+| `recipes/account_notes.py` | One LLM note per account (LLM Mesh) |
 | `wiki.md` | Project wiki home page |
 
-## Code vs visual: what differs
+## Code vs visual
 
 | | `CORP_CASHFLOW_CODE` (this) | `CORP_CASHFLOW` |
 |---|---|---|
-| Recipes | 4 Python + 2 SQL | 27 visual recipes |
-| Model | 6 LightGBM models (flow x horizon), in code | 1 Visual ML LightGBM model (flow and horizon as features) |
-| Evaluation | rolling backtest over 6 month-ends | held-out last 6 months (Evaluate recipe) |
-| Final model | retrained on all history | trained on data up to 6 months ago |
-| 10-90% range | from backtest errors | Visual ML prediction intervals |
-| Report | Python + LLM Mesh API | Prompt recipes |
+| Recipes | 3 Python + 1 SQL | 9 visual recipes + 1 Visual ML training |
+| Model | scikit-learn `LinearRegression` in code | Visual ML ordinary least squares |
+| Results | identical forecasts and risk levels | |
+| Report | Python + LLM Mesh API | Prompt recipe |
 
-The LLM is the project variable `llm_id` (`openai:openai:gpt-6-luna`); no fallback, the report recipe
+The LLM is the project variable `llm_id` (`openai:openai:gpt-6-luna`); no fallback, the notes recipe
 fails if the LLM does. **Re-running `create_project.py` deletes and re-creates the project.**

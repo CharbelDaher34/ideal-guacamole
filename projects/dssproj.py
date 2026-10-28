@@ -127,7 +127,8 @@ class Project:
         """Window recipe over rows of the same partition, sorted by order_by.
         aggregations: {column: {"lag": [1, 2], "lead": [1], "avg": True, "sum": True, ...}}; every input
         column is kept. frame=(preceding, following) rows; None = from the first row up to the current one.
-        Output columns are named <column>_lag<n>, <column>_lead<n>, <column>_avg, ..., unless renamed in names."""
+        Output columns are named <column>_lag<n>, <column>_lead<n> (a single lead of 1: <column>_lead),
+        <column>_avg, ..., unless renamed in names."""
         values = []
         for c, aggs in aggregations.items():
             v = {"column": c, "value": True}

@@ -15,8 +15,8 @@ Lab analysis, training, deploy to the flow, then their Evaluate / Score recipes.
 | Folder | Project key | What |
 |---|---|---|
 | `demo/` | `DEV_DEMO` | Minimal example: CSV -> Python -> SQL |
-| `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate-banking cash-flow forecast + GenAI report, visual recipes and Visual ML, no code (see its README) |
-| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same use case and data, scripted: Python + SQL recipes, LightGBM in code (see its README) |
+| `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate-banking next-month cash-flow forecast + GenAI notes, 10 visual recipes and Visual ML, no code (see its README) |
+| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same use case and data, scripted: 4 Python / SQL recipes, scikit-learn model (see its README) |
 
 ## Run the demo
 
