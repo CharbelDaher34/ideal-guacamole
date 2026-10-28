@@ -1,4 +1,4 @@
-"""Synthetic corporate-banking data: 10 companies, 24 months of transactions (Oct 2024 - Sep 2026).
+"""Synthetic corporate-banking data: 10 companies, 36 months of transactions (Oct 2023 - Sep 2026).
 
 Writes data/accounts.csv and data/transactions.csv. Fully made up, seeded so reruns match.
 Revenue follows the sector's season and a yearly trend; costs (payroll, suppliers, rent) are steady,
@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 OUT = Path(__file__).resolve().parent / "data"
-START, MONTHS = date(2024, 10, 1), 24
+START, MONTHS = date(2023, 10, 1), 36
 rng = np.random.default_rng(7)
 
 # sector -> revenue multiplier per calendar month (Jan..Dec)

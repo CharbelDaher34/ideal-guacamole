@@ -1,7 +1,7 @@
 # CORP_CASHFLOW_CODE — corporate cash-flow forecast, scripted
 
-The same use case as [`../corporate_cashflow`](../corporate_cashflow) (visual recipes + Visual ML),
-built with **Python and SQL recipes**. Same synthetic data.
+The same data as [`../corporate_cashflow`](../corporate_cashflow) (visual recipes + time series forecasting),
+built with **Python and SQL recipes** and a **regression** on hand-made features instead. Forecasts next month.
 
 ```bash
 python3 ../corporate_cashflow/generate_data.py   # if ../corporate_cashflow/data/ does not exist yet
@@ -22,7 +22,7 @@ account_outlook ─[Python + LLM]─► account_notes
 |---|---|
 | `create_project.py` | Project definition: datasets, recipes, tags, variables, wiki |
 | `recipes/monthly_net.py` | Net cash flow per account and month (pandas) |
-| `recipes/features.sql` | 3-month average, same month last year, next month, row role (window functions in PostgreSQL) |
+| `recipes/features.sql` | 3-month average, same month last year, next month, row role (window functions in PostgreSQL; test = Jun - Aug 2026) |
 | `recipes/forecast.py` | Linear regression (scikit-learn): train, test vs baselines, forecast, risk level |
 | `recipes/account_notes.py` | One LLM note per account (LLM Mesh) |
 | `wiki.md` | Project wiki home page |
@@ -31,9 +31,10 @@ account_outlook ─[Python + LLM]─► account_notes
 
 | | `CORP_CASHFLOW_CODE` (this) | `CORP_CASHFLOW` |
 |---|---|---|
-| Recipes | 3 Python + 1 SQL | 9 visual recipes + 1 Visual ML training |
-| Model | scikit-learn `LinearRegression` in code | Visual ML ordinary least squares |
-| Results | identical forecasts and risk levels | |
+| Recipes | 3 Python + 1 SQL | 7 visual recipes + 1 Visual ML training |
+| Approach | regression: features built by hand (SQL window functions) | time series forecasting: DSS handles time |
+| Model | scikit-learn `LinearRegression` | best of 9 time series algorithms (ARIMA, ETS, Prophet, DeepAR...) |
+| Horizon | next month | next 3 months |
 | Report | Python + LLM Mesh API | Prompt recipe |
 
 The LLM is the project variable `llm_id` (`openai:openai:gpt-6-luna`); no fallback, the notes recipe

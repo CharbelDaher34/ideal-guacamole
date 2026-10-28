@@ -15,6 +15,8 @@ It is **not exposed to the server** — only reachable on the Docker network as 
   On a fresh clone: `cp .env.example .env`, set a password, `chmod 600 .env`
 - DSS connection: `postgres_local` (pre-created in `dss_data/config/connections.json`).
   After logging in, check it under **Administration → Connections → postgres_local → Test**.
+- Code env `timeseries` (Visual ML + time series packages, ~3 GB): created automatically by
+  `projects/corporate_cashflow/create_project.py` if missing (**Administration → Code Envs**).
 - psql shell: `docker exec -it dataiku-postgres psql -U dataiku -d dataiku`
 
 ## Start / stop

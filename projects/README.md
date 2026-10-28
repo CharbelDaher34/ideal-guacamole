@@ -15,8 +15,8 @@ Lab analysis, training, deploy to the flow, then their Evaluate / Score recipes.
 | Folder | Project key | What |
 |---|---|---|
 | `demo/` | `DEV_DEMO` | Minimal example: CSV -> Python -> SQL |
-| `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate-banking next-month cash-flow forecast + GenAI notes, 10 visual recipes and Visual ML, no code (see its README) |
-| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same use case and data, scripted: 4 Python / SQL recipes, scikit-learn model (see its README) |
+| `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate-banking 3-month cash-flow forecast + GenAI notes: visual recipes and Visual ML **time series forecasting** (9 algorithms compared), no code (see its README) |
+| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same data, scripted: 4 Python / SQL recipes, next-month **regression** with scikit-learn (see its README) |
 
 ## Run the demo
 
@@ -61,8 +61,11 @@ Visual recipes (prefer these; open them in the UI to see the settings):
 | `split_recipe` | Split | column, `{value: output dataset}` |
 | `prompt_recipe` | Prompt (LLM Mesh) | LLM id, prompt template with `{{column}}` placeholders |
 
-Visual ML: `ml_model(name, train, test, target, reject=, params=, interval=)` (Lab analysis trained
-and deployed to the flow as saved model `name`), `evaluate_recipe`, `score_recipe`.
+Visual ML: `ml_model(name, train, test, target, reject=, params=, interval=)` (regression: Lab analysis
+trained and deployed to the flow as saved model `name`), `timeseries_model(name, input, target, time, ids,
+horizon, algorithms, env)` (time series forecasting: trains every algorithm in `algorithms`, deploys the
+best on MASE), `evaluate_recipe`, `score_recipe`. `ensure_code_env(name)` creates a DSS code env with the
+Visual ML + time series packages if it does not exist (time series models need it).
 
 Code recipes: `python_recipe`, `sql_recipe`. All recipes take `description=` and `tags=`;
 `wiki_home` and `Project(..., variables={...})` for the wiki and project variables.

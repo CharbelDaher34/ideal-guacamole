@@ -1,4 +1,5 @@
-"""Corporate banking, scripted version: same use case as ../corporate_cashflow, built with code recipes.
+"""Corporate banking, scripted version: same data as ../corporate_cashflow, built with code recipes and a
+regression model (the visual project uses time series forecasting).
 
     python3 ../corporate_cashflow/generate_data.py   # the synthetic CSVs (shared with the visual project)
     python3 create_project.py                         # push project CORP_CASHFLOW_CODE into DSS and build it
@@ -22,7 +23,7 @@ def code(name):
 
 
 p = Project("CORP_CASHFLOW_CODE", "Corporate cash-flow forecast (code)",
-            "Same as CORP_CASHFLOW, built with Python and SQL recipes.",
+            "Same data as CORP_CASHFLOW, built with Python and SQL recipes and a regression model.",
             variables={"llm_id": "openai:openai:gpt-6-luna"})
 p.wiki_home("Start here", (HERE / "wiki.md").read_text())
 
@@ -37,7 +38,7 @@ p.csv_dataset("accounts", DATA / "accounts.csv", [
 ], "10 corporate accounts: company, sector, balance today (end of Sep 2026), overdraft limit.", tags=["1-input"])
 p.csv_dataset("transactions", DATA / "transactions.csv", [
     col("txn_id"), col("account_id"), col("booking_date"), col("amount", F), col("direction"), col("category"),
-], "Every transaction Oct 2024 - Sep 2026 (CREDIT = money in, DEBIT = money out).", tags=["1-input"])
+], "Every transaction Oct 2023 - Sep 2026 (CREDIT = money in, DEBIT = money out).", tags=["1-input"])
 
 # 2. monthly net cash flow (Python) -----------------------------------------------------------
 p.pg_dataset("monthly_net", [col("account_id"), col("month", D), col("net", F)],

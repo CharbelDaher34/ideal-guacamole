@@ -216,6 +216,19 @@ class Project:
             "algorithm": algorithm, "params": params or {}, "interval": interval, "metric": metric,
             "description": description, "tags": self._use_tags(tags)}))
 
+    def timeseries_model(self, name, input_, target, time, ids, horizon, algorithms, env, metric="MASE",
+                         description="", tags=()):
+        """Time series forecasting model trained in a Lab analysis on input_ (one row per series and time
+        step), then the best algorithm on `metric` is deployed to the flow as saved model `name`.
+        ids: columns identifying each series; horizon: time steps to forecast (the last `horizon` steps of
+        each series are the test set); algorithms: {algorithm: {param: value}}, a list value is a grid of
+        values or, for option sets (ETS trend, ...), the options to enable; env: code env with the time
+        series packages (ensure_code_env)."""
+        self.recipes.append((f"train_{name}", [], "ml", {
+            "model": name, "train": input_, "test": "", "target": target, "time": time, "ids": list(ids),
+            "horizon": horizon, "algorithms": algorithms, "env": env, "metric": metric,
+            "description": description, "tags": self._use_tags(tags)}))
+
     def score_recipe(self, name, model, input_, output, description="", tags=()):
         """Score recipe: applies saved model `model` to input_ (adds the prediction columns)."""
         self.recipes.append((name, [output], "score", {
@@ -294,44 +307,55 @@ class Project:
 
     def _train_and_deploy(self, recipe, spec):
         k = self.key
+        timeseries = "horizon" in spec
         aid = _api("POST", "analysis/create", {"projectKey": k, "inputDatasetSmartName": spec["train"],
                                                "name": spec["model"]})["id"]
-        tid = _api("POST", "analysis/pml/create-and-guess", {
-            "projectKey": k, "analysisId": aid, "targetVariable": spec["target"], "mlBackendType": "PY_MEMORY",
-            "predictionType": "REGRESSION", "timeseriesIdentifiers": "[]", "guessPolicy": "DEFAULT",
-            "mlBackendName": ""})["id"]
+        guess = {"projectKey": k, "analysisId": aid, "targetVariable": spec["target"], "mlBackendType": "PY_MEMORY",
+                 "predictionType": "REGRESSION", "timeseriesIdentifiers": "[]", "guessPolicy": "DEFAULT",
+                 "mlBackendName": ""}
+        if timeseries:
+            guess.update({"predictionType": "TIMESERIES_FORECAST", "timeVariable": spec["time"],
+                          "timeseriesIdentifiers": json.dumps(spec["ids"]), "guessPolicy": "TIMESERIES_DEFAULT"})
+        tid = _api("POST", "analysis/pml/create-and-guess", guess)["id"]
         task = {"projectKey": k, "analysisId": aid, "mlTaskId": tid}
         _wait(lambda: not _api("GET", "analysis/pml/get-mltask-status", task).get("guessing"))
         s = _api("POST", "analysis/pml/get-updated-settings", task)
+        algorithms = spec["algorithms"] if timeseries else {spec["algorithm"]: spec["params"]}
         for algo, conf in s["modeling"].items():
             if isinstance(conf, dict) and "enabled" in conf:
-                conf["enabled"] = algo == spec["algorithm"]
-        algo = s["modeling"][spec["algorithm"]]
-        for p, v in spec["params"].items():
-            if isinstance(algo.get(p), dict) and "values" in algo[p]:
-                algo[p]["values"] = [v]
-            else:
-                algo[p] = v
+                conf["enabled"] = algo in algorithms
+        for algo, params in algorithms.items():
+            _set_params(s["modeling"][algo], params)
         s["modeling"]["metrics"]["evaluationMetric"] = spec["metric"]
-        for c in spec["reject"]:
-            s["preprocessing"]["per_feature"][c]["role"] = "REJECT"
-        full = {"samplingMethod": "FULL", "partitionSelectionMethod": "ALL", "maxRecords": -1,
-                "filter": {"enabled": False, "distinct": False}}
-        s["splitParams"].update({"ttPolicy": "EXPLICIT_FILTERING_TWO_DATASETS",
-                                 "eftdTrain": {"datasetSmartName": spec["train"], "selection": full},
-                                 "eftdTest": {"datasetSmartName": spec["test"], "selection": full}})
-        if spec["interval"]:
-            s["uncertainty"].update({"predictionIntervalsEnabled": True,
-                                     "predictionIntervalsCoverage": spec["interval"]})
+        if timeseries:
+            s["predictionLength"] = spec["horizon"]
+            s["evaluationParams"] = {"gapSize": 0, "testSize": spec["horizon"]}
+            s["envSelection"] = {"envMode": "EXPLICIT_ENV", "envName": spec["env"]}
+        else:
+            for c in spec["reject"]:
+                s["preprocessing"]["per_feature"][c]["role"] = "REJECT"
+            full = {"samplingMethod": "FULL", "partitionSelectionMethod": "ALL", "maxRecords": -1,
+                    "filter": {"enabled": False, "distinct": False}}
+            s["splitParams"].update({"ttPolicy": "EXPLICIT_FILTERING_TWO_DATASETS",
+                                     "eftdTrain": {"datasetSmartName": spec["train"], "selection": full},
+                                     "eftdTest": {"datasetSmartName": spec["test"], "selection": full}})
+            if spec["interval"]:
+                s["uncertainty"].update({"predictionIntervalsEnabled": True,
+                                         "predictionIntervalsCoverage": spec["interval"]})
         _api("POST", "analysis/pml/save-settings", {"projectKey": k, "analysisId": aid, "mlTask": json.dumps(s)})
         _api("POST", "analysis/pml/train-start", {**task, "userSessionName": "", "userSessionDescription": "",
                                                  "forceRefresh": "true", "runQueue": "false"})
         status = _wait(lambda: (lambda st: st if not st.get("training") and st.get("fullModelIds") else None)(
             _api("GET", "analysis/pml/get-mltask-status", task)), timeout=1800)
-        model_id = status["fullModelIds"][0]["id"]
-        snippet = _api("GET", "analysis/pml/get-model-snippets", {**task, "fullModelIds": json.dumps([model_id])})
-        if snippet[model_id].get("trainInfo", {}).get("state") != "DONE":
-            raise SystemExit(f"training {spec['model']} failed: {json.dumps(snippet[model_id].get('trainInfo'))[:800]}")
+        ids = [m["id"] for m in status["fullModelIds"]]
+        snippets = _api("GET", "analysis/pml/get-model-snippets", {**task, "fullModelIds": json.dumps(ids)})
+        for i in ids:
+            sn = snippets[i]
+            if sn.get("trainInfo", {}).get("state") != "DONE":
+                raise SystemExit(f"training {spec['model']} ({sn.get('algorithm')}) failed: "
+                                 f"{json.dumps(sn.get('trainInfo'))[:800]}")
+            print(f"    {sn.get('algorithm')}: {spec['metric']} {sn.get(spec['metric'].lower()):.3f}")
+        model_id = min(ids, key=lambda i: snippets[i][spec["metric"].lower()])   # error metrics: lower is better
         r = _api("POST", "analysis/pml/flow/deploy-train", {
             "fullModelId": model_id, "trainDatasetSmartName": spec["train"], "testDatasetSmartName": spec["test"],
             "modelName": spec["model"], "managedFolderSmartId": "", "options": json.dumps({"redoOptimization": False})})
@@ -368,6 +392,36 @@ class Project:
                     "newSchema": json.dumps(c["newSchema"]), "dropAndRecreate": "true", "synchronizeMetastore": "false"})
 
 
+def ensure_code_env(name, preset="DOCTOR", interpreter="PYTHON312", core="PANDAS22"):
+    """Create a DSS-managed Python code env with one of DSS's package presets (Administration > Code envs >
+    Add sets of packages), unless it already exists. DOCTOR = Visual ML + time series forecasting (CPU)."""
+    _login()
+    if any(e.get("envName") == name for e in _api("GET", "code-envs/design/list")):
+        return
+    print(f"  creating code env {name} ({preset}), a few minutes")
+    _future(_api("POST", "code-envs/design/create", {"envLang": "PYTHON", "envSpec": json.dumps({
+        "envLang": "PYTHON", "envName": name, "deploymentMode": "DESIGN_MANAGED", "pythonInterpreter": interpreter,
+        "conda": False, "installCorePackages": True, "corePackagesSet": core, "installJupyterSupport": False})}))
+    presets = _api("GET", "code-envs/design/package-presets/python",
+                   {"interpreter": interpreter, "useConda": "false", "corePackageSet": core})
+    env = _api("GET", "code-envs/design/get", {"envLang": "PYTHON", "envName": name})
+    env["specPackageList"] = "\n".join(next(p for p in presets if p["id"] == preset)["packages"])
+    _api("POST", "code-envs/design/save", {"envLang": "PYTHON", "envName": name, "data": json.dumps(env)})
+    _future(_api("POST", "code-envs/design/update", {"envLang": "PYTHON", "envName": name, "updateSettings": json.dumps(
+        {"upgradeAllPackages": False, "updateResources": False, "forceRebuildEnv": False})}))
+
+
+def _future(started, timeout=3600):
+    """Wait for a DSS long-running task (code env creation, ...) and fail on error."""
+    fid = started["jobId"]
+    done = _wait(lambda: (lambda u: u if not u.get("alive") else None)(
+        _api("GET", "futures/get-update", {"futureId": fid})), timeout=timeout, every=10)
+    messages = (done.get("result") or {}).get("messages", {})
+    if done.get("aborted") or done.get("unexpectedError") or messages.get("error"):
+        raise SystemExit(f"DSS task failed: {json.dumps(done)[:1500]}")
+    return done
+
+
 def _wait(check, timeout=600, every=3):
     """Poll check() until it returns something truthy."""
     end = time.time() + timeout
@@ -377,6 +431,20 @@ def _wait(check, timeout=600, every=3):
             return result
         time.sleep(every)
     raise SystemExit("timed out waiting for DSS")
+
+
+def _set_params(algo, params):
+    """Algorithm hyperparameters as the UI stores them: a grid of values, a set of options to enable, or a
+    plain value."""
+    for p, v in params.items():
+        values = algo.get(p, {}).get("values") if isinstance(algo.get(p), dict) else None
+        if isinstance(values, dict):                       # option set, e.g. ETS trend: add / mul / none
+            for option, conf in values.items():
+                conf["enabled"] = option in v
+        elif values is not None:                           # grid of values
+            values[:] = v if isinstance(v, list) else [v]
+        else:
+            algo[p] = v
 
 
 def _computed(columns):

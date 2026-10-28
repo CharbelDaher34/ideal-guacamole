@@ -1,11 +1,13 @@
 ## What this project does
 
-The **scripted** version of `CORP_CASHFLOW`: same data, same goal (forecast each account's net cash flow
-for next month, flag liquidity risk, have an LLM write a note), built with **Python and SQL recipes**
-instead of visual recipes and Visual ML. Open both projects side by side to compare; they give the same
-forecasts.
+The **scripted** version of `CORP_CASHFLOW`: same data, close goal (forecast each account's net cash flow
+for next month, flag liquidity risk, have an LLM write a note), built with **Python and SQL recipes**.
 
-Data is synthetic: 10 companies, 24 months of transactions (Oct 2024 - Sep 2026). Forecast: **Oct 2026**.
+It also uses another way to forecast: a **regression**. The features are built by hand (this month, 3-month
+average, same month last year) and a model learns next month's value from them. `CORP_CASHFLOW` uses
+Dataiku's **time series forecasting** instead, where the algorithms find trend and seasonality themselves.
+
+Data is synthetic: 10 companies, 36 months of transactions (Oct 2023 - Sep 2026). Forecast: **Oct 2026**.
 
 ## The flow, left to right
 
