@@ -1,7 +1,9 @@
 # Training: test the model on the last `horizon_days` known days against three simple baselines, then retrain
 # it on the full history and save it to the forecast_model folder, with the 10% / 90% quantile models that
-# give the range. Run by the "Train model" scenario; the daily forecast reuses the saved model.
+# give the range, and model_info.json (when, how good, for which horizon), read by the daily model check.
+# Run by the "Train model" scenario; the daily forecast reuses the saved model.
 import pickle
+import time
 
 import dataiku
 import pandas as pd
@@ -45,4 +47,7 @@ models = {column: model(quantile).fit(train[FEATURES], train["amount"])
           for column, quantile in {"forecast": None, "forecast_low": 0.1, "forecast_high": 0.9}.items()}
 with dataiku.Folder("forecast_model").get_writer("model.pkl") as w:
     pickle.dump({"models": models, "horizon": HORIZON, "trained_until": str(history["date"].max().date())}, w)
+dataiku.Folder("forecast_model").write_json("model_info.json", {
+    "trained_at": time.time(), "horizon": HORIZON, "trained_until": str(history["date"].max().date()),
+    "mase": float(evaluation.loc[evaluation["method"] == "Gradient boosting", "mase"].iloc[0])})
 dataiku.Dataset("model_evaluation").write_with_schema(evaluation)

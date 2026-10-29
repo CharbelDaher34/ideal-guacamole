@@ -77,10 +77,16 @@ importable from every Python recipe. All recipes take `description=` and `tags=`
 `wiki_home` and `Project(..., variables={...})` for the wiki and project variables.
 
 Training and inference in one project: `zone(name, tags=, items=, shared=)` groups the items with those tags
-into a flow zone (`shared` = inputs from another zone, shown in both), and `scenario(name, [(step name,
-[items], build mode)])` saves a list of builds to run from the Scenarios tab (the Free Edition has no
-time-based triggers; `dsscli scenario-run KEY SCENARIO_ID` from a cron). Zones and scenarios are created at
-the end of `deploy()`, once the saved models exist.
+into a flow zone (`shared` = inputs from another zone, shown in both), and `scenario(name, steps)` saves a list
+of steps to run from the Scenarios tab: `build_step(name, items, mode, zone_only=)`, `rules_step`,
+`metrics_step`, `python_step` (raise to stop the scenario), `scenario_step` (run another one). The Free Edition
+has no time-based triggers; `dsscli scenario-run KEY SCENARIO_ID` from a cron. Zones and scenarios are created
+at the end of `deploy()`, once the saved models exist.
+
+Checks and results: `data_quality(dataset, rules)` with `rule_record_count`, `rule_not_empty`, `rule_unique`,
+`rule_python`; `metrics(dataset, python=, names=)` (record count + a Python probe, ids from `python_metric`);
+`dashboard(name, [(tile, (left, top, width, height))])` with `tile_text`, `tile_table`, `tile_chart`,
+`tile_metric`, `tile_scenario` on a 36-column grid.
 Formulas are Dataiku formulas (GREL); on PostgreSQL they are translated to SQL, so build text
 with `concat(...)`. Column types: `string`, `bigint`, `int`, `double`, `boolean`, `date` (timestamp), `dateonly` (a day, e.g.
 `2026-09-30` in a CSV).

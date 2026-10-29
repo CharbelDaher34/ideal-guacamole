@@ -25,13 +25,30 @@ The trained model is saved in the managed folder `forecast_model`, whose rebuild
 building `account_outlook` scores with the saved model and never retrains it. The training and the scoring
 recipes compute the features with the same code, `library/cashflow_model.py` (the project library).
 
-Two scenarios (Scenarios tab > Run):
+Three scenarios (Scenarios tab > Run), one per zone; each builds only its own zone:
 
-- **Train model**: rebuild `daily_flows`, then test, retrain and save the model.
-- **Daily forecast**: rebuild `account_outlook` and everything upstream with the saved model.
+| Scenario | Steps |
+|---|---|
+| **Prepare data** | 1. check the inputs (data quality rules); 2. rebuild the Data prep zone |
+| **Train model** | 1. run *Prepare data*; 2. retrain the model (Training zone) |
+| **Daily forecast** | 1. run *Prepare data*; 2. **check the model**; 3. forecast, balance path, outlook (Inference zone); 4. compute the outlook metrics |
 
-The Free Edition has no time-based triggers: run them by hand, or from a cron with
-`dsscli scenario-run CORP_CASHFLOW_CODE DAILY_FORECAST`.
+- **Input checks** (dataset > Data Quality): `transactions` not empty, no empty field, one row per
+  `txn_id`, only known accounts and up to the balances' date (yesterday's data is in); `accounts` one row
+  per account, balance and limit filled, one balance date; `calendar` one row per day, covers the days to
+  forecast. A rule in error stops the scenario.
+- **Model check**: `forecast_model/model_info.json` (written by the training recipe) exists, was trained in the last 45 days, has a test MASE below 1
+  (better than "same as the day before") and forecasts `horizon_days` days; otherwise the scenario stops
+  with the reason.
+- **Metrics** on `account_outlook` (dataset > Metrics, with history): HIGH and MEDIUM accounts, lowest
+  balance ahead, row count.
+- **Dashboard** "Cash-flow outlook": run buttons, the metrics, lowest balance per company, balance per
+  day, the outlook table.
+
+The Free Edition has no time-based triggers: run them by hand, from the dashboard buttons, or from a cron
+with `dsscli scenario-run CORP_CASHFLOW_CODE DAILY_FORECAST`.
+
+The rules, metrics and dashboard are shared with CORP_CASHFLOW (`../corporate_cashflow/quality.py`).
 
 | File | What |
 |---|---|
@@ -66,6 +83,7 @@ same day last month 0.92, last known day 0.92, same weekday of the last known we
 | Model | scikit-learn `HistGradientBoostingRegressor` (+ 10% / 90% quantile models) | best of 9 time series algorithms (DeepAR, ETS, Prophet, LightGBM...) |
 | Horizon | 30 days | 30 days |
 | Saved model | pickle in a managed folder | Visual ML saved model (versions, active version) |
-| Zones, scenarios | Data prep / Training / Inference; Train model, Daily forecast | the same |
+| Zones, scenarios | Data prep / Training / Inference; Prepare data, Train model, Daily forecast | the same |
+| Model check | `model_info.json` in the folder | the saved model's active version |
 
 **Re-running `create_project.py` deletes and re-creates the project.**

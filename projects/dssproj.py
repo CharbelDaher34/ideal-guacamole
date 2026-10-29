@@ -290,11 +290,58 @@ class Project:
         self.zones.append((name, items, list(shared), color or TAG_COLORS[len(self.zones) % len(TAG_COLORS)]))
 
     def scenario(self, name, steps, description=""):
-        """Scenario (Scenarios tab, Run button): its steps run in order, each builds a list of items (by name).
-        steps: [(step name, [items], mode)]; mode "RECURSIVE_FORCED_BUILD" = the items and everything upstream
-        except explicit items, "NON_RECURSIVE_FORCED_BUILD" = only the items (retrains a saved model),
-        "RECURSIVE_BUILD" = what is out of date. No trigger: the Free Edition has no time-based triggers."""
+        """Scenario (Scenarios tab, Run button): its steps run in order and the scenario stops at the first
+        failed one. steps: build_step, rules_step, metrics_step, python_step, scenario_step (below). Its id is
+        the name in capitals (Daily forecast -> DAILY_FORECAST). No trigger: the Free Edition has none."""
         self.scenarios.append((name, description, steps))
+
+    # ---- data quality and metrics (dataset > Data Quality / Metrics tabs) ----
+    def data_quality(self, dataset, rules):
+        """Data quality rules of a dataset (rule_record_count, rule_not_empty, rule_unique, rule_python below).
+        They run after each build of the dataset and in a scenario's rules_step, which fails on an error."""
+        self._dataset_update(dataset, {"metricsChecks": {"monitor": True, "checks": list(rules),
+                                                         "displayedState": {"checks": [r["id"] for r in rules]}}})
+
+    def metrics(self, dataset, python=None, names=()):
+        """Metrics computed after each build of the dataset (and in a metrics_step), kept with their history:
+        the record count, plus python = code of `def process(dataset, partition_id)` returning {name: value}
+        for the `names` (metric ids python:<name>:Python probe, see python_metric)."""
+        probes = [{"type": "records", "enabled": True, "computeOnBuildMode": "PARTITION",
+                   "meta": {"name": "Record count", "level": 0}, "configuration": {}}]
+        if python:
+            probes.append({"type": "python", "enabled": True, "computeOnBuildMode": "PARTITION",
+                           "meta": {"name": "Python probe", "level": 1},
+                           "configuration": {"code": python.strip() + "\n", "envSelection": {"envMode": "INHERIT"}}})
+        self._dataset_update(dataset, {"metrics": {"probes": probes, "engineConfig": {}, "displayedState": {
+            "partition": "NP", "columns": [], "metrics": ["records:COUNT_RECORDS", *map(python_metric, names)]}}})
+
+    def _dataset_update(self, name, fields):
+        path = f"project_config/datasets/{name}.json"
+        self._json(path, {**json.loads(self.files[path]), **fields})
+
+    # ---- dashboards (Dashboards tab): tiles from the tile_* helpers below ----
+    def dashboard(self, name, tiles):
+        """Dashboard of one page; tiles: [(tile helper result, (left, top, width, height))] on a 36-column grid."""
+        did = re.sub(r"\W", "", name.lower())[:20]
+        grid = []
+        for n, (tile, (left, top, width, height)) in enumerate(tiles):
+            tile = dict(tile)
+            insight = tile.pop("insight", None)
+            if insight:
+                iid = f"{did}{n}"
+                self._json(f"project_config/insights/{iid}.json", {
+                    **insight, "owner": "admin", "listed": False, "dashboardCreationId": did, "tags": [],
+                    "creationTag": _tag(), "versionTag": _tag()})
+                tile.update({"insightId": iid, "insightType": insight["type"]})
+            grid.append({**tile, "id": f"{did}-tile-{n}", "box": {"left": left, "top": top, "width": width,
+                                                                   "height": height},
+                         "autoLoad": True, "resizeImageMode": "FIT_SIZE", "displayMode": "INSIGHT",
+                         "borderOptions": {"color": "#D9D9D9", "radius": 0, "size": 1}})
+        self._json(f"project_config/dashboards/{did}.json", {
+            "name": name, "owner": "admin", "listed": True, "columnNumber": 36, "showGrid": True, "tags": [],
+            "creationTag": _tag(), "versionTag": _tag(),
+            "pages": [{"id": "page1", "title": name, "showTitle": False, "enableCrossFilters": True,
+                       "filtersParams": {"panelPosition": "TOP"}, "grid": {"tiles": grid}}]})
 
     # ---- wiki -----------------------------------------------------------
     def wiki_home(self, title, markdown):
@@ -471,20 +518,35 @@ class Project:
 
     def _create_scenarios(self):
         for name, description, steps in self.scenarios:
-            sid = re.sub(r"\W", "_", name.upper())
             sc = _api("GET", "scenarios/create", {"projectKey": self.key, "data": json.dumps(
-                {"id": sid, "name": name, "type": "step_based", "params": {}})})
+                {"id": scenario_id(name), "name": name, "type": "step_based", "params": {}})})
             sc.update({"name": name, "type": "step_based", "description": description, "shortDesc": description,
                        "active": False, "triggers": [],
-                       "params": {"steps": [{
-                           "id": f"step_{n}", "type": "build_flowitem", "name": step_name, "enabled": True,
-                           "runConditionType": "RUN_IF_STATUS_MATCH", "runConditionStatuses": ["SUCCESS", "WARNING"],
-                           "params": {"builds": [{"type": self.kinds[i], "itemId": self._item_ref(i)["id"],
-                                                  "partitionsSpec": ""} for i in items],
-                                      "jobType": mode, "handleWarningsAs": "WARNING", "proceedOnFailure": False}}
-                           for n, (step_name, items, mode) in enumerate(steps)]}})
+                       "params": {"steps": [self._step(n, *st) for n, st in enumerate(steps)]}})
             _api("POST", "scenarios/save", {"projectKey": self.key, "data": json.dumps(sc), "scriptData": "",
                                             "saveInfo": json.dumps({"commitMessage": "created by dssproj"})})
+
+    def _step(self, n, kind, name, *args):
+        def items(names):
+            return [{"type": self.kinds[i], "itemId": self._item_ref(i)["id"], "partitionsSpec": ""} for i in names]
+        params = {"proceedOnFailure": False, "handleWarningsAs": "WARNING"}
+        if kind == "build":
+            names, mode, zone_only = args
+            type_, params = "build_flowitem", {**params, "builds": items(names), "jobType": mode,
+                                               "stopAtFlowZoneBoundary": zone_only}
+        elif kind == "rules":
+            type_, params = "check_dataset", {**params, "checks": items(args[0]), "computeAutomaticRules": True,
+                                              "ignorePartitionSelectionMode": True}
+        elif kind == "metrics":
+            type_, params = "compute_metrics", {**params, "computes": items(args[0])}
+        elif kind == "python":
+            type_, params = "custom_python", {**params, "script": args[0].strip() + "\n",
+                                              "envSelection": {"envMode": "INHERIT"}}
+        else:
+            type_, params = "run_scenario", {**params, "projectKey": self.key, "scenarioId": scenario_id(args[0])}
+        return {"id": f"step_{n}", "type": type_, "name": name, "enabled": True,
+                "runConditionType": "RUN_IF_STATUS_MATCH", "runConditionStatuses": ["SUCCESS", "WARNING"],
+                "params": params}
 
     def _update_schema(self, recipe):
         result = _api("GET", "flow/recipes/get-schema-update-result", {"projectKey": self.key, "recipeName": recipe})
@@ -552,6 +614,129 @@ def _set_params(algo, params):
 
 def _computed(columns):
     return [{"name": n, "type": t, "expr": e, "mode": "GREL"} for n, (t, e) in (columns or {}).items()]
+
+
+def python_metric(name):
+    """Id of a metric returned by a Project.metrics python probe."""
+    return f"python:{name}:Python probe"
+
+
+def scenario_id(name):
+    return re.sub(r"\W", "_", name.upper())
+
+
+# ---- scenario steps (items by name) ---------------------------------------------
+def build_step(name, items, mode="RECURSIVE_FORCED_BUILD", zone_only=False):
+    """Build items. mode: "RECURSIVE_FORCED_BUILD" = the items and everything upstream except explicit items
+    (with zone_only: only what is in the items' flow zone), "NON_RECURSIVE_FORCED_BUILD" = only the items
+    (retrains a saved model), "RECURSIVE_BUILD" = what is out of date."""
+    return ("build", name, list(items), mode, zone_only)
+
+
+def rules_step(name, datasets):
+    """Run the data quality rules of these datasets; the scenario stops if one is in error."""
+    return ("rules", name, list(datasets))
+
+
+def metrics_step(name, datasets):
+    """Compute the metrics of these datasets (kept with their history)."""
+    return ("metrics", name, list(datasets))
+
+
+def python_step(name, code):
+    """Run Python (dataiku package available); raising an exception fails the step and stops the scenario."""
+    return ("python", name, code)
+
+
+def scenario_step(name, scenario):
+    """Run another scenario of the project (by name) and wait for it; fails if it fails."""
+    return ("scenario", name, scenario)
+
+
+# ---- data quality rules (Project.data_quality) ---------------------------------
+def _rule(name, type_, **fields):
+    return {"id": name, "displayName": name, "type": type_, "autoRun": True, "enabled": True,
+            "computeOnBuildMode": "PARTITION", "autoRename": False, **fields}
+
+
+def rule_record_count(name, minimum=None, maximum=None):
+    """The number of rows is between minimum and maximum (None = no limit)."""
+    return _rule(name, "RecordCountInRangeRule", minimum=minimum or 0, minimumEnabled=minimum is not None,
+                 maximum=maximum or 0, maximumEnabled=maximum is not None, softMinimumEnabled=False,
+                 softMaximumEnabled=False)
+
+
+def rule_not_empty(name, *columns):
+    """No empty value in these columns."""
+    return _rule(name, "ColumnNotEmptyRule", columns=list(columns), thresholdType="ENTIRE_COLUMN_NOT_EMPTY")
+
+
+def rule_unique(name, *columns):
+    """Every value of these columns is unique."""
+    return _rule(name, "ColumnUniqueValuesRule", columns=list(columns), thresholdType="ENTIRE_COLUMN")
+
+
+def rule_python(name, code):
+    """Custom rule: code of `def process(last_values, dataset, partition_id)` returning ('OK' | 'WARNING' |
+    'ERROR', message)."""
+    return _rule(name, "python", code=code.strip() + "\n", envSelection={"envMode": "INHERIT"})
+
+
+# ---- dashboard tiles (Project.dashboard) -----------------------------------------
+def tile_text(markdown):
+    return {"tileType": "TEXT", "tileParams": {"text": markdown.strip(), "textAlign": "LEFT"},
+            "titleOptions": {"showTitle": "NO"}, "clickAction": "DO_NOTHING"}
+
+
+def tile_table(title, dataset):
+    """The rows of a dataset."""
+    return {"tileType": "INSIGHT", "clickAction": "OPEN_INSIGHT", "titleOptions": {"showTitle": "YES"},
+            "tileParams": {"showName": True, "showDescription": False, "viewKind": "EXPLORE"},
+            "insight": {"type": "dataset_table", "name": title, "params": {
+                "datasetSmartName": dataset, "shakerScript": {"steps": [], "columnsSelection": {"mode": "ALL"},
+                                                              "sorting": [], "explorationFilters": []}}}}
+
+
+def tile_chart(title, dataset, kind, x, measures, subgroup=None, date_x=False):
+    """Chart of a dataset: kind "lines" or "grouped_columns"; x: column on the X axis (date_x: by day);
+    measures: columns shown as their average; subgroup: one line / bar color per value of this column."""
+    def dimension(column, date):
+        d = {"column": column, "isA": "dimension", "filters": [], "maxValues": 100, "generateOthersCategory": False,
+             "oneTickPerBin": "NO", "numParams": {"emptyBinsMode": "ZEROS"},
+             "sort": {"type": "NATURAL", "label": "Natural ordering", "sortAscending": True}}
+        return {**d, "type": "DATE", "dateParams": {"mode": "DAY"}} if date else {**d, "type": "ALPHANUM"}
+    chart = {"type": kind, "variant": "normal", "name": title, "userEditedName": True,
+             "genericDimension0": [dimension(x, date_x)],
+             "genericDimension1": [dimension(subgroup, False)] if subgroup else [],
+             "genericMeasures": [{"column": m, "function": "AVG", "type": "NUMERICAL", "isA": "measure",
+                                  "displayed": True, "displayAxis": "axis1", "displayType": "column",
+                                  "computeMode": "NORMAL", "computeModeDim": 0} for m in measures],
+             "filters": [], "showLegend": True, "showXAxis": True, "includeZero": True, "smoothing": False,
+             "strokeWidth": 2, "computeMode": "NORMAL", "xAxisMode": "NORMAL", "yAxisMode": "NORMAL",
+             "colorOptions": {"singleColor": "#2678B1", "transparency": 0.9, "colorPalette": "default"}}
+    return {"tileType": "INSIGHT", "clickAction": "OPEN_INSIGHT", "titleOptions": {"showTitle": "YES"},
+            "tileParams": {"showLegend": True, "showTooltips": True, "showXAxis": True, "showYAxis": True},
+            "insight": {"type": "chart", "name": title, "params": {
+                "datasetSmartName": dataset, "def": chart, "engineType": "LINO", "refreshableSelection": {
+                    "autoRefreshSample": True, "_refreshTrigger": 0, "selection": {
+                        "samplingMethod": "FULL", "partitionSelectionMethod": "ALL", "maxRecords": -1,
+                        "filter": {"enabled": False, "distinct": False}}}}}}
+
+
+def tile_metric(title, dataset, metric_id):
+    """The last value of a dataset metric (e.g. records:COUNT_RECORDS, python:<name>)."""
+    return {"tileType": "INSIGHT", "clickAction": "OPEN_INSIGHT", "titleOptions": {"showTitle": "YES"},
+            "tileParams": {"displayMode": "LAST_VALUE"},
+            "insight": {"type": "metrics", "name": title, "params": {
+                "objectType": "DATASET", "objectSmartId": dataset, "metricId": metric_id}}}
+
+
+def tile_scenario(title, scenario):
+    """A button that runs a scenario."""
+    return {"tileType": "INSIGHT", "clickAction": "DO_NOTHING", "titleOptions": {"showTitle": "YES"},
+            "tileParams": {},
+            "insight": {"type": "scenario_run_button", "name": title,
+                        "params": {"scenarioSmartId": scenario_id(scenario)}}}
 
 
 def _filter(expression):

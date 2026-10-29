@@ -7,16 +7,19 @@ model (gradient boosting) instead of Dataiku's time series forecasting.
 
 Recipe code lives in recipes/ (.py = Python recipe, .sql = SQL recipe run inside PostgreSQL), the code
 shared by training and scoring in library/ (the project library), the project wiki in wiki.md.
-The Flow has three zones (Data prep, Training, Inference) and two scenarios: "Train model" retrains and
-saves the model, "Daily forecast" scores the latest data with it.
+The Flow has three zones (Data prep, Training, Inference), each run by its own scenario (Prepare data,
+Train model, Daily forecast), with data quality rules on the inputs, a check of the model before
+forecasting, metrics on the outlook and a dashboard (shared with CORP_CASHFLOW: ../corporate_cashflow/quality.py).
 """
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE.parent / "corporate_cashflow" / "data"
-sys.path.insert(0, str(HERE.parent))
-from dssproj import Project, col  # noqa: E402
+sys.path[:0] = [str(HERE.parent), str(HERE.parent / "corporate_cashflow")]
+from dssproj import (Project, build_step, col, metrics_step, python_step, rules_step, scenario_step,  # noqa: E402
+                     tile_table)
+from quality import INPUTS, OUTLOOK_METRIC_NAMES, OUTLOOK_METRICS, add_input_rules, outlook_dashboard  # noqa: E402
 
 D, F, I = "dateonly", "double", "int"
 CALENDAR = [col(c, I) for c in ("day_of_month", "day_of_week", "is_weekend", "is_month_start", "is_month_end")]
@@ -107,14 +110,52 @@ p.zone("Data prep", tags=["1-input", "2-clean", "3-daily"])
 p.zone("Training", tags=["4-train"], shared=["daily_flows"])
 p.zone("Inference", tags=["5-forecast", "6-outlook"], shared=["daily_flows", "forecast_model", "accounts"])
 
-# Scenarios (Scenarios tab > Run): retrain now and then; forecast every day once yesterday's data is in.
+# Checks: data quality rules on the inputs, metrics on the outlook ----------------------------------
+add_input_rules(p)
+p.metrics("account_outlook", python=OUTLOOK_METRICS, names=OUTLOOK_METRIC_NAMES)
+
+# Before forecasting: the model exists, is recent, beats "same as the day before" and fits horizon_days.
+MODEL_CHECK = """
+import time
+
+import dataiku
+
+MAX_AGE_DAYS, MAX_MASE = 45, 1.0
+folder = dataiku.Folder("forecast_model")
+horizon = int(dataiku.get_custom_variables()["horizon_days"])
+if "/model_info.json" not in folder.list_paths_in_partition():
+    raise Exception("No trained model in forecast_model: run the Train model scenario.")
+info = folder.read_json("model_info.json")
+age_days = (time.time() - info["trained_at"]) / 86400
+if age_days > MAX_AGE_DAYS:
+    raise Exception(f"The model was trained {age_days:.0f} days ago (limit {MAX_AGE_DAYS}): run Train model.")
+if info["mase"] >= MAX_MASE:
+    raise Exception(f"The model's MASE is {info['mase']:.2f}: no better than 'same as the day before'.")
+if info["horizon"] != horizon:
+    raise Exception(f"The model forecasts {info['horizon']} days, horizon_days is {horizon}: run Train model.")
+print(f"Model OK: trained {age_days:.1f} days ago, MASE {info['mase']:.3f}, {info['horizon']} days ahead")
+"""
+
+# Scenarios (Scenarios tab > Run): one per zone; each builds only its own zone ---------------------
+p.scenario("Prepare data", [
+    rules_step("Check the inputs", INPUTS),
+    build_step("Build the data prep zone", ["daily_flows"], zone_only=True),
+], description="Check the inputs (data quality rules), then rebuild the Data prep zone.")
 p.scenario("Train model", [
-    ("Rebuild the training data", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
-    ("Test, retrain and save the model", ["forecast_model"], "NON_RECURSIVE_FORCED_BUILD"),
+    scenario_step("Prepare the latest data", "Prepare data"),
+    build_step("Test, retrain and save the model (Training zone)", ["forecast_model"], zone_only=True),
 ], description="Test and retrain the model on the latest history and save it to forecast_model.")
 p.scenario("Daily forecast", [
-    ("Prepare the latest data, forecast, balance path and outlook", ["account_outlook"], "RECURSIVE_FORCED_BUILD"),
+    scenario_step("Prepare the latest data", "Prepare data"),
+    python_step("Check the model", MODEL_CHECK),
+    build_step("Forecast, balance path and outlook (Inference zone)", ["account_outlook"], zone_only=True),
+    metrics_step("Compute the outlook metrics", ["account_outlook"]),
 ], description="Forecast the next 30 days with the saved model (the model is not retrained).")
+
+outlook_dashboard(p, extra=[
+    (tile_table("Model vs baselines on the last 30 known days (MASE < 1 = better than the day before)",
+                "model_evaluation"), (0, 28, 36, 7)),
+])
 
 if __name__ == "__main__":
     p.deploy()

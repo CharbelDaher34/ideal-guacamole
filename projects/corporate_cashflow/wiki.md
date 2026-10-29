@@ -13,7 +13,7 @@ and Visual ML.
 
 | Zone | What | Run by |
 |---|---|---|
-| **Data prep** | From the raw transactions to `daily_flows_scoring`: every series and day, history + the 30 days to forecast | both scenarios |
+| **Data prep** | From the raw transactions to `daily_flows_scoring`: every series and day, history + the 30 days to forecast | **Prepare data** (also the first step of the two others) |
 | **Training** | `daily_flows` (history only) -> the Visual ML model -> saved model `cashflow_forecast_model` | **Train model** |
 | **Inference** | The saved model scores `daily_flows_scoring` -> forecast -> balance path -> `account_outlook` | **Daily forecast** |
 
@@ -109,17 +109,39 @@ far too pessimistic.
 `account_outlook` gives, per account: opening and closing balance, totals in and out, the **lowest balance
 and its date**, the pessimistic lowest balance and the risk level.
 
-## Scenarios: training and inference (Scenarios tab > Run)
+## Scenarios, checks and dashboard
 
-| Scenario | When | Steps |
-|---|---|---|
-| **Daily forecast** | every day, once yesterday's data is in | Rebuild `account_outlook` and everything upstream: data prep, score with the active model, balance path, outlook. The model is not retrained. |
-| **Train model** | monthly, or when the forecasts get worse | 1. rebuild `daily_flows`; 2. retrain the saved model (the deployed algorithm, on the latest history): a new version, made active. |
+Three scenarios (Scenarios tab > Run), one per zone; each builds only its own zone:
+
+| Scenario | Steps |
+|---|---|
+| **Prepare data** | 1. check the inputs (data quality rules); 2. rebuild the Data prep zone |
+| **Train model** | 1. run *Prepare data*; 2. retrain the model (Training zone) |
+| **Daily forecast** | 1. run *Prepare data*; 2. **check the model**; 3. forecast, balance path, outlook (Inference zone); 4. compute the outlook metrics |
+
+- **Input checks** (dataset > Data Quality): `transactions` not empty, no empty field, one row per
+  `txn_id`, only known accounts and up to the balances' date (yesterday's data is in); `accounts` one row
+  per account, balance and limit filled, one balance date; `calendar` one row per day, covers the days to
+  forecast. A rule in error stops the scenario.
+- **Model check**: the saved model's active version exists, was trained in the last 45 days, has a test MASE below 1
+  (better than "same as the day before") and forecasts `horizon_days` days; otherwise the scenario stops
+  with the reason.
+- **Metrics** on `account_outlook` (dataset > Metrics, with history): HIGH and MEDIUM accounts, lowest
+  balance ahead, row count.
+- **Dashboard** "Cash-flow outlook": run buttons, the metrics, lowest balance per company, balance per
+  day, the outlook table.
+
+The Free Edition has no time-based triggers: run them by hand, from the dashboard buttons, or from a cron
+with `dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`.
 
 Retraining reuses the deployed algorithm and its settings; to compare algorithms again, train in the Lab
-and redeploy. Older versions stay in the saved model: open it to compare them or roll back. The Free
-Edition has no time-based triggers; a cron on the server can run
-`dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`.
+and redeploy. Older versions stay in the saved model: open it to compare them or roll back.
+
+## The horizon: project variable `horizon_days`
+
+**... > Variables**: `horizon_days` = 30, read by `prepare_daily_flows` as `${horizon_days}` and by the
+checks. The model's own horizon is set in the Lab (Design > Forecasting parameters): change both, then
+retrain; the model check stops the forecast while they differ.
 
 ## Things to try (in the Lab analysis)
 
@@ -127,4 +149,5 @@ Edition has no time-based triggers; a cron on the server can run
 - **Design > Train / Test set**: switch to **K-fold cross-test** (several test windows) for steadier metrics.
 - **Design > External features**: remove one and see which models get worse.
 - **Design > Algorithms**: ARIMA orders, LightGBM trees, epochs of the neural networks.
-- Chart `daily_balance_path`: X = `date`, Y = `balance` and `pessimistic_balance`, subgroup by `account_id`.
+- **Dashboards > Cash-flow outlook**: edit a chart, add `pessimistic_balance` to the balance chart.
+- Break a rule: upload a `transactions` CSV that stops a day early, run *Prepare data*, read the error.

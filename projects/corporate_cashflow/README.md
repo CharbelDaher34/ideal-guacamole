@@ -37,14 +37,30 @@ Inference   daily_flows_scoring + cashflow_forecast_model ─[Score]─► score
             daily_balance_path ─[Group]─► account_lowest ─[Join: day of the lowest + accounts]─► ─[Prepare: risk]─► account_outlook
 ```
 
-Two scenarios (Scenarios tab > Run):
+Three scenarios (Scenarios tab > Run), one per zone; each builds only its own zone:
 
-- **Train model**: rebuild `daily_flows`, retrain the saved model: a new active version.
-- **Daily forecast**: rebuild `account_outlook` and everything upstream with the active model version. The
-  saved model's rebuild behavior is *explicit*, so this never retrains it.
+| Scenario | Steps |
+|---|---|
+| **Prepare data** | 1. check the inputs (data quality rules); 2. rebuild the Data prep zone |
+| **Train model** | 1. run *Prepare data*; 2. retrain the model (Training zone) |
+| **Daily forecast** | 1. run *Prepare data*; 2. **check the model**; 3. forecast, balance path, outlook (Inference zone); 4. compute the outlook metrics |
 
-The Free Edition has no time-based triggers: run them by hand, or from a cron with
-`dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`.
+- **Input checks** (dataset > Data Quality): `transactions` not empty, no empty field, one row per
+  `txn_id`, only known accounts and up to the balances' date (yesterday's data is in); `accounts` one row
+  per account, balance and limit filled, one balance date; `calendar` one row per day, covers the days to
+  forecast. A rule in error stops the scenario.
+- **Model check**: the saved model's active version exists, was trained in the last 45 days, has a test MASE below 1
+  (better than "same as the day before") and forecasts `horizon_days` days; otherwise the scenario stops
+  with the reason.
+- **Metrics** on `account_outlook` (dataset > Metrics, with history): HIGH and MEDIUM accounts, lowest
+  balance ahead, row count.
+- **Dashboard** "Cash-flow outlook": run buttons, the metrics, lowest balance per company, balance per
+  day, the outlook table.
+
+The Free Edition has no time-based triggers: run them by hand, from the dashboard buttons, or from a cron
+with `dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`.
+
+The horizon is the project variable `horizon_days` (30), read by the recipes as `${horizon_days}`.
 
 The model is created at deploy time like you would in the UI: a Lab analysis on `daily_flows` (target
 `amount`, time `date`, identifiers `account_id` + `flow`, horizon 30, calendar columns as external
@@ -60,7 +76,8 @@ All managed datasets are PostgreSQL tables named `CORP_CASHFLOW_<dataset>`.
 | File | What |
 |---|---|
 | `generate_data.py` | Synthetic accounts, transactions and calendar (seeded) |
-| `create_project.py` | Project definition: datasets, description rules, visual recipes, algorithms to compare, zones, scenarios, wiki |
+| `create_project.py` | Project definition: datasets, description rules, visual recipes, algorithms to compare, zones, scenarios, model check, wiki |
+| `quality.py` | Input data quality rules, outlook metrics and dashboard (shared with the code project) |
 | `wiki.md` | Project wiki home page |
 | `HOW_IT_WORKS.md` | The method and the Dataiku components, explained simply |
 

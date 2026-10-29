@@ -124,7 +124,11 @@ balance(day) = yesterday's balance + running total of (forecast in − forecast 
 | **Code environment** | Python with the ML packages | `timeseries` (statsmodels, prophet, gluonts, torch) |
 | **Wiki** | Project documentation | "Start here" page |
 | **Job** | One run of the Flow | **Build** a dataset to (re)run what feeds it |
-| **Scenario** | A saved list of builds, run with one click | Train model, Daily forecast |
+| **Scenario** | A saved list of steps, run with one click | Prepare data, Train model, Daily forecast |
+| **Data quality rules** | Checks on a dataset's content | inputs: not empty, no gaps, up to yesterday |
+| **Metrics** | Numbers computed after each build, kept with their history | HIGH / MEDIUM accounts, lowest balance |
+| **Dashboard** | A page of charts and tables for readers | Cash-flow outlook |
+| **Project variable** | A setting read by every recipe | `horizon_days` = 30 |
 
 ### The Flow: one Flow, three zones
 
@@ -195,15 +199,26 @@ Settings under **Design**:
 **Train** → **Result** shows every model with its metrics, the forecast chart per series and the metrics
 per series. Pick a model → **Deploy** puts it in the Flow as a saved model.
 
-**Scenarios** (Scenarios tab > **Run**): each step builds items.
+**Scenarios** (Scenarios tab > **Run**): a list of steps; it stops at the first failed one.
 
 | Scenario | Steps | When |
 |---|---|---|
-| Train model | build `daily_flows`; build `cashflow_forecast_model` only (= retrain, new active version) | monthly |
-| Daily forecast | build `account_outlook` and everything upstream (the explicit model is skipped) | every day |
+| Prepare data | check the inputs (data quality rules); build the Data prep zone | first step of the two others |
+| Train model | run Prepare data; build the model (Training zone) = retrain, new active version | monthly |
+| Daily forecast | run Prepare data; check the model (exists, < 45 days, MASE < 1); build the Inference zone; compute the outlook metrics | every day |
 
-The Free Edition has no time-based triggers: run them by hand or from a cron
+A build step with "stop at flow zone boundary" only rebuilds what is inside the item's zone. The Free
+Edition has no time-based triggers: run them by hand, from the dashboard buttons or from a cron
 (`dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`).
+
+**Data quality rules** (dataset > **Data Quality**): built-in rules (record count, not empty, unique) and
+Python rules (e.g. "transactions reach the balances' date"). They run in the scenario's first step.
+
+**Metrics** (dataset > **Metrics**): `account_outlook` keeps after each run the number of HIGH and MEDIUM
+accounts and the lowest balance ahead, with their history.
+
+**Dashboard** (top menu > **Dashboards**): "Cash-flow outlook", with run buttons, the metrics, two charts
+and the outlook table.
 
 **Score recipe**: applies the saved model to `daily_flows_scoring`. With external features, the input
 must contain the 30 future rows (empty `amount`, calendar filled), otherwise scoring fails with "No
@@ -215,12 +230,13 @@ Everything is defined in [`create_project.py`](create_project.py):
 
 | To change | Edit in `create_project.py` | Or in the UI |
 |---|---|---|
-| Horizon | `HORIZON` | Lab → Design → Forecasting parameters (+ the `days_ahead` filter) |
+| Horizon | `HORIZON` | … > Variables `horizon_days` + Lab → Design → Forecasting parameters, then retrain |
 | Description rules | `RULES` | `prepare_transactions` formula |
 | Algorithms and their settings | `ALGORITHMS` | Lab → Design → Algorithms |
 | External features | `CALENDAR` | Lab → Design → Features handling |
 | Risk rule | `prepare_outlook` formulas | Prepare recipe step |
 | Zones, scenarios | `p.zone(...)`, `p.scenario(...)` | Flow > zones; Scenarios tab |
+| Input rules, metrics, dashboard | `quality.py` | dataset > Data Quality / Metrics; Dashboards |
 
 > Re-running `create_project.py` deletes and re-creates the project, so changes made only in the UI are
 > lost.

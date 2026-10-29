@@ -27,15 +27,30 @@ The folder `forecast_model` links training and inference. Its rebuild behavior i
 `account_outlook` scores with the saved model and never retrains it. Both recipes compute the features with
 the same code, the project library `cashflow_model.py` (**... > Libraries**).
 
-## Scenarios (Scenarios tab > Run)
+## Scenarios, checks and dashboard
 
-| Scenario | When | Steps |
-|---|---|---|
-| **Daily forecast** | every day, once yesterday's data is in | Rebuild `account_outlook` and everything upstream with the saved model |
-| **Train model** | monthly, or when the forecasts get worse | Rebuild `daily_flows`, then test, retrain and save the model |
+Three scenarios (Scenarios tab > Run), one per zone; each builds only its own zone:
 
-The Free Edition has no time-based triggers: run them by hand or from a cron
-(`dsscli scenario-run CORP_CASHFLOW_CODE DAILY_FORECAST`).
+| Scenario | Steps |
+|---|---|
+| **Prepare data** | 1. check the inputs (data quality rules); 2. rebuild the Data prep zone |
+| **Train model** | 1. run *Prepare data*; 2. retrain the model (Training zone) |
+| **Daily forecast** | 1. run *Prepare data*; 2. **check the model**; 3. forecast, balance path, outlook (Inference zone); 4. compute the outlook metrics |
+
+- **Input checks** (dataset > Data Quality): `transactions` not empty, no empty field, one row per
+  `txn_id`, only known accounts and up to the balances' date (yesterday's data is in); `accounts` one row
+  per account, balance and limit filled, one balance date; `calendar` one row per day, covers the days to
+  forecast. A rule in error stops the scenario.
+- **Model check**: `forecast_model/model_info.json` (written by the training recipe) exists, was trained in the last 45 days, has a test MASE below 1
+  (better than "same as the day before") and forecasts `horizon_days` days; otherwise the scenario stops
+  with the reason.
+- **Metrics** on `account_outlook` (dataset > Metrics, with history): HIGH and MEDIUM accounts, lowest
+  balance ahead, row count.
+- **Dashboard** "Cash-flow outlook": run buttons, the metrics, lowest balance per company, balance per
+  day, the outlook table.
+
+The Free Edition has no time-based triggers: run them by hand, from the dashboard buttons, or from a cron
+with `dsscli scenario-run CORP_CASHFLOW_CODE DAILY_FORECAST`.
 
 ## The model
 

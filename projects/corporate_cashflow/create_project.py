@@ -6,19 +6,22 @@ Dataiku's time series forecasting, then follow the balance day by day to find it
 
 No code recipes: visual recipes (Prepare, Group, Join, Window) and Visual ML time series forecasting
 (a Lab analysis comparing several algorithms, the best one deployed to the flow + a Score recipe).
-The Flow has three zones (Data prep, Training, Inference) and two scenarios: "Train model" retrains the
-saved model, "Daily forecast" scores the latest data with it. The project wiki is wiki.md.
+The Flow has three zones (Data prep, Training, Inference), each run by its own scenario (Prepare data,
+Train model, Daily forecast), with data quality rules on the inputs, a check of the model before
+forecasting, metrics on the outlook and a dashboard. The project wiki is wiki.md.
 """
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
-from dssproj import (Project, col, ensure_code_env, fold, formula, keep_columns, keep_rows,  # noqa: E402
-                     rename)
+sys.path[:0] = [str(HERE.parent), str(HERE)]
+from dssproj import (Project, build_step, col, ensure_code_env, fold, formula, keep_columns,  # noqa: E402
+                     keep_rows, metrics_step, python_step, rename, rules_step, scenario_step, tile_text)
+from quality import INPUTS, OUTLOOK_METRIC_NAMES, OUTLOOK_METRICS, add_input_rules, outlook_dashboard  # noqa: E402
 
 CODE_ENV = "timeseries"                 # Python env with DSS's time series packages, created if missing
-HORIZON = 30                            # days to forecast, from D (data is complete up to D-1)
+HORIZON = 30                            # days to forecast, from D (data is complete up to D-1): project
+                                        # variable horizon_days, read by the recipes as ${horizon_days}
 CALENDAR = ["day_of_month", "day_of_week", "is_weekend", "is_month_start", "is_month_end"]
 F, I, D = "double", "int", "dateonly"
 
@@ -58,7 +61,7 @@ def category_formula():
 
 p = Project("CORP_CASHFLOW", "Corporate cash-flow forecast",
             "Forecast each corporate account's daily money in and out for the next 30 days and find the "
-            "lowest balance ahead.")
+            "lowest balance ahead.", variables={"horizon_days": str(HORIZON)})
 p.wiki_home("Start here", (HERE / "wiki.md").read_text())
 
 
@@ -113,14 +116,14 @@ dataset("daily_flows_scoring", f"The time series: amount per account, flow (IN/O
         f"plus the next {HORIZON} days with an empty amount (to forecast) and their calendar features.", "3-daily")
 p.prepare_recipe("prepare_daily_flows", "account_days_totals", "daily_flows_scoring", [
     formula("days_ahead", 'diff(date, balance_date, "days")'),
-    keep_rows(f"days_ahead <= {HORIZON}"),
+    keep_rows("days_ahead <= ${horizon_days}"),
     formula("inflow", "if(isBlank(inflow), 0, inflow)"),
     formula("outflow", "if(isBlank(outflow), 0, outflow)"),
     fold(["inflow", "outflow"], "flow", "amount"),
     formula("flow", 'if(flow == "inflow", "IN", "OUT")'),
     formula("amount", 'if(days_ahead > 0, "", amount)'),
     keep_columns("account_id", "flow", "date", "amount", *CALENDAR),
-], f"0 on days without transactions; keep up to yesterday + {HORIZON} days; one row per flow (IN/OUT); "
+], "0 on days without transactions; keep up to yesterday + horizon_days days; one row per flow (IN/OUT); "
    "amount emptied on the future days.",
     tags=["3-daily"])
 
@@ -194,7 +197,7 @@ dataset("account_lowest", f"Per account over the {HORIZON} days: totals in and o
 p.group_recipe("group_outlook", "daily_balance_path", "account_lowest", ["account_id"],
                {"inflow": ["sum"], "outflow": ["sum"], "balance": ["min"], "pessimistic_balance": ["min"]},
                count=False,
-               names={"inflow_sum": f"total_in_{HORIZON}d", "outflow_sum": f"total_out_{HORIZON}d",
+               names={"inflow_sum": "total_in", "outflow_sum": "total_out",
                       "balance_min": "lowest_balance", "pessimistic_balance_min": "pessimistic_lowest_balance"},
                description="Totals and lowest balances per account.", tags=["7-outlook"])
 
@@ -210,13 +213,13 @@ p.join_recipe("join_accounts", ["account_lowest", "daily_balance_path", "account
 dataset("account_outlook", f"One row per account: the next {HORIZON} days in numbers and a risk level.", "7-outlook")
 p.prepare_recipe("prepare_outlook", "account_lowest_details", "account_outlook", [
     rename({"balance": "opening_balance", "date": "lowest_balance_date"}),
-    formula("closing_balance", f"round(opening_balance + total_in_{HORIZON}d - total_out_{HORIZON}d)"),
-    formula(f"total_in_{HORIZON}d", f"round(total_in_{HORIZON}d)"),
-    formula(f"total_out_{HORIZON}d", f"round(total_out_{HORIZON}d)"),
+    formula("closing_balance", "round(opening_balance + total_in - total_out)"),
+    formula("total_in", "round(total_in)"),
+    formula("total_out", "round(total_out)"),
     formula("risk_level", 'if(lowest_balance < 0 - overdraft_limit, "HIGH", '
                           'if(lowest_balance < 0 || pessimistic_lowest_balance < 0, "MEDIUM", "LOW"))'),
     keep_columns("account_id", "company_name", "sector", "relationship_manager", "opening_balance",
-                 "overdraft_limit", f"total_in_{HORIZON}d", f"total_out_{HORIZON}d", "closing_balance",
+                 "overdraft_limit", "total_in", "total_out", "closing_balance",
                  "lowest_balance", "lowest_balance_date", "pessimistic_lowest_balance", "risk_level"),
 ], "HIGH: the lowest balance goes past the overdraft limit. MEDIUM: below 0, expected or pessimistic. "
    "LOW: otherwise.", tags=["7-outlook"])
@@ -227,14 +230,59 @@ p.zone("Training", tags=["4-train"], shared=["daily_flows_scoring"])
 p.zone("Inference", tags=["5-forecast", "6-balance", "7-outlook"],
        shared=["daily_flows_scoring", "cashflow_forecast_model", "accounts"])
 
-# Scenarios (Scenarios tab > Run): retrain now and then; forecast every day once yesterday's data is in.
+# Checks: data quality rules on the inputs, metrics on the outlook ----------------------------------
+add_input_rules(p)
+p.metrics("account_outlook", python=OUTLOOK_METRICS, names=OUTLOOK_METRIC_NAMES)
+
+# Before forecasting: the model exists, is recent, beats "same as the day before" and fits horizon_days.
+MODEL_CHECK = """
+import time
+
+import dataiku
+
+MODEL, MAX_AGE_DAYS, MAX_MASE = "cashflow_forecast_model", 45, 1.0
+project = dataiku.api_client().get_default_project()
+horizon = int(dataiku.get_custom_variables()["horizon_days"])
+found = [m["id"] for m in project.list_saved_models() if m["name"] == MODEL]
+if not found:
+    raise Exception(f"No saved model {MODEL}: train one in the Lab and deploy it to the flow.")
+model = project.get_saved_model(found[0])
+active = model.get_active_version()
+if not active:
+    raise Exception(f"{MODEL} has no active version: run the Train model scenario.")
+details = model.get_version_details(active["id"])
+snippet = details.get_raw_snippet()
+age_days = (time.time() * 1000 - snippet["trainDate"]) / 86400000
+if age_days > MAX_AGE_DAYS:
+    raise Exception(f"The model was trained {age_days:.0f} days ago (limit {MAX_AGE_DAYS}): run Train model.")
+if snippet["mase"] >= MAX_MASE:
+    raise Exception(f"The model's MASE is {snippet['mase']:.2f}: no better than 'same as the day before'.")
+trained_for = details.get_raw()["coreParams"]["predictionLength"]
+if trained_for != horizon:
+    raise Exception(f"The model forecasts {trained_for} days, horizon_days is {horizon}: retrain it in the Lab.")
+print(f"Model OK: trained {age_days:.1f} days ago, MASE {snippet['mase']:.3f}, {trained_for} days ahead")
+"""
+
+# Scenarios (Scenarios tab > Run): one per zone; each builds only its own zone ---------------------
+p.scenario("Prepare data", [
+    rules_step("Check the inputs", INPUTS),
+    build_step("Build the data prep zone", ["daily_flows_scoring"], zone_only=True),
+], description="Check the inputs (data quality rules), then rebuild the Data prep zone.")
 p.scenario("Train model", [
-    ("Rebuild the training data", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
-    ("Retrain the saved model", ["cashflow_forecast_model"], "NON_RECURSIVE_FORCED_BUILD"),
+    scenario_step("Prepare the latest data", "Prepare data"),
+    build_step("Retrain the model (Training zone)", ["cashflow_forecast_model"], zone_only=True),
 ], description="Retrain the deployed algorithm on the latest history: a new active version of the saved model.")
 p.scenario("Daily forecast", [
-    ("Prepare the latest data, forecast, balance path and outlook", ["account_outlook"], "RECURSIVE_FORCED_BUILD"),
-], description=f"Forecast the next {HORIZON} days with the active model version (the model is not retrained).")
+    scenario_step("Prepare the latest data", "Prepare data"),
+    python_step("Check the model", MODEL_CHECK),
+    build_step("Forecast, balance path and outlook (Inference zone)", ["account_outlook"], zone_only=True),
+    metrics_step("Compute the outlook metrics", ["account_outlook"]),
+], description="Forecast the next days with the active model version (the model is not retrained).")
+
+outlook_dashboard(p, extra=[
+    (tile_text("**Model comparison**: Lab > cashflow_forecast_model (MASE per algorithm, forecast charts)."),
+     (0, 28, 36, 2)),
+])
 
 if __name__ == "__main__":
     ensure_code_env(CODE_ENV)
