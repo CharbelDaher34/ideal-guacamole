@@ -12,6 +12,8 @@ Lab analysis, training, deploy to the flow, then their Evaluate / Score recipes.
 
 ## Projects
 
+The two cash-flow projects are explained in [`CASHFLOW_GUIDE.md`](CASHFLOW_GUIDE.md).
+
 | Folder | Project key | What |
 |---|---|---|
 | `demo/` | `DEV_DEMO` | Minimal example: CSV -> Python -> SQL |

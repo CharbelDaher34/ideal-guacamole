@@ -1,5 +1,7 @@
 # CORP_CASHFLOW — corporate cash-flow forecast (daily time series)
 
+Start with the short guide to both projects: [`../CASHFLOW_GUIDE.md`](../CASHFLOW_GUIDE.md).
+
 Forecast each corporate account's **money in and money out for every day of the next 30 days** with
 Dataiku's **time series forecasting**, follow the balance day by day from yesterday's balance, and find
 its **lowest point** and when it happens. No code recipes: visual recipes and Visual ML. Synthetic data only.
@@ -79,7 +81,6 @@ All managed datasets are PostgreSQL tables named `CORP_CASHFLOW_<dataset>`.
 | `create_project.py` | Project definition: datasets, description rules, visual recipes, algorithms to compare, zones, scenarios, model check, wiki |
 | `quality.py` | Input data quality rules, outlook metrics and dashboard (shared with the code project) |
 | `wiki.md` | Project wiki home page |
-| `HOW_IT_WORKS.md` | The method and the Dataiku components, explained simply |
 
 ## Results of the current build
 

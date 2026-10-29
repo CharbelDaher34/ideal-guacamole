@@ -1,5 +1,7 @@
 # CORP_CASHFLOW_CODE — corporate cash-flow forecast, scripted
 
+Start with the short guide to both projects: [`../CASHFLOW_GUIDE.md`](../CASHFLOW_GUIDE.md).
+
 The same data and goal as [`../corporate_cashflow`](../corporate_cashflow) (daily money in and out for the
 next 30 days, balance day by day, lowest point and risk), built with **Python and SQL recipes** and a
 **regression** model (gradient boosting, scikit-learn) instead of Dataiku's time series forecasting.
