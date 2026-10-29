@@ -15,8 +15,8 @@ Lab analysis, training, deploy to the flow, then their Evaluate / Score recipes.
 | Folder | Project key | What |
 |---|---|---|
 | `demo/` | `DEV_DEMO` | Minimal example: CSV -> Python -> SQL |
-| `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate-banking 3-month cash-flow forecast + GenAI notes: visual recipes and Visual ML **time series forecasting** (9 algorithms compared), no code (see its README) |
-| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same data, scripted: 4 Python / SQL recipes, next-month **regression** with scikit-learn (see its README) |
+| `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate banking: daily money in / out for the next 30 days, balance day by day, lowest point and risk. Visual recipes and Visual ML **time series forecasting** (9 algorithms compared), no code (see its README) |
+| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same data and goal, scripted: 4 Python + 1 SQL recipes, **regression** (gradient boosting, scikit-learn) on calendar + past values (see its README) |
 
 ## Run the demo
 
@@ -53,24 +53,26 @@ Visual recipes (prefer these; open them in the UI to see the settings):
 
 | Helper | Dataiku recipe | Main arguments |
 |---|---|---|
-| `prepare_recipe` | Prepare | list of steps: `formula`, `parse_date`, `truncate_date`, `remove_empty`, `keep_rows`, `rename`, `keep_columns`, `delete_columns`, or any processor with `step(type, **params)` |
+| `prepare_recipe` | Prepare | list of steps: `formula`, `parse_date`, `truncate_date`, `remove_empty`, `keep_rows`, `fold`, `rename`, `keep_columns`, `delete_columns`, or any processor with `step(type, **params)` |
 | `group_recipe` | Group | keys, `{column: [aggregations]}`, `computed=` pre-computed columns, `names=` output renames |
-| `window_recipe` | Window | partition, order, `{column: {"lag": [..], "lead": [..], "avg": True}}`, `frame=(preceding, following)` |
-| `join_recipe` | Join | inputs, key columns, `how=` LEFT / INNER / CROSS, `columns=`, `pre_filters=` |
+| `window_recipe` | Window | partition, order, `{column: {"lag": [..], "lead": [..], "sum": True}}` (default frame: running total), `frame=(preceding, following)` |
+| `join_recipe` | Join | inputs, key columns (or `{dataset: keys}`, a key can be `(left, right)` when names differ), `how=` LEFT / INNER / CROSS, `columns=`, `pre_filters=` |
 | `stack_recipe` | Stack | inputs |
 | `split_recipe` | Split | column, `{value: output dataset}` |
 | `prompt_recipe` | Prompt (LLM Mesh) | LLM id, prompt template with `{{column}}` placeholders |
 
 Visual ML: `ml_model(name, train, test, target, reject=, params=, interval=)` (regression: Lab analysis
 trained and deployed to the flow as saved model `name`), `timeseries_model(name, input, target, time, ids,
-horizon, algorithms, env)` (time series forecasting: trains every algorithm in `algorithms`, deploys the
-best on MASE), `evaluate_recipe`, `score_recipe`. `ensure_code_env(name)` creates a DSS code env with the
+horizon, algorithms, env, external=)` (time series forecasting: trains every algorithm in `algorithms`,
+deploys the best on MASE; `external` = columns known in advance, then the dataset to score must also hold
+the future rows with an empty target), `evaluate_recipe`, `score_recipe`. `ensure_code_env(name)` creates a DSS code env with the
 Visual ML + time series packages if it does not exist (time series models need it).
 
 Code recipes: `python_recipe`, `sql_recipe`. All recipes take `description=` and `tags=`;
 `wiki_home` and `Project(..., variables={...})` for the wiki and project variables.
 Formulas are Dataiku formulas (GREL); on PostgreSQL they are translated to SQL, so build text
-with `concat(...)`. Column types: `string`, `bigint`, `int`, `double`, `boolean`, `date`.
+with `concat(...)`. Column types: `string`, `bigint`, `int`, `double`, `boolean`, `date` (timestamp), `dateonly` (a day, e.g.
+`2026-09-30` in a CSV).
 
 **`deploy()` deletes and re-imports a project with the same key**: anything changed in the
 UI for that project is lost. Treat the Python file as the source of truth, or use a new key.

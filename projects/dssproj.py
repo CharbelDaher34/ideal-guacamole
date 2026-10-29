@@ -149,16 +149,20 @@ class Project:
 
     def join_recipe(self, name, inputs, output, on, how="LEFT", columns=None, pre_filters=None,
                     description="", tags=()):
-        """Join inputs[1:] to inputs[0] on the same-named key columns `on` (how="CROSS" with on=[]: every pair).
+        """Join inputs[1:] to inputs[0] on the key columns `on` (how="CROSS" with on=[]: every pair).
+        on: same-named keys for every input, or {dataset: keys} per joined input; a key is a column name or
+        (column in inputs[0], column in the joined input) when the names differ.
         columns: {dataset: [columns to keep]} (default: all non-conflicting columns);
         pre_filters: {dataset: GREL condition} to filter an input before the join."""
         columns, pre_filters = columns or {}, pre_filters or {}
+        keys = on if isinstance(on, dict) else {d: on for d in inputs[1:]}
+        pairs = {d: [k if isinstance(k, tuple) else (k, k) for k in ks] for d, ks in keys.items()}
         vinputs = [{"index": i, "originLabel": d, "preFilter": _filter(pre_filters.get(d)), "computedColumns": [],
                     "outputColumnsSelectionMode": "MANUAL" if d in columns else "AUTO_NON_CONFLICTING"}
                    for i, d in enumerate(inputs)]
         joins = [{"table1": 0, "table2": i, "type": how, "conditionsMode": "AND", "outerJoinOnTheLeft": True,
-                  "on": [{"column1": {"table": 0, "name": k}, "column2": {"table": i, "name": k}, "type": "EQ"}
-                         for k in on]} for i in range(1, len(inputs))]
+                  "on": [{"column1": {"table": 0, "name": a}, "column2": {"table": i, "name": b}, "type": "EQ"}
+                         for a, b in pairs[inputs[i]]]} for i in range(1, len(inputs))]
         selected = [{"name": c, "table": i} for i, d in enumerate(inputs) for c in columns.get(d, [])]
         self._recipe(name, "join", inputs, [output], {}, "join", {
             "virtualInputs": vinputs, "joins": joins, "selectedColumns": selected, "resolvedSelectedColumns": [],
@@ -216,18 +220,20 @@ class Project:
             "algorithm": algorithm, "params": params or {}, "interval": interval, "metric": metric,
             "description": description, "tags": self._use_tags(tags)}))
 
-    def timeseries_model(self, name, input_, target, time, ids, horizon, algorithms, env, metric="MASE",
-                         description="", tags=()):
+    def timeseries_model(self, name, input_, target, time, ids, horizon, algorithms, env, external=(),
+                         metric="MASE", description="", tags=()):
         """Time series forecasting model trained in a Lab analysis on input_ (one row per series and time
         step), then the best algorithm on `metric` is deployed to the flow as saved model `name`.
         ids: columns identifying each series; horizon: time steps to forecast (the last `horizon` steps of
         each series are the test set); algorithms: {algorithm: {param: value}}, a list value is a grid of
         values or, for option sets (ETS trend, ...), the options to enable; env: code env with the time
-        series packages (ensure_code_env)."""
+        series packages (ensure_code_env); external: columns known in advance (calendar, ...) used as
+        external features by the algorithms that support them; any other column is ignored. With external
+        features, the dataset to score must also hold the `horizon` future rows (target empty)."""
         self.recipes.append((f"train_{name}", [], "ml", {
             "model": name, "train": input_, "test": "", "target": target, "time": time, "ids": list(ids),
-            "horizon": horizon, "algorithms": algorithms, "env": env, "metric": metric,
-            "description": description, "tags": self._use_tags(tags)}))
+            "horizon": horizon, "algorithms": algorithms, "env": env, "external": list(external),
+            "metric": metric, "description": description, "tags": self._use_tags(tags)}))
 
     def score_recipe(self, name, model, input_, output, description="", tags=()):
         """Score recipe: applies saved model `model` to input_ (adds the prediction columns)."""
@@ -328,6 +334,16 @@ class Project:
             _set_params(s["modeling"][algo], params)
         s["modeling"]["metrics"]["evaluationMetric"] = spec["metric"]
         if timeseries:
+            for c, f in s["preprocessing"]["per_feature"].items():
+                if f["role"] not in ("TARGET", "TIME", "TIMESERIES_IDENTIFIER"):
+                    f["role"] = "INPUT" if c in spec["external"] else "REJECT"
+            for algo in algorithms:
+                if "_use_external_features" in s["modeling"][algo]:
+                    s["modeling"][algo]["_use_external_features"] = bool(spec["external"])
+            # ML algorithms (LightGBM, ...) use past values shifted by at least the horizon
+            shifts = s["preprocessing"]["feature_generation"]["auto_shifts_params"]
+            shifts["max_horizon_shift_past_only"] = min(shifts["max_horizon_shift_past_only"], -spec["horizon"])
+            shifts["min_horizon_shift_past_only"] = min(shifts["min_horizon_shift_past_only"], -2 * spec["horizon"])
             s["predictionLength"] = spec["horizon"]
             s["evaluationParams"] = {"gapSize": 0, "testSize": spec["horizon"]}
             s["envSelection"] = {"envMode": "EXPLICIT_ENV", "envName": spec["env"]}
@@ -486,6 +502,11 @@ def remove_empty(*columns):
 def keep_rows(condition):
     """Keep only rows matching a GREL condition."""
     return step("FilterOnCustomFormula", expression=condition, action="KEEP_ROW")
+
+
+def fold(columns, name_column, value_column):
+    """Turn columns into rows: one row per column, its name in name_column and its value in value_column."""
+    return step("MultiColumnFold", columns=list(columns), foldNameColumn=name_column, foldValueColumn=value_column)
 
 
 def rename(mapping):

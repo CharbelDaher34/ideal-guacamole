@@ -1,12 +1,12 @@
-# CORP_CASHFLOW — corporate cash-flow forecast (time series)
+# CORP_CASHFLOW — corporate cash-flow forecast (daily time series)
 
-Forecast each corporate account's net cash flow for the next 3 months with Dataiku's **time series
-forecasting**, flag liquidity risk, and have an LLM write a short note per account. No code recipes:
-visual recipes and Visual ML. Synthetic data only.
+Forecast each corporate account's **money in and money out for every day of the next 30 days** with
+Dataiku's **time series forecasting**, follow the balance day by day from yesterday's balance, and find
+its **lowest point** and when it happens. No code recipes: visual recipes and Visual ML. Synthetic data only.
 
 ```bash
-python3 generate_data.py     # data/accounts.csv (10 accounts), data/transactions.csv (2,640 rows, Oct 2023 - Sep 2026)
-python3 create_project.py    # (re)creates project CORP_CASHFLOW in DSS, trains 9 algorithms, runs the flow (~1 min)
+python3 generate_data.py     # data/: accounts.csv (10), transactions.csv (~25,600, Oct 2023 - Sep 2026), calendar.csv
+python3 create_project.py    # (re)creates project CORP_CASHFLOW in DSS, trains 9 algorithms, runs the flow (~7 min)
 ```
 
 The first run also creates the DSS code env `timeseries` (DSS's "Visual ML, Causal ML, and Timeseries
@@ -14,41 +14,53 @@ Forecasting (CPU)" packages: statsmodels, pmdarima, prophet, gluonts, CPU torch;
 
 Open http://localhost:10000/projects/CORP_CASHFLOW/ — the project **Wiki** ("Start here") walks through it.
 
-## Flow (8 recipes)
+## Data
+
+- `transactions`: signed `amount` (+ in, - out) and a bank-style `description` (`TRF FROM ...`,
+  `SALARY OCT 2026`, `INTERNAL TRF TO SAVINGS ...`). Receipts and supplier payments on business days;
+  payroll (25th), rent (1st), loan (10th), utilities (15th), quarterly VAT (20th), fees (month end);
+  internal transfers and a few one-off deals that the flow removes.
+- `accounts`: closing `balance` on `balance_date` = yesterday (D-1 = 30 Sep 2026), overdraft limit.
+- `calendar`: one row per day up to Dec 2026 with `day_of_month`, `day_of_week`, `is_weekend`,
+  `is_month_start`, `is_month_end` (known in advance, used as external features).
+
+## Flow (16 recipes)
 
 ```
-transactions ─[Prepare]─► transactions_prepared ─[Group]─► monthly_net        (the time series)
-monthly_net ─[Visual ML time series: 9 algorithms, best deployed]─► cashflow_forecast_model
-monthly_net ─[Score]─► forecast ─[Group]─► forecast_3m ─[Join + accounts]─► ─[Prepare]─► account_outlook
-account_outlook ─[Prompt]─► account_notes
+transactions ─[Prepare: description rules]─► transactions_clean ─[Group, excluded = 0]─► daily_totals
+calendar × accounts ─[Join cross]─► account_days ─[Join daily_totals]─► ─[Prepare: 0 on quiet days, fold IN/OUT]─►
+    daily_flows_scoring (history + 30 future days) ─[Prepare: history only]─► daily_flows (training)
+daily_flows ─[Visual ML time series: 9 algorithms, best deployed]─► cashflow_forecast_model
+daily_flows_scoring ─[Score]─► scored_flows ─[Prepare]─► forecast (30 days × account × IN/OUT)
+forecast ─[Group]─► daily_forecast ─[Window: running totals]─► ─[Join balance]─► ─[Prepare]─► daily_balance_path
+daily_balance_path ─[Group]─► account_lowest ─[Join: day of the lowest + accounts]─► ─[Prepare: risk]─► account_outlook
 ```
 
-The model is created at deploy time like you would in the UI: a Lab analysis on `monthly_net` (target
-`net`, time `month`, identifier `account_id`, horizon 3), the algorithms in `ALGORITHMS` trained and
-compared on the last 3 months, and the best on MASE deployed to the flow with its Score recipe. The Lab
-analysis stays in the project to compare, tune and redeploy.
+The model is created at deploy time like you would in the UI: a Lab analysis on `daily_flows` (target
+`amount`, time `date`, identifiers `account_id` + `flow`, horizon 30, calendar columns as external
+features), the algorithms in `ALGORITHMS` trained and compared on the last 30 days, and the best on MASE
+deployed to the flow with its Score recipe. The Lab analysis stays in the project to compare, tune and
+redeploy.
+
+Risk level: **HIGH** if the lowest balance goes past the overdraft limit, **MEDIUM** if it goes below 0
+(expected, or in the pessimistic case = the 1-in-10 bad case of the running total), **LOW** otherwise.
 
 All managed datasets are PostgreSQL tables named `CORP_CASHFLOW_<dataset>`.
 
 | File | What |
 |---|---|
-| `generate_data.py` | Synthetic accounts and transactions (seeded) |
-| `create_project.py` | Project definition: datasets, visual recipes, algorithms to compare, prompt, tags, wiki |
+| `generate_data.py` | Synthetic accounts, transactions and calendar (seeded) |
+| `create_project.py` | Project definition: datasets, description rules, visual recipes, algorithms to compare, tags, wiki |
 | `wiki.md` | Project wiki home page |
+| `HOW_IT_WORKS.md` | The method and the Dataiku components, explained simply |
 
 ## Results of the current build
 
-- Test months Jul - Sep 2026, MASE (below 1 = better than "same as last month"): ARIMA 0.68 (deployed),
-  ETS 0.70, AutoARIMA 0.78, Seasonal LOESS 0.79, feed-forward NN 0.86, Prophet 0.89, naive 0.90,
-  DeepAR 0.91, seasonal naive 0.98.
-- Risk at end of Dec 2026: 2 HIGH (Levant Logistics, Tripoli Textiles), 3 MEDIUM (Mount Lebanon Hotels,
-  Byblos Construction, Sidon Port Services), 5 LOW.
-
-## GenAI
-
-The **Prompt** recipe `prompt_account_notes` calls `LLM_ID` in `create_project.py`
-(`openai:openai:gpt-6-luna`, LLM Mesh connection `openai`): 10 calls per run, with each account's
-(synthetic) figures. A failed call shows in the `llm_error_message` column.
+- Test days 1 - 30 Sep 2026, MASE (below 1 = better than "same as the day before"): DeepAR 0.57 (deployed),
+  feed-forward NN 0.70, ETS 0.72, Prophet 0.73, LightGBM 0.77, naive 1.14, Seasonal LOESS 1.14, seasonal
+  naive 1.34, ARIMA 1.44.
+- Outlook 1 - 30 Oct 2026: 2 MEDIUM (Levant Logistics: balance down to about -1,500 by 30 Oct, pessimistic
+  -129k; Tripoli Textiles: pessimistic -35k), 8 LOW, no HIGH.
 
 **Re-running `create_project.py` deletes and re-creates the project** — changes made in the UI (including
 models trained in the Lab) are lost; put them in the code instead.

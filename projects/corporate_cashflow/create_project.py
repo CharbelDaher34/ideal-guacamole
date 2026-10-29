@@ -1,10 +1,10 @@
-"""Corporate banking: forecast each account's net cash flow for the next 3 months with Dataiku's time
-series forecasting, flag liquidity risk, and have an LLM write a short note per account.
+"""Corporate banking: forecast each account's daily money in and money out for the next 30 days with
+Dataiku's time series forecasting, then follow the balance day by day to find its lowest point.
 
     python3 generate_data.py     # (re)create the synthetic CSVs in data/
     python3 create_project.py    # push project CORP_CASHFLOW into DSS and run the whole flow
 
-No code recipes: visual recipes (Prepare, Group, Join, Prompt) and Visual ML time series forecasting
+No code recipes: visual recipes (Prepare, Group, Join, Window) and Visual ML time series forecasting
 (a Lab analysis comparing several algorithms, the best one deployed to the flow + a Score recipe).
 The project wiki is wiki.md.
 """
@@ -13,28 +13,51 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from dssproj import (Project, col, ensure_code_env, formula, keep_columns, parse_date,  # noqa: E402
-                     truncate_date)
+from dssproj import (Project, col, ensure_code_env, fold, formula, keep_columns, keep_rows,  # noqa: E402
+                     rename)
 
-LLM_ID = "openai:openai:gpt-6-luna"     # LLM Mesh model used by the Prompt recipe
 CODE_ENV = "timeseries"                 # Python env with DSS's time series packages, created if missing
-F = "double"
+HORIZON = 30                            # days to forecast, from D (data is complete up to D-1)
+CALENDAR = ["day_of_month", "day_of_week", "is_weekend", "is_month_start", "is_month_end"]
+F, I, D = "double", "int", "dateonly"
 
-# Algorithms the Lab trains and compares; the one with the lowest MASE on the test months is deployed.
+# Description rules, checked in order: the first text found in the description gives the category.
+# internal_transfer and one_off are not real, repeatable cash flow: they are removed before forecasting.
+RULES = [
+    ("INTERNAL TRF", "internal_transfer"),
+    ("SALE OF", "one_off"), ("LOAN DRAWDOWN", "one_off"), ("CAPITAL INJECTION", "one_off"),
+    ("SETTLEMENT PAYMENT", "one_off"),
+    ("TRF FROM", "customer_receipt"), ("POS SETTLEMENT", "card_sales"),
+    ("PAYMENT TO", "supplier"), ("SALARY", "payroll"), ("RENT", "rent"), ("LOAN INSTALLMENT", "loan"),
+    ("BILL", "utilities"), ("VAT PAYMENT", "tax"), ("FEE", "bank_fee"),
+]
+
+# Algorithms the Lab trains and compares; the one with the lowest MASE on the test days is deployed.
 ALGORITHMS = {
-    "trivial_identity_timeseries": {},                                   # naive: repeat the last month
-    "seasonal_naive_timeseries": {"season_length": 12},                  # repeat the same month last year
-    "ets_timeseries": {"trend": ["add"], "seasonal": ["add"]},           # exponential smoothing (Holt-Winters)
-    "seasonal_loess_timeseries": {"period": 12},                         # STL: trend + seasonality
-    "arima_timeseries": {"p": 1, "D": 1, "s": 12},                       # ARIMA with a yearly difference
-    "autoarima_timeseries": {"m": 12},                                   # ARIMA that picks its own orders
-    "prophet_timeseries": {"changepoint_prior_scale": 0.05},             # Prophet (Meta)
-    "gluonts_torch_simple_feed_forward_timeseries": {},                  # small neural network
-    "gluonts_torch_deepar_timeseries": {},                               # DeepAR (recurrent neural network)
+    "trivial_identity_timeseries": {},                                   # naive: repeat the last day
+    "seasonal_naive_timeseries": {"season_length": 7},                   # repeat the same weekday last week
+    "ets_timeseries": {"trend": ["add"], "seasonal": ["add"], "seasonal_periods": 7},  # exponential smoothing
+    "seasonal_loess_timeseries": {"period": 7},                          # STL: trend + weekly pattern
+    "arima_timeseries": {"p": 2, "D": 1, "s": 7},                        # ARIMA with a weekly difference
+    "prophet_timeseries": {},                                            # Prophet (Meta) + calendar features
+    "lightgbm_regression": {"learning_rate": [0.1], "n_estimators": [200], "min_child_samples": [20],
+                            "colsample_bytree": [0.9]},                  # gradient boosting on lags + calendar
+    "gluonts_torch_simple_feed_forward_timeseries": {"context_length": [60], "learning_rate": [0.001]},
+    "gluonts_torch_deepar_timeseries": {"context_length": [60]},         # DeepAR (recurrent neural network)
 }
 
+
+def category_formula():
+    """The rules as one nested if(...) formula."""
+    expr = '"other"'
+    for text, category in reversed(RULES):
+        expr = f'if(contains(description, "{text}"), "{category}", {expr})'
+    return expr
+
+
 p = Project("CORP_CASHFLOW", "Corporate cash-flow forecast",
-            "Forecast the next 3 months of net cash flow per corporate account, flag liquidity risk, write a note.")
+            "Forecast each corporate account's daily money in and out for the next 30 days and find the "
+            "lowest balance ahead.")
 p.wiki_home("Start here", (HERE / "wiki.md").read_text())
 
 
@@ -46,78 +69,154 @@ def dataset(name, description, tag):
 # 1. input ------------------------------------------------------------------------------------
 p.csv_dataset("accounts", HERE / "data/accounts.csv", [
     col("account_id"), col("company_name"), col("sector"), col("relationship_manager"),
-    col("current_balance", F), col("overdraft_limit", F),
-], "10 corporate accounts: company, sector, balance today (end of Sep 2026), overdraft limit.", tags=["1-input"])
+    col("balance", F), col("balance_date", D), col("overdraft_limit", F),
+], "10 corporate accounts: closing balance on balance_date (yesterday, D-1) and overdraft limit.",
+    tags=["1-input"])
 p.csv_dataset("transactions", HERE / "data/transactions.csv", [
-    col("txn_id"), col("account_id"), col("booking_date"), col("amount", F), col("direction"), col("category"),
-], "Every transaction Oct 2023 - Sep 2026 (CREDIT = money in, DEBIT = money out).", tags=["1-input"])
+    col("txn_id"), col("account_id"), col("booking_date", D), col("amount", F), col("description"),
+], "Every transaction up to yesterday: signed amount (+ in, - out) and the bank description.", tags=["1-input"])
+p.csv_dataset("calendar", HERE / "data/calendar.csv", [col("date", D)] + [col(c, I) for c in CALENDAR],
+              "One row per day (history and the days to forecast) with calendar features known in advance.",
+              tags=["1-input"])
 
-# 2. monthly net cash flow = the time series --------------------------------------------------
-dataset("transactions_prepared", "Transactions with their month and a signed amount.", "2-monthly")
-p.prepare_recipe("prepare_transactions", "transactions", "transactions_prepared", [
-    parse_date("booking_date"),
-    truncate_date("booking_date", "MONTH", "month"),
-    formula("net", 'if(direction == "CREDIT", amount, 0 - amount)'),
-], "Add the month and the signed amount (money in +, money out -).", tags=["2-monthly"])
+# 2. clean: categories from the description, transfers and one-offs flagged ----------------------
+dataset("transactions_clean", "transactions + category (description rules), flow (IN/OUT) and excluded "
+        "(1 = internal transfer or one-off).", "2-clean")
+p.prepare_recipe("prepare_transactions", "transactions", "transactions_clean", [
+    formula("category", category_formula()),
+    formula("flow", 'if(amount > 0, "IN", "OUT")'),
+    formula("excluded", 'if(category == "internal_transfer" || category == "one_off", 1, 0)'),
+    rename({"booking_date": "date"}),
+], "Description rules -> category; sign -> flow; flag what is not repeatable cash flow.", tags=["2-clean"])
 
-dataset("monthly_net", "The time series: net cash flow per account (series id) and month (time).", "2-monthly")
-p.group_recipe("group_by_month", "transactions_prepared", "monthly_net", ["account_id", "month"],
-               {"net": ["sum"]}, count=False, names={"net_sum": "net"},
-               description="Sum the signed amounts per account and month.", tags=["2-monthly"])
+# 3. daily series: one row per account, flow and day (0 when nothing happened) ------------------
+dataset("daily_totals", "Money in and money out per account and day (days with transactions only).", "3-daily")
+p.group_recipe("group_daily_totals", "transactions_clean", "daily_totals", ["account_id", "date"],
+               {"inflow": ["sum"], "outflow": ["sum"]}, count=False, pre_filter="excluded == 0",
+               computed={"inflow": (F, "if(amount > 0, amount, 0)"), "outflow": (F, "if(amount < 0, 0 - amount, 0)")},
+               names={"inflow_sum": "inflow", "outflow_sum": "outflow"},
+               description="Sum the kept transactions per account and day.", tags=["3-daily"])
 
-# 3. time series forecasting ------------------------------------------------------------------
-p.timeseries_model("cashflow_forecast_model", "monthly_net", target="net", time="month", ids=["account_id"],
-                   horizon=3, algorithms=ALGORITHMS, env=CODE_ENV,
-                   description="Time series forecasting of net per account, 3 months ahead, tested on the last "
-                               "3 months. The Lab analysis compares the algorithms; the best (MASE) is deployed.",
-                   tags=["3-forecast"])
+dataset("account_days", "Every calendar day for every account.", "3-daily")
+p.join_recipe("join_account_days", ["calendar", "accounts"], "account_days", [], how="CROSS",
+              columns={"accounts": ["account_id", "balance_date"]},
+              description="Calendar x accounts: one row per account and day.", tags=["3-daily"])
 
-dataset("forecast", "monthly_net + 3 new months per account (Oct - Dec 2026) with the forecast and its "
-        "quantiles (quantile_01 = 10% ... quantile_09 = 90%). Chart it: history and forecast together.",
-        "3-forecast")
-p.score_recipe("forecast_next_months", "cashflow_forecast_model", "monthly_net", "forecast",
-               description="Forecast Oct - Dec 2026 from the full history.", tags=["3-forecast"])
+dataset("account_days_totals", "account_days + the day's money in and out (empty when nothing happened).",
+        "3-daily")
+p.join_recipe("join_daily_totals", ["account_days", "daily_totals"], "account_days_totals", ["account_id", "date"],
+              columns={"daily_totals": ["inflow", "outflow"]},
+              description="Add the day's totals to each account and day.", tags=["3-daily"])
 
-# 4. outlook ----------------------------------------------------------------------------------
-dataset("forecast_3m", "Per account: forecast net over the 3 months, worst month, pessimistic total (10%).",
-        "4-outlook")
-p.group_recipe("group_forecast_3m", "forecast", "forecast_3m", ["account_id"],
-               {"forecast": ["sum", "min"], "quantile_01": ["sum"]}, count=False, pre_filter="!isBlank(forecast)",
-               names={"forecast_sum": "forecast_3m_net", "forecast_min": "worst_month_net",
-                      "quantile_01_sum": "pessimistic_3m_net"},
-               description="Keep the forecast months and sum them per account.", tags=["4-outlook"])
+dataset("daily_flows_scoring", f"The time series: amount per account, flow (IN/OUT) and day, up to yesterday, "
+        f"plus the next {HORIZON} days with an empty amount (to forecast) and their calendar features.", "3-daily")
+p.prepare_recipe("prepare_daily_flows", "account_days_totals", "daily_flows_scoring", [
+    formula("days_ahead", 'diff(date, balance_date, "days")'),
+    keep_rows(f"days_ahead <= {HORIZON}"),
+    formula("inflow", "if(isBlank(inflow), 0, inflow)"),
+    formula("outflow", "if(isBlank(outflow), 0, outflow)"),
+    fold(["inflow", "outflow"], "flow", "amount"),
+    formula("flow", 'if(flow == "inflow", "IN", "OUT")'),
+    formula("amount", 'if(days_ahead > 0, "", amount)'),
+    keep_columns("account_id", "flow", "date", "amount", *CALENDAR),
+], f"0 on days without transactions; keep up to yesterday + {HORIZON} days; one row per flow (IN/OUT); "
+   "amount emptied on the future days.",
+    tags=["3-daily"])
 
-dataset("forecast_accounts", "forecast_3m + the account's company, balance and overdraft limit.", "4-outlook")
-p.join_recipe("join_accounts", ["forecast_3m", "accounts"], "forecast_accounts", ["account_id"],
-              description="Add the account details.", tags=["4-outlook"])
+dataset("daily_flows", "daily_flows_scoring up to yesterday: the training data.", "3-daily")
+p.prepare_recipe("prepare_training", "daily_flows_scoring", "daily_flows", [keep_rows("!isBlank(amount)")],
+                 "Keep the history only (amount known).", tags=["3-daily"])
 
-dataset("account_outlook", "Balance today, 3-month forecast and projected balance per account, with a risk level.",
-        "4-outlook")
-p.prepare_recipe("prepare_outlook", "forecast_accounts", "account_outlook", [
-    formula("forecast_3m_net", "round(forecast_3m_net)"),
-    formula("worst_month_net", "round(worst_month_net)"),
-    formula("pessimistic_3m_net", "round(pessimistic_3m_net)"),
-    formula("projected_balance", "round(current_balance + forecast_3m_net)"),
-    formula("pessimistic_balance", "round(current_balance + pessimistic_3m_net)"),
-    formula("risk_level", 'if(projected_balance < 0 - overdraft_limit, "HIGH", '
-                          'if(projected_balance < 0 || pessimistic_balance < 0, "MEDIUM", "LOW"))'),
-    keep_columns("account_id", "company_name", "sector", "relationship_manager", "current_balance",
-                 "overdraft_limit", "forecast_3m_net", "worst_month_net", "pessimistic_3m_net",
-                 "projected_balance", "pessimistic_balance", "risk_level"),
-], "projected balance (end of Dec) = balance today + 3-month forecast. HIGH: past the overdraft limit, "
-   "MEDIUM: below 0, expected or in the pessimistic case.", tags=["4-outlook"])
+# 4. time series forecasting ------------------------------------------------------------------
+p.timeseries_model("cashflow_forecast_model", "daily_flows", target="amount", time="date",
+                   ids=["account_id", "flow"], horizon=HORIZON, algorithms=ALGORITHMS, env=CODE_ENV,
+                   external=CALENDAR,
+                   description=f"Time series forecasting of the daily amount per account and flow, {HORIZON} days "
+                               f"ahead, tested on the last {HORIZON} days, calendar columns as external features. "
+                               "The Lab analysis compares the algorithms; the best (MASE) is deployed.",
+                   tags=["4-forecast"])
 
-# 5. GenAI ------------------------------------------------------------------------------------
-dataset("account_notes", "account_outlook + llm_output: the note written by the LLM.", "5-genai")
-p.prompt_recipe("prompt_account_notes", "account_outlook", "account_notes", LLM_ID, """\
-Write a cash-flow note (max 80 words, plain text) for the relationship manager of {{company_name}} ({{sector}}).
-Facts in USD, forecast for Oct - Dec 2026: balance today {{current_balance}}, overdraft limit {{overdraft_limit}},
-net cash flow forecast over the 3 months {{forecast_3m_net}} (pessimistic case {{pessimistic_3m_net}}),
-worst month {{worst_month_net}}, projected balance end of December {{projected_balance}}
-(pessimistic case {{pessimistic_balance}}), risk level {{risk_level}}.
-Say what is happening and suggest one action.""",
-                system="You are a corporate-banking credit analyst. Use only the facts given.",
-                description="One LLM call per account.", tags=["5-genai"])
+dataset("scored_flows", "daily_flows_scoring + forecast and quantiles on the future days.", "4-forecast")
+p.score_recipe("score_flows", "cashflow_forecast_model", "daily_flows_scoring", "scored_flows",
+               description=f"Forecast the next {HORIZON} days from the full history.", tags=["4-forecast"])
+
+dataset("forecast", f"Per account, flow and future day: forecast and its range (quantile_01 = 10% ... "
+        "quantile_09 = 90%).", "4-forecast")
+p.prepare_recipe("prepare_forecast", "scored_flows", "forecast", [
+    keep_rows("!isBlank(forecast)"),
+    keep_columns("account_id", "flow", "date", "forecast", *[f"quantile_0{i}" for i in range(1, 10)]),
+], "Keep the future days and the forecast columns.", tags=["4-forecast"])
+
+# 5. balance path: yesterday's balance + money in - money out, day by day ----------------------
+dataset("daily_forecast", "Per account and future day: forecast money in, money out, net, and the variance of "
+        "net (how uncertain the day is, from the 10%-90% ranges).", "5-balance")
+p.group_recipe("group_daily_forecast", "forecast", "daily_forecast", ["account_id", "date"],
+               {"inflow": ["sum"], "outflow": ["sum"], "net": ["sum"], "net_variance": ["sum"]}, count=False,
+               computed={
+                   "inflow": (F, 'if(flow == "IN", max(forecast, 0), 0)'),
+                   "outflow": (F, 'if(flow == "OUT", max(forecast, 0), 0)'),
+                   "net": (F, 'if(flow == "IN", max(forecast, 0), 0 - max(forecast, 0))'),
+                   # 10%-90% range = 2.563 standard deviations of a normal distribution
+                   "net_variance": (F, "pow((quantile_09 - quantile_01) / 2.563, 2)"),
+               },
+               names={"inflow_sum": "inflow", "outflow_sum": "outflow", "net_sum": "net",
+                      "net_variance_sum": "net_variance"},
+               description="Put IN and OUT side by side per day (negative forecasts count as 0).",
+               tags=["5-balance"])
+
+dataset("daily_running", "daily_forecast + running totals of net and of its variance since D.", "5-balance")
+p.window_recipe("window_running_totals", "daily_forecast", "daily_running", ["account_id"], ["date"],
+                {"net": {"sum": True}, "net_variance": {"sum": True}},
+                names={"net_sum": "net_running", "net_variance_sum": "variance_running"},
+                description="Cumulative sums per account, in date order.", tags=["5-balance"])
+
+dataset("daily_running_accounts", "daily_running + the account's balance yesterday.", "5-balance")
+p.join_recipe("join_opening_balance", ["daily_running", "accounts"], "daily_running_accounts", ["account_id"],
+              columns={"accounts": ["balance"]}, description="Add yesterday's balance.", tags=["5-balance"])
+
+dataset("daily_balance_path", "Per account and future day: forecast in, out, balance and pessimistic balance.",
+        "5-balance")
+p.prepare_recipe("prepare_balance_path", "daily_running_accounts", "daily_balance_path", [
+    formula("pessimistic_balance", "round(balance + net_running - 1.2816 * sqrt(variance_running))"),
+    formula("balance", "round(balance + net_running)"),
+    formula("inflow", "round(inflow)"),
+    formula("outflow", "round(outflow)"),
+    keep_columns("account_id", "date", "inflow", "outflow", "balance", "pessimistic_balance"),
+], "balance = yesterday's balance + running net. Pessimistic: the 1-in-10 bad case of the running net "
+   "(1.2816 standard deviations below).", tags=["5-balance"])
+
+# 6. outlook: lowest point per account and risk level -----------------------------------------
+dataset("account_lowest", f"Per account over the {HORIZON} days: totals in and out, lowest balance, lowest "
+        "pessimistic balance.", "6-outlook")
+p.group_recipe("group_outlook", "daily_balance_path", "account_lowest", ["account_id"],
+               {"inflow": ["sum"], "outflow": ["sum"], "balance": ["min"], "pessimistic_balance": ["min"]},
+               count=False,
+               names={"inflow_sum": f"total_in_{HORIZON}d", "outflow_sum": f"total_out_{HORIZON}d",
+                      "balance_min": "lowest_balance", "pessimistic_balance_min": "pessimistic_lowest_balance"},
+               description="Totals and lowest balances per account.", tags=["6-outlook"])
+
+dataset("account_lowest_details", "account_lowest + the day of the lowest balance + company, balance yesterday "
+        "and overdraft limit.", "6-outlook")
+p.join_recipe("join_accounts", ["account_lowest", "daily_balance_path", "accounts"], "account_lowest_details",
+              {"daily_balance_path": ["account_id", ("lowest_balance", "balance")], "accounts": ["account_id"]},
+              columns={"daily_balance_path": ["date"],
+                       "accounts": ["company_name", "sector", "relationship_manager", "balance", "overdraft_limit"]},
+              description="Find the day whose balance is the lowest one; add the account details.",
+              tags=["6-outlook"])
+
+dataset("account_outlook", f"One row per account: the next {HORIZON} days in numbers and a risk level.", "6-outlook")
+p.prepare_recipe("prepare_outlook", "account_lowest_details", "account_outlook", [
+    rename({"balance": "opening_balance", "date": "lowest_balance_date"}),
+    formula("closing_balance", f"round(opening_balance + total_in_{HORIZON}d - total_out_{HORIZON}d)"),
+    formula(f"total_in_{HORIZON}d", f"round(total_in_{HORIZON}d)"),
+    formula(f"total_out_{HORIZON}d", f"round(total_out_{HORIZON}d)"),
+    formula("risk_level", 'if(lowest_balance < 0 - overdraft_limit, "HIGH", '
+                          'if(lowest_balance < 0 || pessimistic_lowest_balance < 0, "MEDIUM", "LOW"))'),
+    keep_columns("account_id", "company_name", "sector", "relationship_manager", "opening_balance",
+                 "overdraft_limit", f"total_in_{HORIZON}d", f"total_out_{HORIZON}d", "closing_balance",
+                 "lowest_balance", "lowest_balance_date", "pessimistic_lowest_balance", "risk_level"),
+], "HIGH: the lowest balance goes past the overdraft limit. MEDIUM: below 0, expected or pessimistic. "
+   "LOW: otherwise.", tags=["6-outlook"])
 
 if __name__ == "__main__":
     ensure_code_env(CODE_ENV)

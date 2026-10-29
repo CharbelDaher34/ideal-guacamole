@@ -1,5 +1,6 @@
-"""Corporate banking, scripted version: same data as ../corporate_cashflow, built with code recipes and a
-regression model (the visual project uses time series forecasting).
+"""Corporate banking, scripted version: same data and goal as ../corporate_cashflow (daily money in and out
+for the next 30 days, balance day by day, lowest point), built with Python and SQL recipes and a regression
+model (gradient boosting) instead of Dataiku's time series forecasting.
 
     python3 ../corporate_cashflow/generate_data.py   # the synthetic CSVs (shared with the visual project)
     python3 create_project.py                         # push project CORP_CASHFLOW_CODE into DSS and build it
@@ -15,7 +16,8 @@ DATA = HERE.parent / "corporate_cashflow" / "data"
 sys.path.insert(0, str(HERE.parent))
 from dssproj import Project, col  # noqa: E402
 
-S, D, F = "string", "date", "double"
+D, F, I = "dateonly", "double", "int"
+CALENDAR = [col(c, I) for c in ("day_of_month", "day_of_week", "is_weekend", "is_month_start", "is_month_end")]
 
 
 def code(name):
@@ -24,50 +26,70 @@ def code(name):
 
 p = Project("CORP_CASHFLOW_CODE", "Corporate cash-flow forecast (code)",
             "Same data as CORP_CASHFLOW, built with Python and SQL recipes and a regression model.",
-            variables={"llm_id": "openai:openai:gpt-6-luna"})
+            variables={"horizon_days": "30"})
 p.wiki_home("Start here", (HERE / "wiki.md").read_text())
-
-OUTLOOK = [col("account_id"), col("company_name"), col("sector"), col("relationship_manager"),
-           col("current_balance", F), col("overdraft_limit", F), col("last_month_net", F), col("avg_3m_net", F),
-           col("forecast_month", D), col("forecast_net", F), col("projected_balance", F), col("risk_level")]
 
 # 1. input ------------------------------------------------------------------------------------
 p.csv_dataset("accounts", DATA / "accounts.csv", [
     col("account_id"), col("company_name"), col("sector"), col("relationship_manager"),
-    col("current_balance", F), col("overdraft_limit", F),
-], "10 corporate accounts: company, sector, balance today (end of Sep 2026), overdraft limit.", tags=["1-input"])
+    col("balance", F), col("balance_date", D), col("overdraft_limit", F),
+], "10 corporate accounts: closing balance on balance_date (yesterday, D-1) and overdraft limit.",
+    tags=["1-input"])
 p.csv_dataset("transactions", DATA / "transactions.csv", [
-    col("txn_id"), col("account_id"), col("booking_date"), col("amount", F), col("direction"), col("category"),
-], "Every transaction Oct 2023 - Sep 2026 (CREDIT = money in, DEBIT = money out).", tags=["1-input"])
+    col("txn_id"), col("account_id"), col("booking_date", D), col("amount", F), col("description"),
+], "Every transaction up to yesterday: signed amount (+ in, - out) and the bank description.", tags=["1-input"])
+p.csv_dataset("calendar", DATA / "calendar.csv", [col("date", D)] + CALENDAR,
+              "One row per day (history and the days to forecast) with calendar features known in advance.",
+              tags=["1-input"])
 
-# 2. monthly net cash flow (Python) -----------------------------------------------------------
-p.pg_dataset("monthly_net", [col("account_id"), col("month", D), col("net", F)],
-             "Net cash flow per account and month.", tags=["2-monthly"])
-p.python_recipe("compute_monthly_net", ["transactions"], ["monthly_net"], code("monthly_net.py"),
-                "Signed amounts summed per account and month.", tags=["2-monthly"])
+# 2. clean (Python) ---------------------------------------------------------------------------
+p.pg_dataset("transactions_clean", [
+    col("txn_id"), col("account_id"), col("date", "date"), col("amount", F), col("description"),
+    col("category"), col("flow"), col("excluded", I),
+], "transactions + category (description rules), flow (IN/OUT), excluded (1 = internal transfer or one-off).",
+    tags=["2-clean"])
+p.python_recipe("compute_transactions_clean", ["transactions"], ["transactions_clean"], code("clean_transactions.py"),
+                "Description rules -> category; sign -> flow; flag what is not repeatable cash flow.",
+                tags=["2-clean"])
 
-# 3. machine learning (SQL features, Python model) ---------------------------------------------
-p.pg_dataset("features", [
-    col("account_id"), col("month", D), col("net", F), col("net_avg_3m", F), col("net_last_year", F),
-    col("net_next_month", F), col("role"),
-], "monthly_net + 3-month average, same month last year, next month (to predict) and the row's role.",
-    tags=["3-ml"])
-p.sql_recipe("compute_features", ["monthly_net"], ["features"], code("features.sql"),
-             "Window functions in PostgreSQL: AVG, LAG, LEAD.", tags=["3-ml"])
+# 3. daily series (SQL, then Python) -----------------------------------------------------------
+p.pg_dataset("daily_totals", [col("account_id"), col("date", D), col("flow"), col("amount", F)],
+             "Money in / out per account and day, without the excluded rows (days with transactions only).",
+             tags=["3-daily"])
+p.sql_recipe("compute_daily_totals", ["transactions_clean"], ["daily_totals"], code("daily_totals.sql"),
+             "GROUP BY account, day and flow inside PostgreSQL.", tags=["3-daily"])
 
-p.pg_dataset("account_outlook", OUTLOOK,
-             "Balance today, forecast and projected balance per account, with a risk level.", tags=["3-ml"])
-p.pg_dataset("model_evaluation", [col("method"), col("mae", F)],
-             "Average error on the test months: the model vs two simple baselines.", tags=["3-ml"])
-p.python_recipe("compute_forecast", ["features", "accounts"], ["account_outlook", "model_evaluation"],
-                code("forecast.py"), "Linear regression (scikit-learn): train, test, forecast, risk level.",
-                tags=["3-ml"])
+p.pg_dataset("daily_flows", [col("account_id"), col("flow"), col("date", "date")] + CALENDAR + [col("amount", F)],
+             "The time series: amount per account, flow and day (0 on quiet days) up to yesterday, plus the next "
+             "horizon_days days with an empty amount and their calendar features.", tags=["3-daily"])
+p.python_recipe("compute_daily_flows", ["daily_totals", "calendar", "accounts"], ["daily_flows"],
+                code("daily_flows.py"), "Every account x flow x day; 0 when nothing happened; future days empty.",
+                tags=["3-daily"])
 
-# 4. GenAI (Python + LLM Mesh) ----------------------------------------------------------------
-p.pg_dataset("account_notes", OUTLOOK + [col("note")], "account_outlook + the note written by the LLM.",
-             tags=["4-genai"])
-p.python_recipe("compute_account_notes", ["account_outlook"], ["account_notes"], code("account_notes.py"),
-                "One LLM call per account, with the LLM in the project variable llm_id.", tags=["4-genai"])
+# 4. forecast (Python, scikit-learn) ------------------------------------------------------------
+p.pg_dataset("forecast", [col("account_id"), col("flow"), col("date", "date"), col("forecast", F),
+                          col("forecast_low", F), col("forecast_high", F)],
+             "Per account, flow and future day: forecast and its range (10% / 90%).", tags=["4-forecast"])
+p.pg_dataset("model_evaluation", [col("method"), col("mae", F), col("mase", F)],
+             "Error on the last 30 known days: the model vs three simple baselines.", tags=["4-forecast"])
+p.python_recipe("compute_forecast", ["daily_flows"], ["forecast", "model_evaluation"], code("forecast.py"),
+                "Gradient boosting on calendar + past values: test on the last 30 days, then forecast the next 30.",
+                tags=["4-forecast"])
+
+# 5. balance path and outlook (Python) --------------------------------------------------------
+p.pg_dataset("daily_balance_path", [col("account_id"), col("date", "date"), col("inflow", F), col("outflow", F),
+                                    col("balance", F), col("pessimistic_balance", F)],
+             "Per account and future day: forecast in, out, balance and pessimistic balance.", tags=["5-outlook"])
+p.pg_dataset("account_outlook", [
+    col("account_id"), col("company_name"), col("sector"), col("relationship_manager"), col("opening_balance", F),
+    col("overdraft_limit", F), col("total_in", F), col("total_out", F), col("closing_balance", F),
+    col("lowest_balance", F), col("lowest_balance_date", "date"), col("pessimistic_lowest_balance", F),
+    col("risk_level"),
+], "One row per account: the next 30 days in numbers, lowest balance and its date, risk level.",
+    tags=["5-outlook"])
+p.python_recipe("compute_balance_outlook", ["forecast", "accounts"], ["daily_balance_path", "account_outlook"],
+                code("balance_outlook.py"), "Running balance from yesterday's balance; lowest point; risk level.",
+                tags=["5-outlook"])
 
 if __name__ == "__main__":
     p.deploy()
