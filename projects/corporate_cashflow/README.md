@@ -24,17 +24,27 @@ Open http://localhost:10000/projects/CORP_CASHFLOW/ — the project **Wiki** ("S
 - `calendar`: one row per day up to Dec 2026 with `day_of_month`, `day_of_week`, `is_weekend`,
   `is_month_start`, `is_month_end` (known in advance, used as external features).
 
-## Flow (16 recipes)
+## Flow (16 recipes, 3 zones)
 
 ```
-transactions ─[Prepare: description rules]─► transactions_clean ─[Group, excluded = 0]─► daily_totals
-calendar × accounts ─[Join cross]─► account_days ─[Join daily_totals]─► ─[Prepare: 0 on quiet days, fold IN/OUT]─►
-    daily_flows_scoring (history + 30 future days) ─[Prepare: history only]─► daily_flows (training)
-daily_flows ─[Visual ML time series: 9 algorithms, best deployed]─► cashflow_forecast_model
-daily_flows_scoring ─[Score]─► scored_flows ─[Prepare]─► forecast (30 days × account × IN/OUT)
-forecast ─[Group]─► daily_forecast ─[Window: running totals]─► ─[Join balance]─► ─[Prepare]─► daily_balance_path
-daily_balance_path ─[Group]─► account_lowest ─[Join: day of the lowest + accounts]─► ─[Prepare: risk]─► account_outlook
+Data prep   transactions ─[Prepare: description rules]─► transactions_clean ─[Group, excluded = 0]─► daily_totals
+            calendar × accounts ─[Join cross]─► account_days ─[Join daily_totals]─► ─[Prepare: 0 on quiet days,
+            fold IN/OUT]─► daily_flows_scoring (history + 30 future days)
+Training    daily_flows_scoring ─[Prepare: history only]─► daily_flows
+            daily_flows ─[Visual ML time series: 9 algorithms, best deployed]─► cashflow_forecast_model
+Inference   daily_flows_scoring + cashflow_forecast_model ─[Score]─► scored_flows ─[Prepare]─► forecast
+            forecast ─[Group]─► daily_forecast ─[Window: running totals]─► ─[Join balance]─► ─[Prepare]─► daily_balance_path
+            daily_balance_path ─[Group]─► account_lowest ─[Join: day of the lowest + accounts]─► ─[Prepare: risk]─► account_outlook
 ```
+
+Two scenarios (Scenarios tab > Run):
+
+- **Train model**: rebuild `daily_flows`, retrain the saved model: a new active version.
+- **Daily forecast**: rebuild `account_outlook` and everything upstream with the active model version. The
+  saved model's rebuild behavior is *explicit*, so this never retrains it.
+
+The Free Edition has no time-based triggers: run them by hand, or from a cron with
+`dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`.
 
 The model is created at deploy time like you would in the UI: a Lab analysis on `daily_flows` (target
 `amount`, time `date`, identifiers `account_id` + `flow`, horizon 30, calendar columns as external
@@ -50,7 +60,7 @@ All managed datasets are PostgreSQL tables named `CORP_CASHFLOW_<dataset>`.
 | File | What |
 |---|---|
 | `generate_data.py` | Synthetic accounts, transactions and calendar (seeded) |
-| `create_project.py` | Project definition: datasets, description rules, visual recipes, algorithms to compare, tags, wiki |
+| `create_project.py` | Project definition: datasets, description rules, visual recipes, algorithms to compare, zones, scenarios, wiki |
 | `wiki.md` | Project wiki home page |
 | `HOW_IT_WORKS.md` | The method and the Dataiku components, explained simply |
 

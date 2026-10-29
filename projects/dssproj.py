@@ -23,6 +23,7 @@ DSS_VERSION = "15.2.0"
 DSS_CONF_VERSION = "15200"
 PG_CONNECTION = "postgres_local"
 TAG_COLORS = ["#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#d62728", "#17becf", "#8c564b"]
+FOLDER_CONNECTION = "filesystem_folders"
 
 
 def col(name, type_="string"):
@@ -43,6 +44,10 @@ class Project:
         self.tags = []            # tag names in first-use order (declared in tags.json, else DSS drops them)
         self.recipes = []         # (name, outputs, kind, spec) in flow order; kind: code, visual or ml
         self.models = {}          # saved model name -> id, filled at deploy
+        self.kinds = {}           # flow item name -> DSS object type (DATASET, RECIPE, ...), to put it in a zone
+        self.item_tags = {}       # flow item name -> its tags
+        self.zones = []           # (name, items, shared, color)
+        self.scenarios = []       # (name, description, steps)
 
     # ---- datasets -------------------------------------------------------
     def csv_dataset(self, name, csv_path, columns, description="", tags=()):
@@ -70,6 +75,9 @@ class Project:
         }, columns, description, tags)
         self.connections.add((connection, "PostgreSQL"))
 
+    def _item(self, name, kind, tags):
+        self.kinds[name], self.item_tags[name] = kind, list(tags)
+
     def _use_tags(self, tags):
         self.tags += [t for t in tags if t not in self.tags]
         return list(tags)
@@ -79,6 +87,23 @@ class Project:
                      "description": description, "shortDesc": description.split("\n")[0],
                      "creationTag": _tag(), "flowOptions": {"rebuildBehavior": "NORMAL"}})
         self._json(f"project_config/datasets/{name}.json", body)
+        self._item(name, "DATASET", tags)
+
+    def managed_folder(self, name, description="", tags=(), explicit=False):
+        """Managed folder: files (a trained model, ...) in the DSS data dir; recipes use it like a dataset,
+        Python reads and writes it with dataiku.Folder(name). explicit: never rebuilt by building what is
+        downstream of it (only when built by name, e.g. in a scenario)."""
+        self._json(f"project_config/managed_folders/{name}.json", {
+            "name": name, "type": "Filesystem", "params": {"connection": FOLDER_CONNECTION,
+                                                           "path": "${projectKey}/${odbId}"},
+            "description": description, "shortDesc": description.split("\n")[0], "tags": self._use_tags(tags),
+            "creationTag": _tag(), "flowOptions": {"rebuildBehavior": "EXPLICIT" if explicit else "NORMAL"}})
+        self.connections.add((FOLDER_CONNECTION, "Filesystem"))
+        self._item(name, "MANAGED_FOLDER", tags)
+
+    def library(self, filename, code):
+        """Python module in the project library (... > Libraries), importable from every Python recipe."""
+        self.files[f"project_config/lib/python/{filename}"] = code.strip().encode() + b"\n"
 
     # ---- recipes --------------------------------------------------------
     def python_recipe(self, name, inputs, outputs, code, description="", tags=()):
@@ -95,6 +120,7 @@ class Project:
             "inputs": {"main": {"items": [{"ref": i, "deps": []} for i in inputs]}},
             "outputs": {"main": {"items": [{"ref": o, "appendMode": False} for o in outputs]}},
         })
+        self._item(name, "RECIPE", tags)
         if isinstance(code, dict):               # visual recipes are configured by a JSON payload
             self._json(f"project_config/recipes/{name}.{ext}", code)
             self.recipes.append((name, outputs, "visual", None))
@@ -211,17 +237,18 @@ class Project:
 
     # ---- Visual ML (created at deploy through the same calls as the UI: Lab analysis -> deploy) ----
     def ml_model(self, name, train, test, target, reject=(), algorithm="lightgbm_regression", params=None,
-                 interval=None, metric="MAE", description="", tags=()):
+                 interval=None, metric="MAE", explicit=False, description="", tags=()):
         """Regression model trained in a Lab analysis on `train`, tested on `test`, then deployed to the
         flow as saved model `name` with its training recipe train_<name>. params: hyperparameters of the
-        algorithm (one value each); interval: prediction interval coverage, e.g. 0.8 => 10%-90%."""
-        self.recipes.append((f"train_{name}", [], "ml", {
+        algorithm (one value each); interval: prediction interval coverage, e.g. 0.8 => 10%-90%.
+        explicit: the saved model is only retrained when built by name (not by building what is downstream)."""
+        self._ml_recipe(name, {
             "model": name, "train": train, "test": test, "target": target, "reject": list(reject),
             "algorithm": algorithm, "params": params or {}, "interval": interval, "metric": metric,
-            "description": description, "tags": self._use_tags(tags)}))
+            "explicit": explicit, "description": description, "tags": self._use_tags(tags)})
 
     def timeseries_model(self, name, input_, target, time, ids, horizon, algorithms, env, external=(),
-                         metric="MASE", description="", tags=()):
+                         metric="MASE", explicit=False, description="", tags=()):
         """Time series forecasting model trained in a Lab analysis on input_ (one row per series and time
         step), then the best algorithm on `metric` is deployed to the flow as saved model `name`.
         ids: columns identifying each series; horizon: time steps to forecast (the last `horizon` steps of
@@ -229,22 +256,45 @@ class Project:
         values or, for option sets (ETS trend, ...), the options to enable; env: code env with the time
         series packages (ensure_code_env); external: columns known in advance (calendar, ...) used as
         external features by the algorithms that support them; any other column is ignored. With external
-        features, the dataset to score must also hold the `horizon` future rows (target empty)."""
-        self.recipes.append((f"train_{name}", [], "ml", {
+        features, the dataset to score must also hold the `horizon` future rows (target empty).
+        explicit: as in ml_model."""
+        self._ml_recipe(name, {
             "model": name, "train": input_, "test": "", "target": target, "time": time, "ids": list(ids),
             "horizon": horizon, "algorithms": algorithms, "env": env, "external": list(external),
-            "metric": metric, "description": description, "tags": self._use_tags(tags)}))
+            "metric": metric, "explicit": explicit, "description": description, "tags": self._use_tags(tags)})
+
+    def _ml_recipe(self, name, spec):
+        self.recipes.append((f"train_{name}", [], "ml", spec))
+        self._item(f"train_{name}", "RECIPE", spec["tags"])
+        self._item(name, "SAVED_MODEL", spec["tags"])
 
     def score_recipe(self, name, model, input_, output, description="", tags=()):
         """Score recipe: applies saved model `model` to input_ (adds the prediction columns)."""
         self.recipes.append((name, [output], "score", {
             "model": model, "input": input_, "output": output, "description": description, "tags": self._use_tags(tags)}))
+        self._item(name, "RECIPE", tags)
 
     def evaluate_recipe(self, name, model, input_, scored, metrics, description="", tags=()):
         """Evaluate recipe: scores input_ (which has the true target) and computes the model's metrics."""
         self.recipes.append((name, [scored, metrics], "evaluate", {
             "model": model, "input": input_, "scored": scored, "metrics": metrics, "description": description,
             "tags": self._use_tags(tags)}))
+        self._item(name, "RECIPE", tags)
+
+    # ---- flow zones and scenarios (created at deploy, once the saved models exist) ----
+    def zone(self, name, tags=(), items=(), shared=(), color=None):
+        """Flow zone: a box in the Flow holding the items (datasets, recipes, folders, saved models) that have
+        one of these tags, plus `items` (by name). shared: items of another zone also shown in this one (the
+        inputs it reads from there). Items in no zone stay in the Default zone."""
+        items = [i for i, t in self.item_tags.items() if set(t) & set(tags)] + list(items)
+        self.zones.append((name, items, list(shared), color or TAG_COLORS[len(self.zones) % len(TAG_COLORS)]))
+
+    def scenario(self, name, steps, description=""):
+        """Scenario (Scenarios tab, Run button): its steps run in order, each builds a list of items (by name).
+        steps: [(step name, [items], mode)]; mode "RECURSIVE_FORCED_BUILD" = the items and everything upstream
+        except explicit items, "NON_RECURSIVE_FORCED_BUILD" = only the items (retrains a saved model),
+        "RECURSIVE_BUILD" = what is out of date. No trigger: the Free Edition has no time-based triggers."""
+        self.scenarios.append((name, description, steps))
 
     # ---- wiki -----------------------------------------------------------
     def wiki_home(self, title, markdown):
@@ -308,7 +358,10 @@ class Project:
             if build:
                 print(f"  running {name} -> {', '.join(outputs)}")
                 _dsscli("build", self.key, "--wait", "--mode", "NON_RECURSIVE_FORCED_BUILD",
-                        *[a for o in outputs for a in ("--dataset", o)], capture=True)
+                        *[a for o in outputs for a in (
+                            "--folder" if self.kinds.get(o) == "MANAGED_FOLDER" else "--dataset", o)], capture=True)
+        self._create_zones()
+        self._create_scenarios()
         print(f"{self.key} ready: http://127.0.0.1:10000/projects/{self.key}/flow/")
 
     def _train_and_deploy(self, recipe, spec):
@@ -377,6 +430,10 @@ class Project:
             "modelName": spec["model"], "managedFolderSmartId": "", "options": json.dumps({"redoOptimization": False})})
         self.models[spec["model"]] = r["second"]
         self._set_recipe_meta(r["first"], recipe, spec)
+        if spec["explicit"]:
+            sm = _api("GET", "savedmodels/get", {"projectKey": k, "smartId": r["second"]})
+            sm.setdefault("flowOptions", {})["rebuildBehavior"] = "EXPLICIT"
+            _api("POST", "savedmodels/save", {"data": json.dumps(sm), "saveInfo": "{}"})
 
     def _create_model_recipe(self, recipe, kind, spec):
         opts = {"inputDatasetSmartName": spec["input"], "savedModelSmartName": self.models[spec["model"]],
@@ -398,6 +455,36 @@ class Project:
                        "shortDesc": spec["description"].split("\n")[0]})
         _api("POST", "flow/recipes/save", {"projectKey": self.key, "recipe": json.dumps(recipe),
                                            "commitMessage": "created by dssproj"})
+
+    def _item_ref(self, name):
+        kind = self.kinds[name]
+        return {"type": kind, "projectKey": self.key, "id": self.models.get(name, name) if kind == "SAVED_MODEL" else name}
+
+    def _create_zones(self):
+        for name, items, shared, color in self.zones:
+            zid = _api("POST", "flow/create-zone", {"projectKey": self.key, "name": name, "color": color})["id"]
+            _api("POST", "flow/move-to-zone", {"projectKey": self.key, "zoneId": zid,
+                                               "movingItems": json.dumps([self._item_ref(i) for i in items])})
+            if shared:
+                _api("POST", "flow/share-to-zone", {"projectKey": self.key, "zoneId": zid,
+                                                    "sharingItems": json.dumps([self._item_ref(i) for i in shared])})
+
+    def _create_scenarios(self):
+        for name, description, steps in self.scenarios:
+            sid = re.sub(r"\W", "_", name.upper())
+            sc = _api("GET", "scenarios/create", {"projectKey": self.key, "data": json.dumps(
+                {"id": sid, "name": name, "type": "step_based", "params": {}})})
+            sc.update({"name": name, "type": "step_based", "description": description, "shortDesc": description,
+                       "active": False, "triggers": [],
+                       "params": {"steps": [{
+                           "id": f"step_{n}", "type": "build_flowitem", "name": step_name, "enabled": True,
+                           "runConditionType": "RUN_IF_STATUS_MATCH", "runConditionStatuses": ["SUCCESS", "WARNING"],
+                           "params": {"builds": [{"type": self.kinds[i], "itemId": self._item_ref(i)["id"],
+                                                  "partitionsSpec": ""} for i in items],
+                                      "jobType": mode, "handleWarningsAs": "WARNING", "proceedOnFailure": False}}
+                           for n, (step_name, items, mode) in enumerate(steps)]}})
+            _api("POST", "scenarios/save", {"projectKey": self.key, "data": json.dumps(sc), "scriptData": "",
+                                            "saveInfo": json.dumps({"commitMessage": "created by dssproj"})})
 
     def _update_schema(self, recipe):
         result = _api("GET", "flow/recipes/get-schema-update-result", {"projectKey": self.key, "recipeName": recipe})

@@ -115,7 +115,8 @@ balance(day) = yesterday's balance + running total of (forecast in − forecast 
 | Component | What it is | In this project |
 |---|---|---|
 | **Project** | Container for everything | `CORP_CASHFLOW` |
-| **Flow** | The pipeline: datasets → recipes → datasets | 6 zones, by tag `1-input` … `6-outlook` |
+| **Flow** | The pipeline: datasets → recipes → datasets | one Flow, split in 3 zones |
+| **Flow zone** | A box grouping part of the Flow | Data prep, Training, Inference |
 | **Dataset** | A table | 3 uploaded CSVs + PostgreSQL tables for every output |
 | **Recipe** | A step that reads datasets and writes a dataset | Prepare, Group, Join, Window, Score |
 | **Lab (Visual analysis)** | Workspace to train and compare models | 9 algorithms trained on `daily_flows` |
@@ -123,20 +124,30 @@ balance(day) = yesterday's balance + running total of (forecast in − forecast 
 | **Code environment** | Python with the ML packages | `timeseries` (statsmodels, prophet, gluonts, torch) |
 | **Wiki** | Project documentation | "Start here" page |
 | **Job** | One run of the Flow | **Build** a dataset to (re)run what feeds it |
+| **Scenario** | A saved list of builds, run with one click | Train model, Daily forecast |
 
-### The Flow
+### The Flow: one Flow, three zones
+
+A project has **one** Flow. Training and inference are two parts of it, grouped in **zones**:
 
 ```
-1-input     accounts, transactions, calendar
-2-clean     transactions ─[Prepare]─► transactions_clean
-3-daily     transactions_clean ─[Group]─► daily_totals
-            calendar × accounts ─[Join cross]─► account_days ─[Join daily_totals]─► account_days_totals
-            ─[Prepare]─► daily_flows_scoring (history + 30 future days) ─[Prepare]─► daily_flows (history)
-4-forecast  daily_flows ─[Lab]─► cashflow_forecast_model
-            daily_flows_scoring + model ─[Score]─► scored_flows ─[Prepare]─► forecast
-5-balance   forecast ─[Group]─► daily_forecast ─[Window]─► daily_running ─[Join]─► ─[Prepare]─► daily_balance_path
-6-outlook   daily_balance_path ─[Group]─► account_lowest ─[Join]─► ─[Prepare]─► account_outlook
+┌─ Data prep ──────────────────────────────────────────────────────────────────────────────┐
+│ accounts, transactions, calendar ─► transactions_clean ─► daily_totals                   │
+│ ─► account_days ─► account_days_totals ─► daily_flows_scoring (history + 30 days)        │
+└──────────────┬──────────────────────────────────────┬────────────────────────────────────┘
+┌─ Training ───┴──────────────────────┐ ┌─ Inference ─┴────────────────────────────────────┐
+│ daily_flows (history only)          │ │ daily_flows_scoring + model ─[Score]─► forecast  │
+│ ─[Lab]─► ◆ cashflow_forecast_model  ├─► ─► daily_balance_path ─► account_outlook         │
+└─────────────────────────────────────┘ └──────────────────────────────────────────────────┘
 ```
+
+- **The data prep is shared**, not copied: training and inference must prepare the data the same way.
+  A dataset used by another zone is *shared* into it (right-click > Share to a flow zone).
+- **The saved model is the link**: training writes a new version, inference uses the active version.
+- **The model's rebuild behavior is Explicit** (saved model > Settings): building `account_outlook`
+  never retrains it, only a build of the model itself does.
+
+In the UI: **+ Zone** (Flow, top right) creates a zone; select items, right-click > **Move to a flow zone**.
 
 ### How each component is set up
 
@@ -184,6 +195,16 @@ Settings under **Design**:
 **Train** → **Result** shows every model with its metrics, the forecast chart per series and the metrics
 per series. Pick a model → **Deploy** puts it in the Flow as a saved model.
 
+**Scenarios** (Scenarios tab > **Run**): each step builds items.
+
+| Scenario | Steps | When |
+|---|---|---|
+| Train model | build `daily_flows`; build `cashflow_forecast_model` only (= retrain, new active version) | monthly |
+| Daily forecast | build `account_outlook` and everything upstream (the explicit model is skipped) | every day |
+
+The Free Edition has no time-based triggers: run them by hand or from a cron
+(`dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`).
+
 **Score recipe**: applies the saved model to `daily_flows_scoring`. With external features, the input
 must contain the 30 future rows (empty `amount`, calendar filled), otherwise scoring fails with "No
 timeseries has enough future values of external features".
@@ -199,6 +220,7 @@ Everything is defined in [`create_project.py`](create_project.py):
 | Algorithms and their settings | `ALGORITHMS` | Lab → Design → Algorithms |
 | External features | `CALENDAR` | Lab → Design → Features handling |
 | Risk rule | `prepare_outlook` formulas | Prepare recipe step |
+| Zones, scenarios | `p.zone(...)`, `p.scenario(...)` | Flow > zones; Scenarios tab |
 
 > Re-running `create_project.py` deletes and re-creates the project, so changes made only in the UI are
 > lost.

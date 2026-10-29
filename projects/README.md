@@ -16,7 +16,7 @@ Lab analysis, training, deploy to the flow, then their Evaluate / Score recipes.
 |---|---|---|
 | `demo/` | `DEV_DEMO` | Minimal example: CSV -> Python -> SQL |
 | `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate banking: daily money in / out for the next 30 days, balance day by day, lowest point and risk. Visual recipes and Visual ML **time series forecasting** (9 algorithms compared), no code (see its README) |
-| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same data and goal, scripted: 4 Python + 1 SQL recipes, **regression** (gradient boosting, scikit-learn) on calendar + past values (see its README) |
+| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same data and goal, scripted: 5 Python + 1 SQL recipes, **regression** (gradient boosting, scikit-learn) on calendar + past values (see its README) |
 
 ## Run the demo
 
@@ -61,15 +61,26 @@ Visual recipes (prefer these; open them in the UI to see the settings):
 | `split_recipe` | Split | column, `{value: output dataset}` |
 | `prompt_recipe` | Prompt (LLM Mesh) | LLM id, prompt template with `{{column}}` placeholders |
 
-Visual ML: `ml_model(name, train, test, target, reject=, params=, interval=)` (regression: Lab analysis
+Visual ML: `ml_model(name, train, test, target, reject=, params=, interval=, explicit=)` (regression: Lab analysis
 trained and deployed to the flow as saved model `name`), `timeseries_model(name, input, target, time, ids,
-horizon, algorithms, env, external=)` (time series forecasting: trains every algorithm in `algorithms`,
+horizon, algorithms, env, external=, explicit=)` (time series forecasting: trains every algorithm in `algorithms`,
 deploys the best on MASE; `external` = columns known in advance, then the dataset to score must also hold
 the future rows with an empty target), `evaluate_recipe`, `score_recipe`. `ensure_code_env(name)` creates a DSS code env with the
 Visual ML + time series packages if it does not exist (time series models need it).
 
-Code recipes: `python_recipe`, `sql_recipe`. All recipes take `description=` and `tags=`;
+`explicit=True`: the saved model is only retrained when it is built by name (a scenario step), never by
+building what is downstream of it.
+
+Code recipes: `python_recipe`, `sql_recipe`; `managed_folder(name, explicit=)` for files (e.g. a pickled
+model, `dataiku.Folder(name)` in Python); `library(filename, code)` adds a module to the project library,
+importable from every Python recipe. All recipes take `description=` and `tags=`;
 `wiki_home` and `Project(..., variables={...})` for the wiki and project variables.
+
+Training and inference in one project: `zone(name, tags=, items=, shared=)` groups the items with those tags
+into a flow zone (`shared` = inputs from another zone, shown in both), and `scenario(name, [(step name,
+[items], build mode)])` saves a list of builds to run from the Scenarios tab (the Free Edition has no
+time-based triggers; `dsscli scenario-run KEY SCENARIO_ID` from a cron). Zones and scenarios are created at
+the end of `deploy()`, once the saved models exist.
 Formulas are Dataiku formulas (GREL); on PostgreSQL they are translated to SQL, so build text
 with `concat(...)`. Column types: `string`, `bigint`, `int`, `double`, `boolean`, `date` (timestamp), `dateonly` (a day, e.g.
 `2026-09-30` in a CSV).

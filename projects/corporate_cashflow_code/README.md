@@ -11,22 +11,37 @@ python3 create_project.py                         # (re)creates project CORP_CAS
 
 Open http://localhost:10000/projects/CORP_CASHFLOW_CODE/ — the project **Wiki** walks through it.
 
-## Flow (5 recipes)
+## Flow (6 recipes, 3 zones)
 
 ```
-transactions ─[Python]─► transactions_clean ─[SQL]─► daily_totals
-daily_totals, calendar, accounts ─[Python]─► daily_flows (history + 30 future days)
-daily_flows ─[Python, scikit-learn]─► forecast, model_evaluation
-forecast, accounts ─[Python]─► daily_balance_path, account_outlook
+Data prep   transactions ─[Python]─► transactions_clean ─[SQL]─► daily_totals
+            daily_totals, calendar, accounts ─[Python]─► daily_flows (history + 30 future days)
+Training    daily_flows ─[Python, scikit-learn]─► forecast_model (folder: model.pkl), model_evaluation
+Inference   daily_flows + forecast_model ─[Python]─► forecast
+            forecast, accounts ─[Python]─► daily_balance_path, account_outlook
 ```
+
+The trained model is saved in the managed folder `forecast_model`, whose rebuild behavior is *explicit*:
+building `account_outlook` scores with the saved model and never retrains it. The training and the scoring
+recipes compute the features with the same code, `library/cashflow_model.py` (the project library).
+
+Two scenarios (Scenarios tab > Run):
+
+- **Train model**: rebuild `daily_flows`, then test, retrain and save the model.
+- **Daily forecast**: rebuild `account_outlook` and everything upstream with the saved model.
+
+The Free Edition has no time-based triggers: run them by hand, or from a cron with
+`dsscli scenario-run CORP_CASHFLOW_CODE DAILY_FORECAST`.
 
 | File | What |
 |---|---|
-| `create_project.py` | Project definition: datasets, recipes, tags, project variable `horizon_days`, wiki |
+| `create_project.py` | Project definition: datasets, folder, recipes, zones, scenarios, project variable `horizon_days`, wiki |
+| `library/cashflow_model.py` | Project library: reading `daily_flows`, the features, the model, shared by training and scoring |
 | `recipes/clean_transactions.py` | Description rules -> category; sign -> flow (IN/OUT); flag internal transfers and one-offs |
 | `recipes/daily_totals.sql` | Money in / out per account and day (GROUP BY inside PostgreSQL) |
 | `recipes/daily_flows.py` | Every account × flow × day, 0 on quiet days, the next 30 days with an empty amount |
-| `recipes/forecast.py` | Gradient boosting: test on the last 30 days vs 3 baselines, then forecast the next 30 with a 10%-90% range |
+| `recipes/train_model.py` | Gradient boosting: test on the last 30 days vs 3 baselines, retrain on the full history, save it with its 10% / 90% quantile models |
+| `recipes/score_forecast.py` | Load the saved model, forecast the next 30 days from the latest history |
 | `recipes/balance_outlook.py` | Running balance, pessimistic balance, lowest point and its date, risk level |
 | `wiki.md` | Project wiki home page |
 
@@ -46,9 +61,11 @@ same day last month 0.92, last known day 0.92, same weekday of the last known we
 
 | | `CORP_CASHFLOW_CODE` (this) | `CORP_CASHFLOW` |
 |---|---|---|
-| Recipes | 4 Python + 1 SQL | 15 visual recipes + 1 Visual ML training |
+| Recipes | 5 Python + 1 SQL | 15 visual recipes + 1 Visual ML training |
 | Approach | regression: features built by hand (calendar + past values) | time series forecasting: DSS handles time |
 | Model | scikit-learn `HistGradientBoostingRegressor` (+ 10% / 90% quantile models) | best of 9 time series algorithms (DeepAR, ETS, Prophet, LightGBM...) |
 | Horizon | 30 days | 30 days |
+| Saved model | pickle in a managed folder | Visual ML saved model (versions, active version) |
+| Zones, scenarios | Data prep / Training / Inference; Train model, Daily forecast | the same |
 
 **Re-running `create_project.py` deletes and re-creates the project.**

@@ -6,7 +6,8 @@ Dataiku's time series forecasting, then follow the balance day by day to find it
 
 No code recipes: visual recipes (Prepare, Group, Join, Window) and Visual ML time series forecasting
 (a Lab analysis comparing several algorithms, the best one deployed to the flow + a Score recipe).
-The project wiki is wiki.md.
+The Flow has three zones (Data prep, Training, Inference) and two scenarios: "Train model" retrains the
+saved model, "Daily forecast" scores the latest data with it. The project wiki is wiki.md.
 """
 import sys
 from pathlib import Path
@@ -123,33 +124,35 @@ p.prepare_recipe("prepare_daily_flows", "account_days_totals", "daily_flows_scor
    "amount emptied on the future days.",
     tags=["3-daily"])
 
-dataset("daily_flows", "daily_flows_scoring up to yesterday: the training data.", "3-daily")
+# 4. training: the time series model -----------------------------------------------------------
+dataset("daily_flows", "daily_flows_scoring up to yesterday: the training data.", "4-train")
 p.prepare_recipe("prepare_training", "daily_flows_scoring", "daily_flows", [keep_rows("!isBlank(amount)")],
-                 "Keep the history only (amount known).", tags=["3-daily"])
+                 "Keep the history only (amount known).", tags=["4-train"])
 
-# 4. time series forecasting ------------------------------------------------------------------
 p.timeseries_model("cashflow_forecast_model", "daily_flows", target="amount", time="date",
                    ids=["account_id", "flow"], horizon=HORIZON, algorithms=ALGORITHMS, env=CODE_ENV,
-                   external=CALENDAR,
+                   external=CALENDAR, explicit=True,
                    description=f"Time series forecasting of the daily amount per account and flow, {HORIZON} days "
                                f"ahead, tested on the last {HORIZON} days, calendar columns as external features. "
-                               "The Lab analysis compares the algorithms; the best (MASE) is deployed.",
-                   tags=["4-forecast"])
+                               "The Lab analysis compares the algorithms; the best (MASE) is deployed. Retrained "
+                               "only by the \"Train model\" scenario (rebuild behavior: explicit).",
+                   tags=["4-train"])
 
-dataset("scored_flows", "daily_flows_scoring + forecast and quantiles on the future days.", "4-forecast")
+# 5. inference: forecast the next days with the saved model --------------------------------------
+dataset("scored_flows", "daily_flows_scoring + forecast and quantiles on the future days.", "5-forecast")
 p.score_recipe("score_flows", "cashflow_forecast_model", "daily_flows_scoring", "scored_flows",
-               description=f"Forecast the next {HORIZON} days from the full history.", tags=["4-forecast"])
+               description=f"Forecast the next {HORIZON} days from the full history.", tags=["5-forecast"])
 
 dataset("forecast", f"Per account, flow and future day: forecast and its range (quantile_01 = 10% ... "
-        "quantile_09 = 90%).", "4-forecast")
+        "quantile_09 = 90%).", "5-forecast")
 p.prepare_recipe("prepare_forecast", "scored_flows", "forecast", [
     keep_rows("!isBlank(forecast)"),
     keep_columns("account_id", "flow", "date", "forecast", *[f"quantile_0{i}" for i in range(1, 10)]),
-], "Keep the future days and the forecast columns.", tags=["4-forecast"])
+], "Keep the future days and the forecast columns.", tags=["5-forecast"])
 
-# 5. balance path: yesterday's balance + money in - money out, day by day ----------------------
+# 6. balance path: yesterday's balance + money in - money out, day by day ----------------------
 dataset("daily_forecast", "Per account and future day: forecast money in, money out, net, and the variance of "
-        "net (how uncertain the day is, from the 10%-90% ranges).", "5-balance")
+        "net (how uncertain the day is, from the 10%-90% ranges).", "6-balance")
 p.group_recipe("group_daily_forecast", "forecast", "daily_forecast", ["account_id", "date"],
                {"inflow": ["sum"], "outflow": ["sum"], "net": ["sum"], "net_variance": ["sum"]}, count=False,
                computed={
@@ -162,20 +165,20 @@ p.group_recipe("group_daily_forecast", "forecast", "daily_forecast", ["account_i
                names={"inflow_sum": "inflow", "outflow_sum": "outflow", "net_sum": "net",
                       "net_variance_sum": "net_variance"},
                description="Put IN and OUT side by side per day (negative forecasts count as 0).",
-               tags=["5-balance"])
+               tags=["6-balance"])
 
-dataset("daily_running", "daily_forecast + running totals of net and of its variance since D.", "5-balance")
+dataset("daily_running", "daily_forecast + running totals of net and of its variance since D.", "6-balance")
 p.window_recipe("window_running_totals", "daily_forecast", "daily_running", ["account_id"], ["date"],
                 {"net": {"sum": True}, "net_variance": {"sum": True}},
                 names={"net_sum": "net_running", "net_variance_sum": "variance_running"},
-                description="Cumulative sums per account, in date order.", tags=["5-balance"])
+                description="Cumulative sums per account, in date order.", tags=["6-balance"])
 
-dataset("daily_running_accounts", "daily_running + the account's balance yesterday.", "5-balance")
+dataset("daily_running_accounts", "daily_running + the account's balance yesterday.", "6-balance")
 p.join_recipe("join_opening_balance", ["daily_running", "accounts"], "daily_running_accounts", ["account_id"],
-              columns={"accounts": ["balance"]}, description="Add yesterday's balance.", tags=["5-balance"])
+              columns={"accounts": ["balance"]}, description="Add yesterday's balance.", tags=["6-balance"])
 
 dataset("daily_balance_path", "Per account and future day: forecast in, out, balance and pessimistic balance.",
-        "5-balance")
+        "6-balance")
 p.prepare_recipe("prepare_balance_path", "daily_running_accounts", "daily_balance_path", [
     formula("pessimistic_balance", "round(balance + net_running - 1.2816 * sqrt(variance_running))"),
     formula("balance", "round(balance + net_running)"),
@@ -183,28 +186,28 @@ p.prepare_recipe("prepare_balance_path", "daily_running_accounts", "daily_balanc
     formula("outflow", "round(outflow)"),
     keep_columns("account_id", "date", "inflow", "outflow", "balance", "pessimistic_balance"),
 ], "balance = yesterday's balance + running net. Pessimistic: the 1-in-10 bad case of the running net "
-   "(1.2816 standard deviations below).", tags=["5-balance"])
+   "(1.2816 standard deviations below).", tags=["6-balance"])
 
-# 6. outlook: lowest point per account and risk level -----------------------------------------
+# 7. outlook: lowest point per account and risk level -----------------------------------------
 dataset("account_lowest", f"Per account over the {HORIZON} days: totals in and out, lowest balance, lowest "
-        "pessimistic balance.", "6-outlook")
+        "pessimistic balance.", "7-outlook")
 p.group_recipe("group_outlook", "daily_balance_path", "account_lowest", ["account_id"],
                {"inflow": ["sum"], "outflow": ["sum"], "balance": ["min"], "pessimistic_balance": ["min"]},
                count=False,
                names={"inflow_sum": f"total_in_{HORIZON}d", "outflow_sum": f"total_out_{HORIZON}d",
                       "balance_min": "lowest_balance", "pessimistic_balance_min": "pessimistic_lowest_balance"},
-               description="Totals and lowest balances per account.", tags=["6-outlook"])
+               description="Totals and lowest balances per account.", tags=["7-outlook"])
 
 dataset("account_lowest_details", "account_lowest + the day of the lowest balance + company, balance yesterday "
-        "and overdraft limit.", "6-outlook")
+        "and overdraft limit.", "7-outlook")
 p.join_recipe("join_accounts", ["account_lowest", "daily_balance_path", "accounts"], "account_lowest_details",
               {"daily_balance_path": ["account_id", ("lowest_balance", "balance")], "accounts": ["account_id"]},
               columns={"daily_balance_path": ["date"],
                        "accounts": ["company_name", "sector", "relationship_manager", "balance", "overdraft_limit"]},
               description="Find the day whose balance is the lowest one; add the account details.",
-              tags=["6-outlook"])
+              tags=["7-outlook"])
 
-dataset("account_outlook", f"One row per account: the next {HORIZON} days in numbers and a risk level.", "6-outlook")
+dataset("account_outlook", f"One row per account: the next {HORIZON} days in numbers and a risk level.", "7-outlook")
 p.prepare_recipe("prepare_outlook", "account_lowest_details", "account_outlook", [
     rename({"balance": "opening_balance", "date": "lowest_balance_date"}),
     formula("closing_balance", f"round(opening_balance + total_in_{HORIZON}d - total_out_{HORIZON}d)"),
@@ -216,7 +219,22 @@ p.prepare_recipe("prepare_outlook", "account_lowest_details", "account_outlook",
                  "overdraft_limit", f"total_in_{HORIZON}d", f"total_out_{HORIZON}d", "closing_balance",
                  "lowest_balance", "lowest_balance_date", "pessimistic_lowest_balance", "risk_level"),
 ], "HIGH: the lowest balance goes past the overdraft limit. MEDIUM: below 0, expected or pessimistic. "
-   "LOW: otherwise.", tags=["6-outlook"])
+   "LOW: otherwise.", tags=["7-outlook"])
+
+# Flow zones: the shared data preparation, then training and inference side by side ------------------
+p.zone("Data prep", tags=["1-input", "2-clean", "3-daily"])
+p.zone("Training", tags=["4-train"], shared=["daily_flows_scoring"])
+p.zone("Inference", tags=["5-forecast", "6-balance", "7-outlook"],
+       shared=["daily_flows_scoring", "cashflow_forecast_model", "accounts"])
+
+# Scenarios (Scenarios tab > Run): retrain now and then; forecast every day once yesterday's data is in.
+p.scenario("Train model", [
+    ("Rebuild the training data", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
+    ("Retrain the saved model", ["cashflow_forecast_model"], "NON_RECURSIVE_FORCED_BUILD"),
+], description="Retrain the deployed algorithm on the latest history: a new active version of the saved model.")
+p.scenario("Daily forecast", [
+    ("Prepare the latest data, forecast, balance path and outlook", ["account_outlook"], "RECURSIVE_FORCED_BUILD"),
+], description=f"Forecast the next {HORIZON} days with the active model version (the model is not retrained).")
 
 if __name__ == "__main__":
     ensure_code_env(CODE_ENV)

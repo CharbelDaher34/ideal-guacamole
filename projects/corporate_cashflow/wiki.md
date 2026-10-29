@@ -9,27 +9,38 @@ Data is synthetic: 10 companies, 3 years of transactions up to yesterday (D-1 = 
 signed amount (+ in, - out) and a bank description. Forecast: **1 - 30 Oct 2026**. No code: visual recipes
 and Visual ML.
 
-## The flow, left to right
+## The flow: three zones
 
-| Tag | Recipe (type) | Output | What it does |
+| Zone | What | Run by |
+|---|---|---|
+| **Data prep** | From the raw transactions to `daily_flows_scoring`: every series and day, history + the 30 days to forecast | both scenarios |
+| **Training** | `daily_flows` (history only) -> the Visual ML model -> saved model `cashflow_forecast_model` | **Train model** |
+| **Inference** | The saved model scores `daily_flows_scoring` -> forecast -> balance path -> `account_outlook` | **Daily forecast** |
+
+The saved model is the link between the two: training writes a new version of it, inference always
+scores with the **active** version. Its rebuild behavior is **explicit** (saved model > Settings), so
+building `account_outlook` never retrains it. Datasets used by another zone are *shared* into it (they show
+in both).
+
+| Zone (tag) | Recipe (type) | Output | What it does |
 |---|---|---|---|
-| 1-input | uploaded CSVs | `accounts`, `transactions`, `calendar` | The data; `calendar` = one row per day with calendar features |
-| 2-clean | `prepare_transactions` (Prepare) | `transactions_clean` | Description rules -> `category`; sign -> `flow` (IN/OUT); `excluded` = internal transfer or one-off |
-| 3-daily | `group_daily_totals` (Group) | `daily_totals` | Money in / out per account and day, without the excluded rows |
-| 3-daily | `join_account_days` (Join, cross) | `account_days` | Every calendar day for every account |
-| 3-daily | `join_daily_totals` (Join) | `account_days_totals` | Add the day's totals (empty = nothing happened) |
-| 3-daily | `prepare_daily_flows` (Prepare) | `daily_flows_scoring` | 0 on quiet days, up to yesterday + 30 future days, one row per flow |
-| 3-daily | `prepare_training` (Prepare) | `daily_flows` | History only: **the training data** |
-| 4-forecast | `train_cashflow_forecast_model` (**Visual ML**) | `cashflow_forecast_model` | The best of 9 algorithms, see below |
-| 4-forecast | `score_flows` (Score) | `scored_flows` | Forecast and range on the 30 future days |
-| 4-forecast | `prepare_forecast` (Prepare) | `forecast` | Future days only |
-| 5-balance | `group_daily_forecast` (Group) | `daily_forecast` | IN and OUT side by side per day, net and its uncertainty |
-| 5-balance | `window_running_totals` (Window) | `daily_running` | Running totals since today |
-| 5-balance | `join_opening_balance` (Join) | `daily_running_accounts` | Add yesterday's balance |
-| 5-balance | `prepare_balance_path` (Prepare) | `daily_balance_path` | **Balance per future day** |
-| 6-outlook | `group_outlook` (Group) | `account_lowest` | Totals, lowest balance, lowest pessimistic balance |
-| 6-outlook | `join_accounts` (Join) | `account_lowest_details` | The day of the lowest balance (join on account + balance = lowest), company details |
-| 6-outlook | `prepare_outlook` (Prepare) | `account_outlook` | Closing balance and **risk level** |
+| Data prep (1-input) | uploaded CSVs | `accounts`, `transactions`, `calendar` | The data; `calendar` = one row per day with calendar features |
+| Data prep (2-clean) | `prepare_transactions` (Prepare) | `transactions_clean` | Description rules -> `category`; sign -> `flow` (IN/OUT); `excluded` = internal transfer or one-off |
+| Data prep (3-daily) | `group_daily_totals` (Group) | `daily_totals` | Money in / out per account and day, without the excluded rows |
+| Data prep (3-daily) | `join_account_days` (Join, cross) | `account_days` | Every calendar day for every account |
+| Data prep (3-daily) | `join_daily_totals` (Join) | `account_days_totals` | Add the day's totals (empty = nothing happened) |
+| Data prep (3-daily) | `prepare_daily_flows` (Prepare) | `daily_flows_scoring` | 0 on quiet days, up to yesterday + 30 future days, one row per flow |
+| Training (4-train) | `prepare_training` (Prepare) | `daily_flows` | History only: **the training data** |
+| Training (4-train) | `train_cashflow_forecast_model` (**Visual ML**) | `cashflow_forecast_model` | The best of 9 algorithms, see below |
+| Inference (5-forecast) | `score_flows` (Score) | `scored_flows` | Forecast and range on the 30 future days |
+| Inference (5-forecast) | `prepare_forecast` (Prepare) | `forecast` | Future days only |
+| Inference (6-balance) | `group_daily_forecast` (Group) | `daily_forecast` | IN and OUT side by side per day, net and its uncertainty |
+| Inference (6-balance) | `window_running_totals` (Window) | `daily_running` | Running totals since today |
+| Inference (6-balance) | `join_opening_balance` (Join) | `daily_running_accounts` | Add yesterday's balance |
+| Inference (6-balance) | `prepare_balance_path` (Prepare) | `daily_balance_path` | **Balance per future day** |
+| Inference (7-outlook) | `group_outlook` (Group) | `account_lowest` | Totals, lowest balance, lowest pessimistic balance |
+| Inference (7-outlook) | `join_accounts` (Join) | `account_lowest_details` | The day of the lowest balance (join on account + balance = lowest), company details |
+| Inference (7-outlook) | `prepare_outlook` (Prepare) | `account_outlook` | Closing balance and **risk level** |
 
 ## Cleaning: what the description is used for
 
@@ -98,11 +109,17 @@ far too pessimistic.
 `account_outlook` gives, per account: opening and closing balance, totals in and out, the **lowest balance
 and its date**, the pessimistic lowest balance and the risk level.
 
-## Every day (data up to D-1)
+## Scenarios: training and inference (Scenarios tab > Run)
 
-Rebuild `account_outlook`: the flow takes the transactions up to yesterday and forecasts from today. The
-model does not need retraining every day (weekly or monthly is fine). The Free Edition has no scheduler; a
-cron on the server can run `dsscli build`.
+| Scenario | When | Steps |
+|---|---|---|
+| **Daily forecast** | every day, once yesterday's data is in | Rebuild `account_outlook` and everything upstream: data prep, score with the active model, balance path, outlook. The model is not retrained. |
+| **Train model** | monthly, or when the forecasts get worse | 1. rebuild `daily_flows`; 2. retrain the saved model (the deployed algorithm, on the latest history): a new version, made active. |
+
+Retraining reuses the deployed algorithm and its settings; to compare algorithms again, train in the Lab
+and redeploy. Older versions stay in the saved model: open it to compare them or roll back. The Free
+Edition has no time-based triggers; a cron on the server can run
+`dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`.
 
 ## Things to try (in the Lab analysis)
 
