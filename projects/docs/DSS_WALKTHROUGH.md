@@ -146,42 +146,123 @@ and the **log** of each: this is where to read an error.
 
 ## 5. Scenarios
 
+A **scenario** is a saved list of **steps** that run one after the other. A **job** is one build of part of
+the Flow; a scenario's build steps start jobs. The project has two scenarios, the same in both projects:
+
 ![Scenarios](img/18-scenarios.png)
 
-▷ → **Scenarios**: the two saved runs. The Free Edition has no schedules: click **Run** (or use the dashboard
-buttons).
+| Scenario | In plain words | When |
+|---|---|---|
+| **Train model** | check the inputs → refresh the daily series → train the model | about monthly |
+| **Daily forecast** | check the inputs → refresh the daily series → is the model OK? → forecast and outputs → record the numbers | every day |
 
-| Scenario | Steps |
-|---|---|
-| **Train model** | check the inputs → build Data prep → train the model |
-| **Daily forecast** | check the inputs → build Data prep → check the model → build Inference → metrics |
+Open a scenario: **Settings** (when and how it runs), **Steps** (what it does), **Last runs** (what happened),
+**History** (changes to it). **Run** (top right) starts it now.
 
-### Step: check the inputs
+### Settings
 
-![Rules step](img/19-step-rules.png)
+![Scenario settings](img/sc-1-settings.png)
 
-Verifies the Data Quality rules of the four inputs. A rule in error stops the scenario: nothing is built from
-bad data.
+| Field | Meaning | Here |
+|---|---|---|
+| **Auto-triggers** | master switch: may the triggers below start the scenario on their own | off |
+| **Run as** | whose permissions the run uses | admin |
+| **Triggers** | when to start automatically: a time, a dataset change, a SQL query… | none: the Free Edition has no automatic triggers, so you click **Run** |
+| **Reporters** | send a message after a run (e-mail, Slack, Teams…) | none |
+| **Test** | mark as a test scenario, for DSS's test dashboard | no |
 
-### Step: check the model
+### Fields every step has
 
-![Python step](img/20-step-python.png)
+| Field | Meaning | Here |
+|---|---|---|
+| name box (next to the step type) | the label shown in Steps and Last runs | e.g. "Check the inputs" |
+| **Run this step** | when the step runs: *If no prior step failed*, *Always*, *If a prior step failed*… | *If no prior step failed*: the first failure stops the scenario |
+| **Ignore failure** | if ticked, a failure of this step doesn't fail the scenario | off |
+| **Outcome on warnings** | what a warning makes of the step | Warning: shown in orange, the scenario goes on |
+| **Maximal number of retries** | extra attempts before the step counts as failed | 0 |
 
-Custom Python: the model must exist, be at most 45 days old, have a MASE below 1 and a 123-day horizon.
-`raise Exception(...)` stops the scenario with that message.
+### Step 1 (both scenarios): Check the inputs
 
-### Step: build a zone
+![Check the inputs](img/sc-2-check-inputs.png)
 
-![Build step](img/21-step-build.png)
+Type **Verify rules or run checks**. For each **item** (the four inputs: `transactions`, `accounts`,
+`calendar`, `loan_schedule`), it runs the rules of that dataset's **Data Quality** tab: not empty, unique ids,
+up to yesterday, every installment paid, calendar long enough.
 
-Build the outputs with **Stop at zone boundary** ticked: only this zone's recipes run.
+- **Items** here are the datasets to *check*: they must exist, since they are the inputs.
+- **Compute automatic rules**: also re-runs the rules set to run after each build.
+- A rule in **error** fails the step, so the scenario stops before building anything from bad data.
+
+### Step 2 (both scenarios): Build the Data prep zone
+
+![Build the Data prep zone](img/sc-3-build-data-prep.png)
+
+Type **Build**. This is where "items" matter most.
+
+- **Items are targets**: what you want to be up to date when the step ends. Here `daily_series` and
+  `daily_obligations`, the last datasets of the Data prep zone. They don't have to exist before: DSS finds
+  the recipe that writes each item, then the recipes that feed that one, and so on, and runs them in order.
+  Naming the last datasets is how you say "rebuild this whole chain".
+- **Build mode**: *Build upstream* = the item and everything before it. The other choices in the list build
+  only the item's own recipe, or what comes after it.
+- **Handling of dependencies**: *Build required dependencies* rebuilds only what is out of date; *Force-build*
+  rebuilds everything on the way. Force-build is used so yesterday's new transactions always flow through.
+- **Stop at zone boundary**: ticked: walking back stops at the edge of the zone. Here the walk starts in
+  Data prep and stays there.
+- **Update output schemas**: off; the columns are fixed by the project's code. **Sync Hive metastore**:
+  not used here.
+
+### Train model, step 3: Train the model
+
+![Train the model](img/sc-4-train.png)
+
+Type **Build**, with one item: the **saved model** (the green diamond). Building a saved model = training it
+again on the current `daily_series`, testing it, and making the new version active. In the code project the
+item is the `forecast_model` folder, built by the training recipe.
+
+The model's rebuild setting is **explicit**: it is retrained only when it is itself an item, as here. Other
+builds never retrain it by accident.
+
+### Daily forecast, step 3: Check the model
+
+![Check the model](img/sc-5-check-model.png)
+
+Type **Custom Python**: a script, run with the project's code env. It finds the saved model and its active
+version, then checks:
+
+| Check | Fails with | Fix |
+|---|---|---|
+| a model exists, with an active version | "No saved model…" / "…has no active version" | run **Train model** |
+| trained ≤ 45 days ago | "The model was trained N days ago (limit 45)" | run **Train model** |
+| MASE < 1 | "The model's MASE is …" | retrain, check the data |
+| horizon = 123 days | "The model forecasts N days, not 123" | retrain |
+
+`raise Exception(...)` fails the step and stops the scenario, so no forecast is made with a bad model.
+`print(...)` writes "Model OK: …" in the step's log.
+
+### Daily forecast, step 4: Forecast, balance path, months and drivers
+
+![Build the Inference zone](img/sc-6-build-inference.png)
+
+Type **Build**, items `monthly_outlook` and `monthly_drivers` (the last datasets of the Inference zone), *Build
+upstream*, *Force-build*, **Stop at zone boundary** ticked. Walking back from them: drivers, months, balance
+path, the installments, `forecast`, the Score recipe. It stops at the Inference zone's edge, so it uses the
+model and `daily_series` as they are: the model is **not** retrained.
+
+### Daily forecast, step 5: Compute the outlook metrics
+
+![Compute the metrics](img/sc-7-metrics.png)
+
+Type **Compute metrics**, item `monthly_outlook`. It computes that dataset's metrics (accounts at HIGH and
+MEDIUM risk, lowest balance ahead) and stores them with the date, so the dashboard tiles show the latest values
+and the **Metrics** tab keeps their history.
 
 ### Last runs
 
 ![Last runs](img/22-last-runs.png)
 
-Each run, each step, each dataset built, with links to the logs. The first place to look when a scenario
-fails.
+Each run with each step's outcome (green, orange = warning, red = failed), the datasets each build step built,
+and links to the logs. The first place to look when a scenario fails.
 
 ---
 
