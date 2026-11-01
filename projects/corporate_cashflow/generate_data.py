@@ -1,6 +1,7 @@
 """Synthetic corporate-banking data, day by day: 10 companies, 3 years of transactions (Oct 2023 - Sep 2026).
 
-Writes data/accounts.csv, data/transactions.csv and data/calendar.csv. Fully made up, seeded so reruns match.
+Writes data/accounts.csv, data/transactions.csv, data/calendar.csv and data/loan_schedule.csv. Fully made up,
+seeded so reruns match.
 
 Each transaction has a signed amount (+ money in, - money out) and a bank-style description, like a real
 statement. Customer receipts and supplier payments come on business days (Mon-Fri), more receipts early in
@@ -8,6 +9,10 @@ the month and in the sector's high season. Payroll (25th), rent (1st), loan inst
 (15th), quarterly VAT (20th of Jan/Apr/Jul/Oct) and bank fees (month end) recur. Internal transfers to the
 company's savings account and a few one-off deals (asset sales, loan drawdowns, ...) are mixed in: the flow
 removes them before forecasting. Balances are "today" = end of 30 Sep 2026 (data up to D-1, D = 1 Oct).
+
+Loans (LOANS) are obligations: their installments carry the loan_id in transactions, and loan_schedule.csv
+lists every installment, past and future (amount and due date), as a bank's loan system would. One loan ends
+inside the forecast window and one new loan starts in it: the schedule knows, the history does not.
 """
 import csv
 from datetime import date, timedelta
@@ -17,7 +22,7 @@ import numpy as np
 
 OUT = Path(__file__).resolve().parent / "data"
 START, END = date(2023, 10, 1), date(2026, 9, 30)     # history: up to yesterday
-CALENDAR_END = date(2026, 12, 31)                     # the calendar also covers the days to forecast
+CALENDAR_END = date(2027, 1, 31)                      # the calendar also covers the days to forecast (4 months)
 rng = np.random.default_rng(7)
 
 # sector -> revenue multiplier per calendar month (Jan..Dec)
@@ -28,7 +33,7 @@ SEASON = {
     "Construction": [0.70, 0.75, 0.95, 1.10, 1.20, 1.20, 1.15, 1.10, 1.10, 1.00, 0.90, 0.75],
     "Other":        [1.00] * 12,
 }
-# name, sector, monthly revenue, costs as share of revenue, revenue trend per year, has a loan,
+# name, sector, monthly revenue, costs as share of revenue, revenue trend per year, has a loan (see LOANS),
 # balance today (end of 30 Sep 2026), overdraft limit
 COMPANIES = [
     ("Cedar Steelworks",        "Other",        900_000, 0.85,  0.06, True,  1_100_000, 300_000),
@@ -42,6 +47,16 @@ COMPANIES = [
     ("Orient Medical Supplies", "Other",        400_000, 0.84,  0.07, False,   350_000, 120_000),
     ("Sidon Port Services",     "Other",        280_000, 0.94,  0.00, False,    90_000,  50_000),
 ]
+# loan_id -> company index, first and last installment (month), installment as a share of monthly costs.
+# Installments fall on the 10th (previous business day on weekends).
+LOANS = {
+    "LN4400": (0, date(2021, 1, 1), date(2028, 6, 1), 0.08),
+    "LN4402": (2, date(2022, 5, 1), date(2026, 11, 1), 0.08),   # last installment in Nov 2026
+    "LN4403": (3, date(2020, 9, 1), date(2027, 12, 1), 0.08),
+    "LN4413": (3, date(2026, 12, 1), date(2029, 11, 1), 0.05),  # new loan: first installment in Dec 2026
+    "LN4406": (6, date(2021, 4, 1), date(2027, 3, 1), 0.08),
+    "LN4407": (7, date(2025, 3, 1), date(2029, 2, 1), 0.08),    # started during the history
+}
 CUSTOMERS = ["ABC TRADING SAL", "NOUR DISTRIBUTION", "GULF IMPORTS LLC", "ATLAS HOLDING", "MEDCO SARL",
              "ZAHLE FOODS", "ALPHA CONTRACTING", "BLUE WAVE SHIPPING", "SUNRISE MARKETS", "OMEGA PHARMA"]
 SUPPLIERS = ["UNITED PACKAGING", "LEBANON FUEL CO", "STEEL IMPORTS SAL", "PRIME LOGISTICS", "OFFICE PLUS",
@@ -67,9 +82,19 @@ def main():
     OUT.mkdir(exist_ok=True)
     accounts, txns = [], []
 
-    def add(acc, d, amount, description):
+    def add(acc, d, amount, description, loan_id=""):
         txns.append({"txn_id": f"T{len(txns) + 1:06d}", "account_id": acc, "booking_date": d.isoformat(),
-                     "amount": round(float(amount), 2), "description": description})
+                     "amount": round(float(amount), 2), "description": description, "loan_id": loan_id})
+
+    schedule = []
+    for loan_id, (i, first, last, share) in LOANS.items():
+        amount = round(COMPANIES[i][2] * COMPANIES[i][3] * share, 2)
+        m = first
+        while m <= last:
+            schedule.append({"account_id": f"CA{1001 + i}", "loan_id": loan_id,
+                             "due_date": business_day(m.replace(day=10)).isoformat(), "amount": amount})
+            m = (m + timedelta(days=32)).replace(day=1)
+    schedule.sort(key=lambda s: (s["due_date"], s["account_id"], s["loan_id"]))
 
     for i, (name, sector, revenue0, cost_ratio, trend, loan, balance, overdraft) in enumerate(COMPANIES):
         acc = f"CA{1001 + i}"
@@ -104,8 +129,9 @@ def main():
             first_bd = first if first.weekday() < 5 else first + timedelta(days=7 - first.weekday())
             if d == first_bd:
                 add(acc, d, -costs * 0.10, f"RENT {mon} {name.split()[0].upper()} PROPERTIES")
-            if loan and d == business_day(d.replace(day=10)):
-                add(acc, d, -costs * 0.08, f"LOAN INSTALLMENT LN{4400 + i}")
+            for s in schedule:                                # loan installments, as scheduled
+                if s["account_id"] == acc and s["due_date"] == d.isoformat():
+                    add(acc, d, -s["amount"], f"LOAN INSTALLMENT {s['loan_id']}", s["loan_id"])
             if d == business_day(d.replace(day=15)):
                 add(acc, d, -costs * 0.05 * rng.normal(1, 0.1), f"EDL ELECTRICITY BILL {mon}")
             if d.month in (1, 4, 7, 10) and d == business_day(d.replace(day=20)):
@@ -135,12 +161,13 @@ def main():
                  "is_month_end": int((d + timedelta(days=3)).month != d.month)}
                 for d in days(START, CALENDAR_END)]
 
-    for fname, rows in (("accounts.csv", accounts), ("transactions.csv", txns), ("calendar.csv", calendar)):
+    for fname, rows in (("accounts.csv", accounts), ("transactions.csv", txns), ("calendar.csv", calendar),
+                        ("loan_schedule.csv", schedule)):
         with open(OUT / fname, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0]))
             w.writeheader()
             w.writerows(rows)
-    print(f"{len(accounts)} accounts, {len(txns)} transactions, {len(calendar)} calendar days -> {OUT}")
+    print(f"{len(accounts)} accounts, {len(txns)} transactions, {len(schedule)} installments -> {OUT}")
 
 
 if __name__ == "__main__":

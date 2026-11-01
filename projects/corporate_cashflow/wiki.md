@@ -1,154 +1,90 @@
 ## What this project does
 
-For each of 10 corporate accounts: **forecast the money in and the money out of every day of the next 30
-days** with Dataiku's **time series forecasting**, then follow the balance day by day from yesterday's
-balance to find its **lowest point** and when it happens. A month can end positive and still go below the
-overdraft limit on payroll day: this is what the daily view catches.
+For 10 corporate accounts: forecast the **money in** and the **normal expenses** of every day from tomorrow
+to the end of the third month after this one, add the **loan installments** from the schedule, and follow the
+balance day by day and month by month. A month can end positive and still go below the overdraft limit on
+payroll day: the daily balance shows when, the monthly table says which month.
 
-Data is synthetic: 10 companies, 3 years of transactions up to yesterday (D-1 = 30 Sep 2026), each with a
-signed amount (+ in, - out) and a bank description. Forecast: **1 - 30 Oct 2026**. No code: visual recipes
-and Visual ML.
+Data is synthetic: transactions up to yesterday (30 Sep 2026). Outlook: 1 Oct 2026 - 31 Jan 2027. No code.
 
-## The flow: three zones
+## Three amounts per day
 
-| Zone | What | Run by |
+| Column | What | From |
 |---|---|---|
-| **Data prep** | From the raw transactions to `daily_flows_scoring`: every series and day, history + the 30 days to forecast | **Prepare data** (also the first step of the two others) |
-| **Training** | `daily_flows` (history only) -> the Visual ML model -> saved model `cashflow_forecast_model` | **Train model** |
-| **Inference** | The saved model scores `daily_flows_scoring` -> forecast -> balance path -> `account_outlook` | **Daily forecast** |
+| **inflows** | money in | the model |
+| **expenses** | payroll, suppliers, rent, utilities, tax, fees | the model |
+| **obligations** | loan installments on their due dates | `loan_schedule`, exact |
 
-The saved model is the link between the two: training writes a new version of it, inference always
-scores with the **active** version. Its rebuild behavior is **explicit** (saved model > Settings), so
-building `account_outlook` never retrains it. Datasets used by another zone are *shared* into it (they show
-in both).
+`outflows = expenses + obligations`, `net = inflows - outflows`, `balance = yesterday's balance + net`.
 
-| Zone (tag) | Recipe (type) | Output | What it does |
-|---|---|---|---|
-| Data prep (1-input) | uploaded CSVs | `accounts`, `transactions`, `calendar` | The data; `calendar` = one row per day with calendar features |
-| Data prep (2-clean) | `prepare_transactions` (Prepare) | `transactions_clean` | Description rules -> `category`; sign -> `flow` (IN/OUT); `excluded` = internal transfer or one-off |
-| Data prep (3-daily) | `group_daily_totals` (Group) | `daily_totals` | Money in / out per account and day, without the excluded rows |
-| Data prep (3-daily) | `join_account_days` (Join, cross) | `account_days` | Every calendar day for every account |
-| Data prep (3-daily) | `join_daily_totals` (Join) | `account_days_totals` | Add the day's totals (empty = nothing happened) |
-| Data prep (3-daily) | `prepare_daily_flows` (Prepare) | `daily_flows_scoring` | 0 on quiet days, up to yesterday + 30 future days, one row per flow |
-| Training (4-train) | `prepare_training` (Prepare) | `daily_flows` | History only: **the training data** |
-| Training (4-train) | `train_cashflow_forecast_model` (**Visual ML**) | `cashflow_forecast_model` | The best of 9 algorithms, see below |
-| Inference (5-forecast) | `score_flows` (Score) | `scored_flows` | Forecast and range on the 30 future days |
-| Inference (5-forecast) | `prepare_forecast` (Prepare) | `forecast` | Future days only |
-| Inference (6-balance) | `group_daily_forecast` (Group) | `daily_forecast` | IN and OUT side by side per day, net and its uncertainty |
-| Inference (6-balance) | `window_running_totals` (Window) | `daily_running` | Running totals since today |
-| Inference (6-balance) | `join_opening_balance` (Join) | `daily_running_accounts` | Add yesterday's balance |
-| Inference (6-balance) | `prepare_balance_path` (Prepare) | `daily_balance_path` | **Balance per future day** |
-| Inference (7-outlook) | `group_outlook` (Group) | `account_lowest` | Totals, lowest balance, lowest pessimistic balance |
-| Inference (7-outlook) | `join_accounts` (Join) | `account_lowest_details` | The day of the lowest balance (join on account + balance = lowest), company details |
-| Inference (7-outlook) | `prepare_outlook` (Prepare) | `account_outlook` | Closing balance and **risk level** |
+## The flow, zone by zone
 
-## Cleaning: what the description is used for
+**Data prep** (built by both scenarios)
 
-`prepare_transactions` gives each transaction a category with simple rules: the first text found in the
-description wins (`TRF FROM` -> customer_receipt, `SALARY` -> payroll, `INTERNAL TRF` -> internal_transfer,
-`SALE OF` -> one_off, ...). Internal transfers and one-off deals are not repeatable cash flow, so they are
-removed before the daily totals. The categories are only used for this cleaning: the model forecasts IN
-and OUT.
+- `prepare_transactions`: the description gives the `category`; a row with a `loan_id` is an **OBLIGATION**,
+  otherwise the sign gives **IN** or **EXPENSE**; internal transfers and one-off deals are `excluded`.
+- `group_daily_totals`, `group_series`: amount per series and day; the list of series (account × flow ×
+  category, installments and excluded rows left out).
+- `join_account_days`, `prepare_account_calendar`: every day of every account, numbered from yesterday
+  (`days_ahead`) and by month (`month_index`: 0 = this month, 1-3 the next ones, < 0 the past).
+- `join_series_days`, `join_daily_totals`, `prepare_daily_series`: `daily_series`, every series on every day,
+  0 on quiet days, plus 123 future days with an empty amount and their calendar columns.
+- `join_obligations`: the installments due from tomorrow to the end of month 3.
 
-## Time series forecasting: what you give it
+**Training**: `training_series` (the history part of `daily_series`) → Visual ML → saved model
+`cashflow_forecast_model`. Rebuild behavior **explicit**: only the Train model scenario retrains it.
 
-`daily_flows`: one row per **series** and **day**.
+**Inference**
+
+- `score_series`, `prepare_forecast`: the forecast of the future days (negatives count as 0).
+- `stack_cash_flows`, `join_months`: forecast, installments and last year's transactions in one table, each row
+  with its month. The `source` column says where a row comes from.
+- `group_days`, `window_running_totals`, `prepare_balance_path`: totals per day, running totals, balance.
+- `group_months`, `join_accounts`, `prepare_monthly_outlook`: the days added up per month, risk level.
+- `group_drivers`, `join_driver_months`, `window_driver_rank`, `prepare_drivers`: per month, each category and
+  loan with its share, the same month last year and the change.
+
+## The model
 
 | Setting | Here |
 |---|---|
 | Target | `amount` (total of the day, 0 if nothing happened) |
-| Time variable | `date` (time step: 1 day) |
-| Time series identifiers | `account_id` + `flow`: 20 series (10 accounts x IN / OUT) |
-| Forecast horizon | 30 days |
+| Time / step | `date`, 1 day |
+| Series | `account_id` + `flow` + `category` |
+| Horizon | 123 days |
 | External features | `day_of_month`, `day_of_week`, `is_weekend`, `is_month_start`, `is_month_end` |
 
-External features are columns **known in advance**: the calendar of the next 30 days is known, so the
-models that support them (Prophet, LightGBM, the neural networks) can learn "payroll leaves around the
-25th" or "nothing happens on weekends". That is why the dataset to score, `daily_flows_scoring`, also holds
-the 30 future days, with their calendar but an empty amount.
+External features are known in advance: that is why `daily_series` also holds the future days, with their
+calendar but an empty amount. The test hides the last 123 days and compares the forecast with what happened.
 
-## How it is tested
+The deployed algorithm is the one with the lowest **RMSE**, which counts the big days (payroll, rent, tax: one
+day a month). **MASE** (below 1 = better than "same as the day before") can look good for a forecast of 0
+every day, which misses those payments: compare the two in the Lab. The model check still asks MASE < 1.
 
-The last 30 days of each series (1 - 30 Sep 2026) are hidden, each algorithm is trained on what is before
-and forecasts them, and the forecast is compared with what really happened.
+**Current build**: LightGBM is deployed (RMSE 14,964 vs DeepAR 16,839), MASE 0.93: under the limit of 1,
+but weaker than the code project's 0.32. Risk: Levant Logistics HIGH every month, Tripoli Textiles MEDIUM in
+October then HIGH, every other account LOW.
 
-The main metric is **MASE**: the error divided by the error of a naive "same as the day before" guess on
-the training data. Below 1 = better than that. Over 30 days ahead, simple methods often score above 1.
+## Bad case and risk
 
-## The algorithms compared (Lab > cashflow_forecast_model)
+Bad case (variable `bad_case_pct` = 0.15): money in 15% lower, expenses 15% higher, installments as scheduled.
 
-| Algorithm | Idea | MASE |
-|---|---|---|
-| Naive (trivial identity) | every future day = the last known day | 1.14 |
-| Seasonal naive | every future day = same weekday of the last known week | 1.34 |
-| ETS (Holt-Winters) | smoothed level + trend + weekly pattern | 0.72 |
-| Seasonal LOESS (STL) | split into trend + weekly pattern, forecast each | 1.14 |
-| ARIMA (2,0,0)(0,1,0)7 | weekly difference + the last 2 days | 1.44 |
-| Prophet | trend + weekly / yearly seasonality + calendar features | 0.73 |
-| LightGBM | gradient boosting on past values (30+ days old) + calendar features | 0.77 |
-| Simple feed-forward | small neural network, all series together, + calendar features | 0.70 |
-| **DeepAR** | recurrent neural network, all series together, + calendar features | **0.57** (deployed) |
-
-Open the analysis to see, per model: the metrics, the **forecast chart** per series (test days vs actual),
-the metrics **per time series**, and the settings it used.
-
-## Balance path and risk level
-
-`balance (day) = yesterday's balance + running total of (money in - money out)`.
-
-The **pessimistic balance** is the 1-in-10 bad case of that running total. Each day's 10%-90% range says how
-uncertain the day is (the range is about 2.56 standard deviations); over several days the uncertainties add
-up as variances (`variance_running`), and the pessimistic balance is 1.28 standard deviations below the
-expected one. Simply adding up every day's worst case would assume all 30 days go wrong at once, which is
-far too pessimistic.
-
-- **HIGH**: the lowest balance goes past the overdraft limit
-- **MEDIUM**: below 0, expected or in the pessimistic case
+- **HIGH**: the lowest balance of the month goes past the overdraft limit
+- **MEDIUM**: the lowest balance or the bad-case one goes below 0
 - **LOW**: otherwise
 
-`account_outlook` gives, per account: opening and closing balance, totals in and out, the **lowest balance
-and its date**, the pessimistic lowest balance and the risk level.
-
-## Scenarios, checks and dashboard
-
-Three scenarios (Scenarios tab > Run), one per zone; each builds only its own zone:
+## Scenarios
 
 | Scenario | Steps |
 |---|---|
-| **Prepare data** | 1. check the inputs (data quality rules); 2. rebuild the Data prep zone |
-| **Train model** | 1. run *Prepare data*; 2. retrain the model (Training zone) |
-| **Daily forecast** | 1. run *Prepare data*; 2. **check the model**; 3. forecast, balance path, outlook (Inference zone); 4. compute the outlook metrics |
+| **Train model** | check the inputs → build Data prep → train the model |
+| **Daily forecast** | check the inputs → build Data prep → check the model → build Inference → metrics |
 
-- **Input checks** (dataset > Data Quality): `transactions` not empty, no empty field, one row per
-  `txn_id`, only known accounts and up to the balances' date (yesterday's data is in); `accounts` one row
-  per account, balance and limit filled, one balance date; `calendar` one row per day, covers the days to
-  forecast. A rule in error stops the scenario.
-- **Model check**: the saved model's active version exists, was trained in the last 45 days, has a test MASE below 1
-  (better than "same as the day before") and forecasts `horizon_days` days; otherwise the scenario stops
-  with the reason.
-- **Metrics** on `account_outlook` (dataset > Metrics, with history): HIGH and MEDIUM accounts, lowest
-  balance ahead, row count.
-- **Dashboard** "Cash-flow outlook": run buttons, the metrics, lowest balance per company, balance per
-  day, the outlook table.
+The model check stops the forecast if the model is older than 45 days, has a MASE of 1 or more, or does not
+forecast 123 days. The Free Edition has no time triggers: run the scenarios by hand or from the dashboard.
 
-The Free Edition has no time-based triggers and refuses to start scenarios through the API or `dsscli`
-("Automated triggering of scenarios is not available in your license"): run them by hand or from the
-dashboard buttons.
+## Things to try
 
-Retraining reuses the deployed algorithm and its settings; to compare algorithms again, train in the Lab
-and redeploy. Older versions stay in the saved model: open it to compare them or roll back.
-
-## The horizon: project variable `horizon_days`
-
-**... > Variables**: `horizon_days` = 30, read by `prepare_daily_flows` as `${horizon_days}` and by the
-checks. The model's own horizon is set in the Lab (Design > Forecasting parameters): change both, then
-retrain; the model check stops the forecast while they differ.
-
-## Things to try (in the Lab analysis)
-
-- **Design > Forecasting parameters**: change the horizon, retrain, compare.
-- **Design > Train / Test set**: switch to **K-fold cross-test** (several test windows) for steadier metrics.
-- **Design > External features**: remove one and see which models get worse.
-- **Design > Algorithms**: ARIMA orders, LightGBM trees, epochs of the neural networks.
-- **Dashboards > Cash-flow outlook**: edit a chart, add `pessimistic_balance` to the balance chart.
-- Break a rule: upload a `transactions` CSV that stops a day early, run *Prepare data*, read the error.
+- Change `bad_case_pct` (... > Variables) and run Daily forecast.
+- Lab > Design > Algorithms: add Prophet or ETS and compare.
+- Add a loan to `loan_schedule` starting next month and read `monthly_outlook`.

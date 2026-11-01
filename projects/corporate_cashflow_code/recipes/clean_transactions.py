@@ -1,5 +1,7 @@
 # Category from the bank description (first matching rule wins), flow from the sign of the amount, and
 # excluded = 1 for what is not repeatable cash flow (internal transfers, one-off deals).
+# Loan installments (loan_id set) are obligations: flow OBLIGATION, category loan. They are not forecast,
+# they come from loan_schedule.
 import dataiku
 
 RULES = [
@@ -17,9 +19,12 @@ def category(description):
 
 
 tx = dataiku.Dataset("transactions").get_dataframe()
-tx["category"] = tx["description"].map(category)
-tx["flow"] = (tx["amount"] > 0).map({True: "IN", False: "OUT"})
+loan = tx["loan_id"].fillna("").astype(str).str.strip() != ""
+tx["loan_id"] = tx["loan_id"].where(loan)
+tx["category"] = tx["description"].map(category).where(~loan, "loan")
+tx["flow"] = (tx["amount"] > 0).map({True: "IN", False: "EXPENSE"}).where(~loan, "OBLIGATION")
 tx["excluded"] = tx["category"].isin(["internal_transfer", "one_off"]).astype(int)
 tx = tx.rename(columns={"booking_date": "date"})
 
-dataiku.Dataset("transactions_clean").write_with_schema(tx)
+dataiku.Dataset("transactions_clean").write_with_schema(
+    tx[["txn_id", "account_id", "date", "amount", "description", "loan_id", "category", "flow", "excluded"]])

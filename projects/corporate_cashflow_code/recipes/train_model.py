@@ -1,53 +1,67 @@
-# Training: test the model on the last `horizon_days` known days against three simple baselines, then retrain
-# it on the full history and save it to the forecast_model folder, with the 10% / 90% quantile models that
-# give the range, and model_info.json (when, how good, for which horizon), read by the daily model check.
-# Run by the "Train model" scenario; the daily forecast reuses the saved model.
+# Training, in two parts:
+# 1. test: hide the last HORIZON_DAYS known days, forecast them, compare with what happened and with three
+#    simple baselines. Two measures: daily MASE (below 1 = better than "same as the day before") and monthly
+#    WAPE (the error on the monthly totals, the figure the outlook uses).
+# 2. retrain on the full history and save the model (model.pkl) and model_info.json (when, how good, which
+#    horizon), read by the model check of the "Daily forecast" scenario.
 import pickle
 import time
 
 import dataiku
 import pandas as pd
-from cashflow_model import FEATURES, features, horizon, load_flows, model
+from cashflow_model import FEATURES, HORIZON_DAYS, SERIES, features, load_series, model
 
-HORIZON = horizon()
-history = load_flows().dropna(subset=["amount"])
+history = load_series().dropna(subset=["amount"])
 first_future = history["date"].max() + pd.Timedelta(days=1)
 
-# 1. test: hide the last HORIZON known days, forecast them, compare with what happened
-test_start = first_future - pd.Timedelta(days=HORIZON)
-df = features(history, test_start, HORIZON)
+# 1. test
+test_start = first_future - pd.Timedelta(days=HORIZON_DAYS)
+df = features(history, test_start)
 train = df[(df["date"] < test_start) & df["level_28d"].notna()]
 test = df[df["date"] >= test_start].copy()
-test["Gradient boosting"] = model().fit(train[FEATURES], train["amount"]).predict(test[FEATURES]).clip(0)
+fitted = model().fit(train[FEATURES], train["amount"] / train["scale"])
+test["Gradient boosting"] = fitted.predict(test[FEATURES]).clip(0) * test["scale"]
 
-known = df[df["date"] < test_start].set_index(["account_id", "flow", "date"])["amount"]
-weeks_back = (test["date"] - test_start).dt.days // 7 + 1              # the latest known same weekday
-test["Baseline: last known day"] = test.merge(
-    known.groupby(level=[0, 1]).last().rename("v"), on=["account_id", "flow"], how="left")["v"].to_numpy()
-test["Baseline: same weekday, last known week"] = known.reindex(pd.MultiIndex.from_arrays(
-    [test["account_id"], test["flow"], test["date"] - pd.to_timedelta(7 * weeks_back, unit="D")])).to_numpy()
-test["Baseline: same day last month"] = test["last_month_same_day"].fillna(0)
+# baselines, from the raw known amounts
+train, test = train.astype({"category": str}), test.astype({"category": str})
+known = df[df["date"] < test_start].astype({"category": str}).set_index(SERIES + ["date"])["amount"]
 
-# MASE: error divided by the average error of "same as the day before" on the training days, per series
-scale = train.groupby(["account_id", "flow"])["amount"].apply(lambda s: s.diff().abs().mean()).rename("scale")
-test = test.merge(scale, on=["account_id", "flow"])
+
+def known_on(dates):
+    return known.reindex(pd.MultiIndex.from_arrays(
+        [test["account_id"], test["flow"], test["category"], dates])).fillna(0).to_numpy()
+
+
+weeks_back = (test["date"] - test_start).dt.days // 7 + 1                  # the latest known same weekday
+test["Baseline: last known day"] = known_on(pd.Series(test_start - pd.Timedelta(days=1), index=test.index))
+test["Baseline: same weekday, last known week"] = known_on(test["date"] - pd.to_timedelta(7 * weeks_back, unit="D"))
+test["Baseline: same day last year"] = known_on(test["date"] - pd.DateOffset(years=1))
+
+# MASE: error / average error of "same as the day before" on the training days, per series, then averaged.
+# Monthly WAPE: sum of |forecast - actual| / sum of actual, on the totals per account, flow and month.
+naive = train.groupby(SERIES)["amount"].apply(lambda s: s.diff().abs().mean()).rename("naive").reset_index()
+test = test.merge(naive, on=SERIES)
 methods = ["Gradient boosting", "Baseline: last known day", "Baseline: same weekday, last known week",
-           "Baseline: same day last month"]
+           "Baseline: same day last year"]
+monthly = test.groupby(["account_id", "flow", test["date"].dt.to_period("M")])[["amount"] + methods].sum()
 evaluation = pd.DataFrame([{
     "method": m,
     "mae": round((test[m] - test["amount"]).abs().mean()),
-    "mase": round(((test[m] - test["amount"]).abs() / test["scale"]).groupby([test["account_id"], test["flow"]])
+    "mase": round(((test[m] - test["amount"]).abs() / test["naive"]).groupby(test["series"], observed=True)
                   .mean().mean(), 3),
+    "monthly_wape": round((monthly[m] - monthly["amount"]).abs().sum() / monthly["amount"].abs().sum(), 3),
 } for m in methods])
+best = evaluation[evaluation["method"] == "Gradient boosting"].iloc[0]
 
-# 2. retrain on the full history and save the three models
-df = features(history, first_future, HORIZON)
+# 2. retrain on the full history and save
+df = features(history, first_future)
 train = df[df["level_28d"].notna()]
-models = {column: model(quantile).fit(train[FEATURES], train["amount"])
-          for column, quantile in {"forecast": None, "forecast_low": 0.1, "forecast_high": 0.9}.items()}
-with dataiku.Folder("forecast_model").get_writer("model.pkl") as w:
-    pickle.dump({"models": models, "horizon": HORIZON, "trained_until": str(history["date"].max().date())}, w)
-dataiku.Folder("forecast_model").write_json("model_info.json", {
-    "trained_at": time.time(), "horizon": HORIZON, "trained_until": str(history["date"].max().date()),
-    "mase": float(evaluation.loc[evaluation["method"] == "Gradient boosting", "mase"].iloc[0])})
+fitted = model().fit(train[FEATURES], train["amount"] / train["scale"])
+trained_until = str(history["date"].max().date())
+folder = dataiku.Folder("forecast_model")
+with folder.get_writer("model.pkl") as w:
+    pickle.dump({"model": fitted, "horizon": HORIZON_DAYS, "trained_until": trained_until}, w)
+folder.write_json("model_info.json", {
+    "trained_at": time.time(), "horizon": HORIZON_DAYS, "trained_until": trained_until,
+    "mase": float(best["mase"]), "monthly_wape": float(best["monthly_wape"])})
 dataiku.Dataset("model_evaluation").write_with_schema(evaluation)

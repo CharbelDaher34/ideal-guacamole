@@ -12,28 +12,14 @@ Lab analysis, training, deploy to the flow, then their Evaluate / Score recipes.
 
 ## Projects
 
-The two cash-flow projects are explained in [`CASHFLOW_GUIDE.md`](CASHFLOW_GUIDE.md).
+The two cash-flow projects are explained in two documents: how the forecast works,
+[`docs/HOW_FORECASTING_WORKS.html`](docs/HOW_FORECASTING_WORKS.html), and how to work with them in
+Dataiku, [`docs/DSS_WALKTHROUGH.md`](docs/DSS_WALKTHROUGH.md).
 
 | Folder | Project key | What |
 |---|---|---|
-| `demo/` | `DEV_DEMO` | Minimal example: CSV -> Python -> SQL |
-| `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate banking: daily money in / out for the next 30 days, balance day by day, lowest point and risk. Visual recipes and Visual ML **time series forecasting** (9 algorithms compared), no code (see its README) |
-| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same data and goal, scripted: 5 Python + 1 SQL recipes, **regression** (gradient boosting, scikit-learn) on calendar + past values (see its README) |
-
-## Run the demo
-
-```bash
-python3 demo/create_demo.py
-```
-
-Creates project `DEV_DEMO`:
-
-```
-orders_raw (uploaded CSV) -> [Python] compute_orders_clean -> orders_clean (Postgres)
-                          -> [SQL]    compute_customer_totals -> customer_totals (Postgres)
-```
-
-Tables land in PostgreSQL as `DEV_DEMO_orders_clean` and `DEV_DEMO_customer_totals`.
+| `corporate_cashflow/` | `CORP_CASHFLOW` | Corporate banking: money in and expenses forecast day by day for the rest of the month + 3 months, loan installments from their schedule, balance per day and per month, risk and drivers. Visual recipes and Visual ML **time series** (DeepAR vs LightGBM), no code (see its wiki) |
+| `corporate_cashflow_code/` | `CORP_CASHFLOW_CODE` | Same data, goal and outputs, scripted: Python + SQL recipes, **gradient boosting** (scikit-learn) on calendar + past values (see its wiki) |
 
 ## Write your own
 

@@ -1,79 +1,62 @@
 ## What this project does
 
-The **scripted** version of `CORP_CASHFLOW`: same data, same goal (forecast each account's money in and
-money out for every day of the next 30 days, follow the balance day by day, find its lowest point, flag
-liquidity risk), built with **Python and SQL recipes**.
+For each of 10 corporate accounts it forecasts the rest of this month + the next 3 months: money in, expenses
+and loan installments, the balance day by day and, per month, the lowest balance and a risk level. It is the
+**scripted** version of `CORP_CASHFLOW`: the same data, built with Python and SQL recipes and a gradient
+boosting model.
 
-It forecasts another way: a **regression**. The features are built by hand (calendar + past values) and a
-gradient boosting model learns the day's amount from them. `CORP_CASHFLOW` uses Dataiku's **time series
-forecasting** instead, where the algorithms handle time themselves.
+Data is synthetic: 3 years of transactions up to yesterday (30 Sep 2026). Forecast: 1 Oct 2026 - 31 Jan 2027,
+months 2026-10 (month 0) to 2027-01 (month 3).
 
-Data is synthetic: 10 companies, 3 years of transactions up to yesterday (30 Sep 2026). Forecast:
-**1 - 30 Oct 2026** (project variable `horizon_days`, **... > Variables**).
+## The idea
 
-## The flow: three zones
+- **Inflows** and **expenses** (payroll, suppliers, rent...) are forecast by the model.
+- **Obligations** (loan installments) are taken from `loan_schedule`: they are known, so never forecast.
+- `balance = yesterday's balance + running total of (inflows - expenses - obligations)`.
 
-| Zone (tag) | Recipe | Output | What it does |
-|---|---|---|---|
-| Data prep (1-input) | uploaded CSVs | `accounts`, `transactions`, `calendar` | The data |
-| Data prep (2-clean) | Python `compute_transactions_clean` | `transactions_clean` | Description rules -> category; sign -> flow (IN/OUT); excluded = internal transfer or one-off |
-| Data prep (3-daily) | SQL `compute_daily_totals` | `daily_totals` | Money in / out per account and day — *inside* PostgreSQL |
-| Data prep (3-daily) | Python `compute_daily_flows` | `daily_flows` | Every account × flow × day, 0 on quiet days, + 30 future days (empty amount) |
-| Training (4-train) | Python `train_forecast_model` | `forecast_model` (folder), `model_evaluation` | Gradient boosting: test, retrain on the full history, save `model.pkl` |
-| Inference (5-forecast) | Python `score_forecast` | `forecast` | Load the saved model, forecast the next 30 days with a 10%-90% range |
-| Inference (6-outlook) | Python `compute_balance_outlook` | `daily_balance_path`, `account_outlook` | Balance per day, lowest point and its date, risk level |
+## The flow, zone by zone
 
-The folder `forecast_model` links training and inference. Its rebuild behavior is **explicit**: building
-`account_outlook` scores with the saved model and never retrains it. Both recipes compute the features with
-the same code, the project library `cashflow_model.py` (**... > Libraries**).
+**Data prep**
+1. `transactions_clean`: each transaction gets a category, a flow (IN, EXPENSE, or OBLIGATION when it has a
+   loan_id) and excluded = 1 for one-offs and internal transfers.
+2. `daily_totals` (SQL): totals per account, day, flow and category, without excluded rows and obligations.
+3. `daily_series`: every day of every series (0 on quiet days), with the calendar columns, plus 123 empty
+   days to forecast.
+4. `daily_obligations`: the installments due in the forecast window.
 
-## Scenarios, checks and dashboard
+**Training**
+5. `forecast_model` (folder) and `model_evaluation`: the model is tested on the last 123 known days against
+   three simple baselines, then retrained on all of the history and saved.
 
-Three scenarios (Scenarios tab > Run), one per zone; each builds only its own zone:
+**Inference**
+6. `forecast`: the expected amount per series and day.
+7. `daily_balance_path`: inflows, expenses, obligations, balance and bad-case balance per day.
+8. `monthly_outlook`: the days added up per month, lowest balance and its date, risk level.
+9. `monthly_drivers`: each category or loan per month, its share, and the same month last year.
 
-| Scenario | Steps |
-|---|---|
-| **Prepare data** | 1. check the inputs (data quality rules); 2. rebuild the Data prep zone |
-| **Train model** | 1. run *Prepare data*; 2. retrain the model (Training zone) |
-| **Daily forecast** | 1. run *Prepare data*; 2. **check the model**; 3. forecast, balance path, outlook (Inference zone); 4. compute the outlook metrics |
+## Scenarios
 
-- **Input checks** (dataset > Data Quality): `transactions` not empty, no empty field, one row per
-  `txn_id`, only known accounts and up to the balances' date (yesterday's data is in); `accounts` one row
-  per account, balance and limit filled, one balance date; `calendar` one row per day, covers the days to
-  forecast. A rule in error stops the scenario.
-- **Model check**: `forecast_model/model_info.json` (written by the training recipe) exists, was trained in the last 45 days, has a test MASE below 1
-  (better than "same as the day before") and forecasts `horizon_days` days; otherwise the scenario stops
-  with the reason.
-- **Metrics** on `account_outlook` (dataset > Metrics, with history): HIGH and MEDIUM accounts, lowest
-  balance ahead, row count.
-- **Dashboard** "Cash-flow outlook": run buttons, the metrics, lowest balance per company, balance per
-  day, the outlook table.
-
-The Free Edition has no time-based triggers and refuses to start scenarios through the API or `dsscli`
-("Automated triggering of scenarios is not available in your license"): run them by hand or from the
-dashboard buttons.
+- **Train model** (about once a month): check the inputs, build Data prep, train the model.
+- **Daily forecast** (every day): check the inputs, build Data prep, check the model (trained in the last 45
+  days, MASE below 1, horizon 123), build Inference, compute the metrics.
 
 ## The model
 
-- Learns **the day's amount** of each series (account × IN/OUT) from the calendar (day of month, weekday,
-  weekend, month start / end) and from past values at least 30 days old (28-day average, same weekday 5-8
-  weeks before, same day last month), so every feature is known for every day to forecast.
-- Tested on the last 30 known days; `model_evaluation` compares its error (MAE, MASE) with three simple
-  baselines. Then retrained on the full history and saved; the daily forecast loads it.
-- Two more models (10% and 90% quantiles) give the range.
+- One series per account × flow × category. Features: the calendar (day of month, weekday, weekend, month
+  start / end, month), the series, its category, and past values at least 123 days old (so they are known for
+  every day to forecast).
+- Each series is divided by its level (average day over the last year, moved along its growth), so small and
+  large series count alike and a falling account keeps falling.
+- Measures: **MASE** (daily error; below 1 = better than "same as the day before") and **monthly WAPE**
+  (error on the monthly totals). Last test: MASE 0.32, monthly WAPE 0.16.
 
-## Balance path and risk level
+## Bad case and risk
 
-`balance (day) = yesterday's balance + running total of (money in - money out)`. The pessimistic balance
-is the 1-in-10 bad case of that running total (the daily ranges add up as variances).
-
-**HIGH**: the lowest balance goes past the overdraft limit. **MEDIUM**: below 0, expected or pessimistic.
-**LOW**: otherwise.
+- Bad case: money in 15% lower and expenses 15% higher (variable `bad_case_pct`), obligations as scheduled.
+- **HIGH**: the lowest balance goes past the overdraft limit. **MEDIUM**: it, or the bad case, goes below 0.
+  **LOW**: otherwise.
 
 ## Things to try
 
-- Open a recipe, edit the code, **Run**; use the notebook button to explore it interactively.
-- Add a feature in the library `cashflow_model.py` (e.g. the same day last year), run **Train model** and
-  compare `model_evaluation`.
-- Change `horizon_days`, then run **Train model** before **Daily forecast** (the scoring recipe refuses a
-  model trained for another horizon).
+- Change `bad_case_pct` (**... > Variables**) and run **Daily forecast**: see the risk levels move.
+- Add a feature in the library `cashflow_model.py`, run **Train model** and compare `model_evaluation`.

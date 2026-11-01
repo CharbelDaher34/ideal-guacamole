@@ -129,30 +129,41 @@ class Project:
             self.recipes.append((name, outputs, "code", None))
 
     # ---- visual recipes (output schemas are computed by DSS at deploy) ----
-    def prepare_recipe(self, name, input_, output, steps, description="", tags=()):
-        """Prepare recipe: a list of processor steps, built with the step helpers below (formula, ...)."""
+    def prepare_recipe(self, name, input_, output, steps, description="", tags=(), sample_all=False):
+        """Prepare recipe: a list of processor steps, built with the step helpers below (formula, ...).
+        The output column types are guessed on a sample (the first 10,000 rows): sample_all=True uses all
+        the rows, e.g. when a filter keeps none of the first ones (the types would all be text)."""
+        sampling = {"explorationSampling": {"autoRefreshSample": False, "_refreshTrigger": 0, "selection": {
+            "samplingMethod": "FULL", "partitionSelectionMethod": "ALL", "maxRecords": -1,
+            "filter": {"enabled": False, "distinct": False}}}} if sample_all else {}
         self._recipe(name, "shaker", [input_], [output], {}, "shaker",
                      {"columnsSelection": {"mode": "ALL"}, "steps": steps, "maxProcessedMemTableBytes": -1,
-                      "previewMode": "ALL_ROWS"}, description, tags)
+                      "previewMode": "ALL_ROWS", **sampling}, description, tags)
 
     def group_recipe(self, name, input_, output, keys, aggregations, count=True, pre_filter=None,
-                     computed=None, names=None, description="", tags=()):
-        """Group recipe. aggregations: {column: ["sum", "avg", "min", "max", "count", "concat", ...]}
-        (concat joins the values with new lines).
+                     computed=None, names=None, order=None, description="", tags=()):
+        """Group recipe. aggregations: {column: ["sum", "avg", "min", "max", "count", "concat", "first",
+        "last", ...]} (concat joins the values with new lines; first / last: the value of the first / last
+        row ordered by order={column: order column}).
         Output columns are named <column>_<aggregation> (+ `count`), unless renamed in names={old: new}.
         keys=[] aggregates the whole dataset into one row. computed={column: (type, GREL)} adds columns
-        before aggregating."""
-        values = [{"column": c, "concatSeparator": "\n", **{a: True for a in aggs}} for c, aggs in aggregations.items()]
+        before aggregating (they can be keys too)."""
+        order = order or {}
+        values = [{"column": c, "concatSeparator": "\n", **{a: True for a in aggs},
+                   **({"orderColumn": order[c]} if c in order else {})} for c, aggs in aggregations.items()]
         self._recipe(name, "grouping", [input_], [output], {}, "grouping", {
             "keys": [{"column": k} for k in keys], "values": values, "globalCount": count,
             "preFilter": _filter(pre_filter), "postFilter": _filter(None), "computedColumns": _computed(computed),
             "outputColumnNameOverrides": names or {}, "enlargeYourBits": True}, description, tags)
 
     def window_recipe(self, name, input_, output, partition_by, order_by, aggregations, frame=None,
-                      names=None, description="", tags=()):
-        """Window recipe over rows of the same partition, sorted by order_by.
+                      names=None, desc=(), ranks=(), description="", tags=()):
+        """Window recipe over rows of the same partition, sorted by order_by (desc: the columns sorted in
+        descending order).
         aggregations: {column: {"lag": [1, 2], "lead": [1], "avg": True, "sum": True, ...}}; every input
-        column is kept. frame=(preceding, following) rows; None = from the first row up to the current one.
+        column is kept. frame=(preceding, following) rows, None in it = no limit on that side;
+        frame=None = from the first row up to the current one.
+        ranks: rank columns to add ("rank", "denseRank", "rowNumber": 1, 2, 3, ... in the sort order).
         Output columns are named <column>_lag<n>, <column>_lead<n> (a single lead of 1: <column>_lead),
         <column>_avg, ..., unless renamed in names."""
         values = []
@@ -164,42 +175,59 @@ class Project:
                     v[f"{a}Values"] = ",".join(str(n) for n in x)
             values.append(v)
         window = {"enablePartitioning": bool(partition_by), "partitioningColumns": list(partition_by),
-                  "enableOrdering": bool(order_by), "orders": [{"column": c, "desc": False} for c in order_by],
-                  "enableLimits": frame is not None, "windowLimitMode": "ROWS", "limitPreceding": frame is not None,
-                  "precedingRows": frame[0] if frame else 0, "limitFollowing": frame is not None,
-                  "followingRows": frame[1] if frame else 0}
+                  "enableOrdering": bool(order_by), "orders": [{"column": c, "desc": c in desc} for c in order_by],
+                  "enableLimits": frame is not None, "windowLimitMode": "ROWS",
+                  "limitPreceding": frame is not None and frame[0] is not None,
+                  "precedingRows": (frame[0] or 0) if frame else 0,
+                  "limitFollowing": frame is not None and frame[1] is not None,
+                  "followingRows": (frame[1] or 0) if frame else 0}
         self._recipe(name, "window", [input_], [output], {}, "window", {
             "windows": [window], "values": values, "retrievedColumnsSelectionMode": "ALL",
             "preFilter": _filter(None), "postFilter": _filter(None), "computedColumns": [],
-            "outputColumnNameOverrides": names or {}}, description, tags)
+            "outputColumnNameOverrides": names or {}, **{r: True for r in ranks}}, description, tags)
 
     def join_recipe(self, name, inputs, output, on, how="LEFT", columns=None, pre_filters=None,
-                    description="", tags=()):
+                    computed=None, post_filter=None, description="", tags=()):
         """Join inputs[1:] to inputs[0] on the key columns `on` (how="CROSS" with on=[]: every pair).
         on: same-named keys for every input, or {dataset: keys} per joined input; a key is a column name or
-        (column in inputs[0], column in the joined input) when the names differ.
+        (column in inputs[0], column in the joined input) when the names differ; "dataset.column" as the
+        first one takes the column of another input joined before.
+        how: one join type, or {dataset: type} per joined input (LEFT, INNER, CROSS, ...).
         columns: {dataset: [columns to keep]} (default: all non-conflicting columns);
-        pre_filters: {dataset: GREL condition} to filter an input before the join."""
+        pre_filters: {dataset: GREL condition} to filter an input before the join;
+        computed: {column: (type, GREL)} added after the join; post_filter: GREL condition on the result."""
         columns, pre_filters = columns or {}, pre_filters or {}
         keys = on if isinstance(on, dict) else {d: on for d in inputs[1:]}
         pairs = {d: [k if isinstance(k, tuple) else (k, k) for k in ks] for d, ks in keys.items()}
+        types = how if isinstance(how, dict) else {d: how for d in inputs[1:]}
+
+        def left(column):           # (table, column) of a key's left side
+            d, _, c = column.rpartition(".")
+            return (inputs.index(d), c) if d in inputs else (0, column)
         vinputs = [{"index": i, "originLabel": d, "preFilter": _filter(pre_filters.get(d)), "computedColumns": [],
                     "outputColumnsSelectionMode": "MANUAL" if d in columns else "AUTO_NON_CONFLICTING"}
                    for i, d in enumerate(inputs)]
-        joins = [{"table1": 0, "table2": i, "type": how, "conditionsMode": "AND", "outerJoinOnTheLeft": True,
-                  "on": [{"column1": {"table": 0, "name": a}, "column2": {"table": i, "name": b}, "type": "EQ"}
-                         for a, b in pairs[inputs[i]]]} for i in range(1, len(inputs))]
+        joins = []
+        for i in range(1, len(inputs)):
+            conditions = [(left(a), b) for a, b in pairs.get(inputs[i], [])]
+            joins.append({"table1": conditions[0][0][0] if conditions else 0, "table2": i, "type": types[inputs[i]],
+                          "conditionsMode": "AND", "outerJoinOnTheLeft": True,
+                          "on": [{"column1": {"table": t, "name": a}, "column2": {"table": i, "name": b}, "type": "EQ"}
+                                 for (t, a), b in conditions]})
         selected = [{"name": c, "table": i} for i, d in enumerate(inputs) for c in columns.get(d, [])]
         self._recipe(name, "join", inputs, [output], {}, "join", {
             "virtualInputs": vinputs, "joins": joins, "selectedColumns": selected, "resolvedSelectedColumns": [],
-            "postFilter": _filter(None), "computedColumns": [], "enableAutoCastInJoinConditions": False},
-            description, tags)
+            "postFilter": _filter(post_filter), "computedColumns": _computed(computed),
+            "enableAutoCastInJoinConditions": False}, description, tags)
 
-    def stack_recipe(self, name, inputs, output, description="", tags=()):
-        """Stack recipe: rows of all inputs, union of their columns."""
+    def stack_recipe(self, name, inputs, output, origin=None, pre_filters=None, description="", tags=()):
+        """Stack recipe: rows of all inputs, union of their columns. origin: name of a column telling which
+        input each row comes from; pre_filters: {dataset: GREL condition} to filter an input first."""
+        pre_filters = pre_filters or {}
         self._recipe(name, "vstack", inputs, [output], {}, "vstack", {
-            "mode": "UNION", "addOriginColumn": False, "originColumnName": "original_dataset",
-            "virtualInputs": [{"index": i, "originLabel": d, "preFilter": _filter(None)} for i, d in enumerate(inputs)],
+            "mode": "UNION", "addOriginColumn": bool(origin), "originColumnName": origin or "original_dataset",
+            "virtualInputs": [{"index": i, "originLabel": d, "preFilter": _filter(pre_filters.get(d))}
+                              for i, d in enumerate(inputs)],
             "postFilter": _filter(None)}, description, tags)
 
     def split_recipe(self, name, input_, column, outputs, description="", tags=()):
@@ -248,7 +276,8 @@ class Project:
             "explicit": explicit, "description": description, "tags": self._use_tags(tags)})
 
     def timeseries_model(self, name, input_, target, time, ids, horizon, algorithms, env, external=(),
-                         metric="MASE", explicit=False, description="", tags=()):
+                         metric="MASE", explicit=False, skip_reports=False, fill_missing=None, description="",
+                         tags=()):
         """Time series forecasting model trained in a Lab analysis on input_ (one row per series and time
         step), then the best algorithm on `metric` is deployed to the flow as saved model `name`.
         ids: columns identifying each series; horizon: time steps to forecast (the last `horizon` steps of
@@ -257,9 +286,12 @@ class Project:
         series packages (ensure_code_env); external: columns known in advance (calendar, ...) used as
         external features by the algorithms that support them; any other column is ignored. With external
         features, the dataset to score must also hold the `horizon` future rows (target empty).
-        explicit: as in ml_model."""
+        explicit: as in ml_model. skip_reports: no residual charts per series (Design > Advanced > Skip
+        expensive reports), much faster with many series. fill_missing: value of the missing time steps
+        inside and at the ends of a series (default: linear interpolation, no extrapolation)."""
         self._ml_recipe(name, {
             "model": name, "train": input_, "test": "", "target": target, "time": time, "ids": list(ids),
+            "skip_reports": skip_reports, "fill_missing": fill_missing,
             "horizon": horizon, "algorithms": algorithms, "env": env, "external": list(external),
             "metric": metric, "explicit": explicit, "description": description, "tags": self._use_tags(tags)})
 
@@ -447,6 +479,13 @@ class Project:
             s["predictionLength"] = spec["horizon"]
             s["evaluationParams"] = {"gapSize": 0, "testSize": spec["horizon"]}
             s["envSelection"] = {"envMode": "EXPLICIT_ENV", "envName": spec["env"]}
+            if spec.get("skip_reports"):
+                s["modeling"]["skipExpensiveReports"] = True
+            if spec.get("fill_missing") is not None:      # e.g. days without any row: a daily series with gaps
+                s["timestepParams"].update({"timeunit": "DAY", "numberOfTimeunits": 1})
+                s["preprocessing"]["timeseriesSampling"].update({
+                    "numericalInterpolateMethod": "CONSTANT", "numericalInterpolateConstantValue": spec["fill_missing"],
+                    "numericalExtrapolateMethod": "CONSTANT", "numericalExtrapolateConstantValue": spec["fill_missing"]})
         else:
             for c in spec["reject"]:
                 s["preprocessing"]["per_feature"][c]["role"] = "REJECT"
@@ -697,9 +736,10 @@ def tile_table(title, dataset):
                                                               "sorting": [], "explorationFilters": []}}}}
 
 
-def tile_chart(title, dataset, kind, x, measures, subgroup=None, date_x=False):
+def tile_chart(title, dataset, kind, x, measures, subgroup=None, date_x=False, function="AVG"):
     """Chart of a dataset: kind "lines" or "grouped_columns"; x: column on the X axis (date_x: by day);
-    measures: columns shown as their average; subgroup: one line / bar color per value of this column."""
+    measures: columns shown as their average (function="SUM": their total); subgroup: one line / bar color per
+    value of this column."""
     def dimension(column, date):
         d = {"column": column, "isA": "dimension", "filters": [], "maxValues": 100, "generateOthersCategory": False,
              "oneTickPerBin": "NO", "numParams": {"emptyBinsMode": "ZEROS"},
@@ -708,7 +748,7 @@ def tile_chart(title, dataset, kind, x, measures, subgroup=None, date_x=False):
     chart = {"type": kind, "variant": "normal", "name": title, "userEditedName": True,
              "genericDimension0": [dimension(x, date_x)],
              "genericDimension1": [dimension(subgroup, False)] if subgroup else [],
-             "genericMeasures": [{"column": m, "function": "AVG", "type": "NUMERICAL", "isA": "measure",
+             "genericMeasures": [{"column": m, "function": function, "type": "NUMERICAL", "isA": "measure",
                                   "displayed": True, "displayAxis": "axis1", "displayType": "column",
                                   "computeMode": "NORMAL", "computeModeDim": 0} for m in measures],
              "filters": [], "showLegend": True, "showXAxis": True, "includeZero": True, "smoothing": False,
@@ -791,6 +831,11 @@ def keep_columns(*columns):
 
 def delete_columns(*columns):
     return step("ColumnsSelector", appliesTo="COLUMNS", columns=list(columns), keep=False)
+
+
+def order_columns(*columns):
+    """Move these columns first, in this order."""
+    return step("ColumnReorder", appliesTo="COLUMNS", columns=list(columns), reorderAction="AT_START")
 
 
 # ---- internal DSS UI API (admin/admin), used to compute visual recipe output schemas ----------
