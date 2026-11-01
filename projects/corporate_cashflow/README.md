@@ -59,8 +59,9 @@ Three scenarios (Scenarios tab > Run), one per zone; each builds only its own zo
 - **Dashboard** "Cash-flow outlook": run buttons, the metrics, lowest balance per company, balance per
   day, the outlook table.
 
-The Free Edition has no time-based triggers: run them by hand, from the dashboard buttons, or from a cron
-with `dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`.
+The Free Edition has no time-based triggers and refuses to start scenarios through the API or `dsscli`
+("Automated triggering of scenarios is not available in your license"): run them by hand or from the
+dashboard buttons.
 
 The horizon is the project variable `horizon_days` (30), read by the recipes as `${horizon_days}`.
 

@@ -1,7 +1,7 @@
 IMAGE := dataiku/dss:15.2.0
 URL   := http://127.0.0.1:10000
 
-.PHONY: start stop
+.PHONY: start stop dashboard
 
 start: ## Start DSS + PostgreSQL, wait until ready, login admin/admin
 	@mkdir -p dss_data pg_data
@@ -19,3 +19,6 @@ start: ## Start DSS + PostgreSQL, wait until ready, login admin/admin
 
 stop: ## Stop DSS + PostgreSQL (keeps data)
 	docker compose stop
+
+dashboard: ## Start the external cash-flow dashboard on http://127.0.0.1:8060 (needs .dss_api_key)
+	cd outlook && uvicorn app:app --host 127.0.0.1 --port 8060

@@ -82,7 +82,7 @@ Training and inference in one project: `zone(name, tags=, items=, shared=)` grou
 into a flow zone (`shared` = inputs from another zone, shown in both), and `scenario(name, steps)` saves a list
 of steps to run from the Scenarios tab: `build_step(name, items, mode, zone_only=)`, `rules_step`,
 `metrics_step`, `python_step` (raise to stop the scenario), `scenario_step` (run another one). The Free Edition
-has no time-based triggers; `dsscli scenario-run KEY SCENARIO_ID` from a cron. Zones and scenarios are created
+has no time-based triggers and no API or `dsscli` scenario runs: run them in the UI. Zones and scenarios are created
 at the end of `deploy()`, once the saved models exist.
 
 Checks and results: `data_quality(dataset, rules)` with `rule_record_count`, `rule_not_empty`, `rule_unique`,

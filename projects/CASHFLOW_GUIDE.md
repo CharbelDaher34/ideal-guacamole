@@ -87,8 +87,9 @@ job); it stops at the first failed step.
 **Dashboard** "Cash-flow outlook": run buttons, the metrics, lowest balance per company, balance per day,
 the outlook table.
 
-The Free Edition has no scheduled triggers: run scenarios by hand, from the dashboard, or from a cron:
-`docker exec dataiku-dss /home/dataiku/dss/bin/dsscli scenario-run CORP_CASHFLOW DAILY_FORECAST`.
+The Free Edition has no scheduled triggers and does not let the API or `dsscli` start a scenario: run
+scenarios by hand, from the dashboard, or from the external dashboard ([`../outlook/`](../outlook/README.md)),
+which opens the scenario in DSS and follows the run.
 
 ## 5. In the DSS UI
 

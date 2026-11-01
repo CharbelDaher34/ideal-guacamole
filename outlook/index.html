@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cash-flow outlook</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f4f4f2; --surface: #fcfcfb; --border: #e3e2de;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984;
+  --accent: #2a78d6; --accent-ink: #fff;
+  --series-1: #2a78d6; --series-2: #eb6834; --ref: #8a8984; --grid: #ecebe7;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  --selected: #eaf2fc;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --border: #2e2e2b;
+    --text: #f0efec; --text-2: #c3c2b7; --muted: #8f8e86;
+    --accent: #3987e5;
+    --series-1: #3987e5; --series-2: #d95926; --ref: #8f8e86; --grid: #2a2a27;
+    --selected: #1d2a3a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --border: #2e2e2b;
+  --text: #f0efec; --text-2: #c3c2b7; --muted: #8f8e86;
+  --accent: #3987e5;
+  --series-1: #3987e5; --series-2: #d95926; --ref: #8f8e86; --grid: #2a2a27;
+  --selected: #1d2a3a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-bottom: 20px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 15px; margin: 0 0 12px; }
+.sub { color: var(--text-2); font-size: 13px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-left: auto; }
+.seg button { border: 0; background: var(--surface); color: var(--text-2); padding: 7px 14px; font: inherit; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.grid { display: grid; gap: 16px; }
+.tiles { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: 16px; }
+.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin-bottom: 16px; }
+@media (max-width: 820px) { .two { grid-template-columns: 1fr; } }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+.tile .label { color: var(--text-2); font-size: 13px; }
+.tile .value { font-size: 28px; font-weight: 650; letter-spacing: -0.02em; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.tile .note { color: var(--muted); font-size: 13px; }
+.status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; }
+.status i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.s-HIGH i, .s-FAILED i, .s-bad i { background: var(--critical); }
+.s-MEDIUM i, .s-WARNING i, .s-RUNNING i { background: var(--warning); }
+.s-LOW i, .s-SUCCESS i, .s-ok i { background: var(--good); }
+.s-ABORTED i { background: var(--muted); }
+.s-RUNNING i { animation: pulse 1s ease-in-out infinite alternate; }
+@keyframes pulse { to { opacity: .3; } }
+.scenario { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
+.scenario:first-of-type { border-top: 0; padding-top: 0; }
+.scenario .what { flex: 1; min-width: 0; }
+.scenario .name { font-weight: 600; }
+.scenario .err { color: var(--critical); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+.history { display: flex; gap: 3px; margin-top: 6px; }
+.history span { width: 14px; height: 6px; border-radius: 2px; background: var(--border); }
+.history .SUCCESS { background: var(--good); } .history .FAILED { background: var(--critical); }
+.history .RUNNING, .history .WARNING { background: var(--warning); }
+.run { border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); border-radius: 8px;
+  padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; text-decoration: none; }
+.run.secondary { background: transparent; color: var(--accent); }
+.run:disabled, .run[aria-disabled="true"] { opacity: .45; cursor: default; pointer-events: none; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 600; color: var(--text-2); font-size: 12px; text-transform: uppercase;
+  letter-spacing: .04em; padding: 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 9px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td.num, th.num { text-align: right; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--bg); }
+tbody tr[aria-selected="true"] { background: var(--selected); }
+.neg { color: var(--critical); }
+.chart-box { position: relative; height: 300px; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--text-2); margin-bottom: 8px; }
+.legend span::before { content: ""; display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--c);
+  vertical-align: middle; margin-right: 6px; }
+.legend .dash::before { border-top-style: dashed; }
+.banner { background: var(--surface); border: 1px solid var(--critical); border-radius: 10px; padding: 12px 16px;
+  margin-bottom: 16px; color: var(--text); }
+.banner[hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Cash-flow outlook</h1>
+      <div class="sub" id="asof">Next 30 days, per corporate account</div>
+    </div>
+    <div class="seg" id="projects" role="group" aria-label="Project"></div>
+  </header>
+
+  <div class="banner" id="error" role="alert" hidden></div>
+
+  <section class="grid tiles">
+    <div class="card tile"><div class="label">HIGH risk accounts</div><div class="value" id="t-high">–</div>
+      <div class="note">lowest balance past the overdraft limit</div></div>
+    <div class="card tile"><div class="label">MEDIUM risk accounts</div><div class="value" id="t-medium">–</div>
+      <div class="note">below 0 (expected or 1-in-10 bad case)</div></div>
+    <div class="card tile"><div class="label">Lowest balance ahead</div><div class="value" id="t-lowest">–</div>
+      <div class="note" id="t-lowest-note">&nbsp;</div></div>
+    <div class="card tile"><div class="label">Model</div><div class="value" id="t-model">–</div>
+      <div class="note" id="t-model-note">&nbsp;</div></div>
+  </section>
+
+  <section class="grid two">
+    <div class="card">
+      <h2>Runs</h2>
+      <p class="sub" id="run-note" hidden>The Free Edition only starts scenarios from the Dataiku interface: <b>Run in
+        Dataiku</b> opens the scenario, click <b>Run</b> there, and this page follows the run.</p>
+      <div id="scenarios"><div class="sub">Loading…</div></div>
+    </div>
+    <div class="card">
+      <h2 id="chart-title">Balance per day</h2>
+      <div class="legend">
+        <span style="--c: var(--series-1)">Expected balance</span>
+        <span style="--c: var(--series-2)">1-in-10 bad case</span>
+        <span class="dash" style="--c: var(--ref)">Overdraft limit</span>
+      </div>
+      <div class="chart-box"><canvas id="chart" aria-label="Balance per day of the selected account"></canvas></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Accounts <span class="sub">· click one to see its balance per day</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Company</th><th>Risk</th><th class="num">Opening</th><th class="num">Lowest</th><th>On</th>
+          <th class="num">Bad case lowest</th><th class="num">Overdraft limit</th><th class="num">Closing</th>
+          <th>Manager</th>
+        </tr></thead>
+        <tbody id="accounts"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+const RISK_ORDER = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+const LABELS = { SUCCESS: "Succeeded", FAILED: "Failed", WARNING: "Warning", RUNNING: "Running", ABORTED: "Aborted" };
+let project = null, data = null, selected = null, chart = null, poll = null;
+let dssUrl = "", apiRun = false, scenarioList = [], watching = null;   // watching: a run started in DSS
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const money = v => (typeof v === "number" ? Math.round(v).toLocaleString("en-US") : "–");
+const num = v => `<td class="num${v < 0 ? " neg" : ""}">${money(v)}</td>`;
+const day = s => String(s ?? "").slice(0, 10);
+const shortDay = s => new Date(day(s) + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const status = (cls, text) => `<span class="status s-${cls}"><i></i>${esc(text)}</span>`;
+
+function ago(seconds) {
+  const s = Date.now() / 1000 - seconds;
+  if (s < 90) return "just now";
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  if (s < 129600) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} days ago`;
+}
+const when = t => new Date(t * 1000).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+
+async function get(path, options) {
+  const r = await fetch(path, options);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || `${r.status} ${r.statusText}`);
+  return body;
+}
+
+function showError(e) {
+  $("error").hidden = !e;
+  $("error").textContent = e ? String(e.message || e) : "";
+}
+
+async function loadProjects() {
+  const info = await get("/api/projects"), list = info.projects;
+  dssUrl = info.dss_url;
+  apiRun = info.api_run;
+  $("run-note").hidden = apiRun;
+  project = new URLSearchParams(location.search).get("project") || list[0].key;
+  $("projects").innerHTML = list.map(p =>
+    `<button data-key="${esc(p.key)}" aria-pressed="${p.key === project}">${esc(p.label)}</button>`).join("");
+  $("projects").onclick = e => {
+    const key = e.target.dataset.key;
+    if (!key || key === project) return;
+    project = key;
+    history.replaceState(null, "", `?project=${key}`);
+    for (const b of $("projects").children) b.setAttribute("aria-pressed", b.dataset.key === project);
+    selected = null;
+    watching = null;
+    refresh();
+  };
+}
+
+async function refresh() {
+  showError(null);
+  await Promise.all([loadOutlook(), loadModel(), loadScenarios()].map(p => p.catch(showError)));
+}
+
+async function loadOutlook() {
+  data = await get(`/api/${project}/outlook`);
+  const accounts = data.accounts.sort((a, b) =>
+    (RISK_ORDER[a.risk_level] ?? 3) - (RISK_ORDER[b.risk_level] ?? 3) || a.lowest_balance - b.lowest_balance);
+  $("t-high").textContent = accounts.filter(a => a.risk_level === "HIGH").length;
+  $("t-medium").textContent = accounts.filter(a => a.risk_level === "MEDIUM").length;
+  const low = accounts.reduce((m, a) => (m && m.lowest_balance <= a.lowest_balance ? m : a), null);
+  $("t-lowest").textContent = low ? money(low.lowest_balance) : "–";
+  $("t-lowest-note").textContent = low ? `${low.company_name}, ${shortDay(low.lowest_balance_date)}` : "";
+  $("accounts").innerHTML = accounts.map(a => `
+    <tr data-id="${esc(a.account_id)}" aria-selected="false">
+      <td>${esc(a.company_name)} <span class="sub">${esc(a.account_id)}</span></td>
+      <td>${status(a.risk_level, a.risk_level)}</td>
+      ${num(a.opening_balance)}${num(a.lowest_balance)}<td>${esc(shortDay(a.lowest_balance_date))}</td>
+      ${num(a.pessimistic_lowest_balance)}${num(a.overdraft_limit)}${num(a.closing_balance)}
+      <td>${esc(a.relationship_manager)}</td>
+    </tr>`).join("");
+  $("accounts").onclick = e => { const tr = e.target.closest("tr"); if (tr) select(tr.dataset.id); };
+  select(accounts.some(a => a.account_id === selected) ? selected : accounts[0]?.account_id);
+}
+
+function select(id) {
+  selected = id;
+  for (const tr of $("accounts").children) tr.setAttribute("aria-selected", tr.dataset.id === id);
+  drawChart();
+}
+
+function drawChart() {
+  const account = data?.accounts.find(a => a.account_id === selected);
+  if (!account) return;
+  const path = data.balance_path.filter(r => r.account_id === selected).sort((a, b) => day(a.date) < day(b.date) ? -1 : 1);
+  const balance = path.map(r => r.balance);
+  const lowest = balance.indexOf(Math.min(...balance));
+  $("chart-title").textContent = `Balance per day · ${account.company_name}`;
+  const line = (label, values, color, extra = {}) => ({
+    label, data: values, borderColor: color, backgroundColor: color, borderWidth: 2, tension: 0.2,
+    pointRadius: 0, pointHoverRadius: 5, pointHoverBorderWidth: 2, pointHoverBorderColor: css("--surface"), ...extra });
+  const config = {
+    type: "line",
+    data: {
+      labels: path.map(r => shortDay(r.date)),
+      datasets: [
+        line("Expected balance", balance, css("--series-1"), {
+          pointRadius: balance.map((_, i) => (i === lowest ? 5 : 0)), pointBorderColor: css("--surface"), pointBorderWidth: 2 }),
+        line("1-in-10 bad case", path.map(r => r.pessimistic_balance), css("--series-2")),
+        line("Overdraft limit", path.map(() => -account.overdraft_limit), css("--ref"),
+          { borderDash: [5, 4], borderWidth: 1.5, pointHoverRadius: 0, tension: 0 }),
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${money(c.parsed.y)}` } },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: css("--muted"), maxTicksLimit: 8, maxRotation: 0 } },
+        y: { grid: { color: c => (c.tick.value === 0 ? css("--muted") : css("--grid")) },
+             border: { display: false }, ticks: { color: css("--muted"), callback: v => money(v) } },
+      },
+    },
+  };
+  if (chart) chart.destroy();
+  chart = new Chart($("chart"), config);
+}
+
+async function loadModel() {
+  const m = await get(`/api/${project}/model`);
+  $("t-model").innerHTML = status(m.ok ? "ok" : "bad", m.ok ? "Ready" : "Retrain");
+  $("t-model").style.fontSize = "20px";
+  $("t-model-note").textContent = m.trained_at
+    ? `Trained ${ago(m.trained_at)}${m.mase != null ? ` · MASE ${m.mase.toFixed(2)}` : ""}${m.ok ? "" : ` · ${m.message}`}`
+    : m.message;
+  $("t-model-note").title = m.trained_at ? `${m.algorithm || ""} trained ${when(m.trained_at)}` : "";
+}
+
+async function loadScenarios() {
+  const list = scenarioList = await get(`/api/${project}/scenarios`);
+  const running = list.some(s => s.runs[0]?.outcome === "RUNNING");
+  $("scenarios").innerHTML = list.map(s => {
+    const last = s.runs[0];
+    const finished = s.runs.find(r => r.outcome !== "RUNNING" && r.outcome === "SUCCESS");
+    const line = !last ? `<span class="sub">Never run</span>`
+      : last.outcome === "RUNNING" ? `${status("RUNNING", "Running")} <span class="sub">since ${ago(last.start)}</span>`
+      : `${status(last.outcome, LABELS[last.outcome] || last.outcome)} <span class="sub" title="${esc(when(last.end || last.start))}">${ago(last.end || last.start)}</span>`;
+    if (s.id === "DAILY_FORECAST")
+      $("asof").textContent = finished ? `Next 30 days, per corporate account · forecast of ${when(finished.end)}` : "No forecast yet";
+    return `<div class="scenario">
+      <div class="what">
+        <div class="name">${esc(s.name)}</div>
+        <div>${line}</div>
+        ${s.failure ? `<div class="err">${esc(s.failure.step)}: ${esc(s.failure.message)}</div>` : ""}
+        <div class="history" aria-label="Last runs, newest first">${s.runs.map(r =>
+          `<span class="${esc(r.outcome)}" title="${esc(LABELS[r.outcome] || r.outcome)} · ${esc(when(r.start))}"></span>`).join("")}</div>
+      </div>
+      ${!s.runnable ? "" : apiRun
+        ? `<button class="run${s.id === "TRAIN_MODEL" ? " secondary" : ""}" data-id="${s.id}"
+            ${running ? "disabled" : ""}>Run</button>`
+        : `<a class="run${s.id === "TRAIN_MODEL" ? " secondary" : ""}" data-id="${s.id}" target="_blank" rel="noopener"
+            href="${esc(dssUrl)}/projects/${project}/scenarios/${s.id}/steps" aria-disabled="${running}">Run in Dataiku ↗</a>`}
+    </div>`;
+  }).join("");
+  $("scenarios").onclick = e => {
+    const b = e.target.closest(".run");
+    if (b?.tagName === "BUTTON") start(b.dataset.id, b);
+    else if (b) watch(b.dataset.id);
+  };
+  if (running && !poll) poll = setInterval(follow, 5000);
+  return running;
+}
+
+async function start(id, button) {
+  if (id === "TRAIN_MODEL" && !confirm("Retrain the model on the latest history? This takes several minutes."))
+    return;
+  button.disabled = true;
+  try {
+    await get(`/api/${project}/scenarios/${id}/run`, { method: "POST" });
+    setTimeout(follow, 1500);
+  } catch (e) {
+    showError(e);
+    button.disabled = false;
+  }
+}
+
+// After "Run in Dataiku": check the runs until a new one has started there and finished (20 min at most).
+function watch(id) {
+  const latest = scenarioList.find(s => s.id === id)?.runs[0];
+  watching = { id, after: latest?.run_id, until: Date.now() + 20 * 60 * 1000 };
+  if (!poll) poll = setInterval(follow, 5000);
+}
+
+function waitingForDss() {
+  if (!watching) return false;
+  const latest = scenarioList.find(s => s.id === watching.id)?.runs[0];
+  if ((latest && latest.run_id !== watching.after) || Date.now() > watching.until) watching = null;
+  return Boolean(watching);
+}
+
+async function follow() {
+  try {
+    if (!(await loadScenarios()) && !waitingForDss()) {   // nothing running any more: show the new results
+      clearInterval(poll);
+      poll = null;
+      await Promise.all([loadOutlook(), loadModel()]);
+    } else if (!poll) {
+      poll = setInterval(follow, 5000);
+    }
+  } catch (e) { showError(e); }
+}
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawChart);
+loadProjects().then(refresh).catch(showError);
+</script>
+</body>
+</html>
