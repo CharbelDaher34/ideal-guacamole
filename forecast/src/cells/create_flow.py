@@ -1,22 +1,21 @@
 import time
 
+import pandas as pd
+
 flow = project.get_flow()
 if project.list_recipes():
     raise RuntimeError("This project already has a flow. This notebook sets up an empty project only; "
                        "change the flow in Dataiku, or create a new project to set it up again.")
 lib = {}
 exec(LIBRARY_CODE, lib)     # the shared settings (FEATURES, ...) are needed here too, for the visual models
-exec(WAREHOUSE_CODE, lib)   # the warehouse tables (TABLES, COLUMNS, staging_sql)
+exec(WAREHOUSE_CODE, lib)   # the curated warehouse tables (TABLES, COLUMNS, staging_sql)
 RAW = [warehouse_table for warehouse_table, _ in lib["TABLES"].values()] + [lib["LOAD_RECORD"]]
 
 # recipe: (inputs, outputs, flow zone); "models" is a managed folder, everything else a dataset
 FLOW = {
     "load_check": (RAW, ["load_status"], "Staging"),
-    "obligations": (["load_status", "accounts", "financing_schedules", "standing_orders", "deposits", "trade_finance",
-                     "corporate_cards", "sadad_payments", "cheques"], ["obligation_items", "monthly_obligations"],
-                    "Data prep"),
-    "monthly_flows": (["transactions", "accounts", "obligation_items"], ["monthly_flows"], "Data prep"),
-    "monthly_balances": (["daily_balances", "accounts"], ["monthly_balances"], "Data prep"),
+    "categorise": (["monthly_flows_by_origin", "category_rules"], ["monthly_flows"], "Data prep"),
+    "obligations": (["load_status", "scheduled_payments", "category_rules"], ["monthly_obligations"], "Data prep"),
     "build_rows": (["load_status", "monthly_flows", "monthly_obligations", "clients", "monthly_balances"],
                    ["training_rows", "scoring_rows"], "Data prep"),
     "train_models": (["load_status", "training_rows"], ["models"], "Training (code)"),
@@ -55,12 +54,18 @@ def new_dataset(name):
         settings.save()
 
 
-# the warehouse tables: read-only, through the EDW_AI connection
+# the curated warehouse tables: read-only, through the EDW_AI connection
 for name in RAW:
     dataset = project.create_dataset(name, "PostgreSQL", params={
         "connection": EDW_CONNECTION, "mode": "table", "schema": EDW_SCHEMA, "table": name})
     dataset.autodetect_settings().save()
 print(f"{len(RAW)} warehouse tables linked (read-only, {EDW_CONNECTION})")
+
+# category rules: an editable dataset (Flow > category_rules > Edit), filled with the default rules
+project.create_dataset("category_rules", "Inline", params={}, formatType="", formatParams={})
+dataiku.Dataset("category_rules").write_with_schema(pd.DataFrame(
+    [(n, *rule) for n, rule in enumerate(lib["DEFAULT_CATEGORY_RULES"], 1)],
+    columns=["rule_order", "origin_type", "txn_type_tag", "direction", "category"]))
 
 models = project.create_managed_folder("models", connection_name=FOLDER_CONNECTION)
 folder_settings = models.get_settings()

@@ -27,8 +27,29 @@ QUANTILES = (0.1, 0.9)      # P10 and P90
 CATBOOST = {"iterations": 600, "depth": 6, "learning_rate": 0.08, "random_seed": 0, "verbose": 0}
 FX_TO_SAR = {"SAR": 1.0, "USD": 3.75, "EUR": 4.05}
 
-# Each posting's category is set in the SQL recipe monthly_flows (its origin first, then the warehouse
-# transaction type tag, then other in / out).
+# Category rules: (origin type, transaction type tag, direction) -> category, the first matching rule wins;
+# "*" matches anything. The warehouse gives money in and out by origin type and tag; these rules turn them into
+# categories, the same way for postings and for scheduled payments. The setup copies them into the editable
+# dataset category_rules: edit them there (Flow > category_rules > Edit), then run the scenario Monthly forecast.
+DEFAULT_CATEGORY_RULES = [
+    ("PAYROLL", "*", "*", "PAYROLL"),
+    ("LOAN", "*", "OUT", "FINANCING"),
+    ("SADAD", "*", "*", "SADAD_GOV"),
+    ("CARD_SETTLEMENT", "*", "*", "CARD_SALES"),
+    ("CORP_CARD", "*", "*", "CORP_CARD"),
+    ("LC", "*", "*", "SUPPLIERS"),
+    ("DEPOSIT", "*", "IN", "DEPOSIT_MAT"),
+    ("CHEQUE", "*", "IN", "CHEQUES_IN"),
+    ("INVOICE", "*", "*", "RECEIPTS"),
+    ("*", "RENT", "*", "RENT"),
+    ("*", "SUPPLIER", "OUT", "SUPPLIERS"),
+    ("*", "COLLECTION", "IN", "RECEIPTS"),
+    ("*", "SALARY", "*", "PAYROLL"),
+    ("*", "UTILITY", "*", "SADAD_GOV"),
+    ("*", "GOV", "*", "SADAD_GOV"),
+    ("*", "*", "IN", "OTHER_IN"),
+    ("*", "*", "OUT", "OTHER_OUT"),
+]
 
 # Amounts are divided by a usual size, so small and large clients and categories compare:
 # a category's own amounts by its usual monthly amount (series_scale), the client's totals by its usual
@@ -73,6 +94,23 @@ def cutoff_month():
     Recipes that use it take load_status as an input, so nothing runs on a load that failed its checks."""
     status = read_dataset("load_status")
     return month_start(status["cutoff_month"]).iloc[0]
+
+
+def apply_category_rules(df, rules):
+    """Category of each row from its origin_type, txn_type_tag and direction: the first matching rule wins."""
+    rules = rules.sort_values("rule_order")
+    keys = {c: df[c].fillna("").astype(str) for c in ("origin_type", "txn_type_tag", "direction")}
+    category = pd.Series(np.where(df["direction"] == "IN", "OTHER_IN", "OTHER_OUT"), index=df.index)
+    unset = pd.Series(True, index=df.index)
+    for r in rules.itertuples():
+        match = unset.copy()
+        for column in ("origin_type", "txn_type_tag", "direction"):
+            wanted = getattr(r, column)
+            if wanted != "*":
+                match &= keys[column] == ("" if pd.isna(wanted) else str(wanted))
+        category[match] = r.category
+        unset &= ~match
+    return category
 
 
 def model_matrix(rows):

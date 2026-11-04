@@ -5,9 +5,9 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["load_check", "obligations", "build_rows", "train_models", "test_models", "ml_rows", "score",
+RECIPES = ["load_check", "categorise", "obligations", "build_rows", "train_models", "test_models", "ml_rows", "score",
            "visual_predictions", "compare_models", "final_forecast"]
-SQL_RECIPES = ["monthly_flows", "monthly_balances"]
+SQL_RECIPES = []          # SQL recipes other than staging (none since the warehouse curates the data)
 
 
 def code(text):
@@ -42,13 +42,15 @@ write("build_forecast_project.ipynb", [
 # Cash-flow forecast: set up the project
 
 This notebook sets up the cash-flow forecasting project in this (empty) Dataiku project, the way it runs in
-production. It reads the warehouse tables built by the warehouse team through the read-only `EDW_AI` connection
-(table and column names: `python/warehouse.py` in the project library), and builds:
+production. It reads the 4 curated tables the warehouse team builds from the 17 detailed ones (client, monthly
+flows by origin, scheduled payments, monthly balances), through the read-only `EDW_AI` connection (table and
+column names: `python/warehouse.py` in the project library), and builds:
 
-- **Raw data**: the 17 warehouse tables and the load record, read-only.
+- **Raw data**: the 4 curated warehouse tables and the load record, read-only.
 - **Staging**: one SQL recipe per table that gives back the standard column names, and a load check
   that stops everything if the latest load is incomplete. The load also sets the forecast's cut-off month.
-- **Data prep**: obligations, monthly flows and balances (SQL, inside the database), and the model rows.
+- **Data prep**: the category rules (an editable dataset), monthly flows by category, obligations, and the model
+  rows.
 - **Training (code)** and **Training (visual)**: the same rows trained two ways (Python recipes with
   CatBoost; visual ML, tracked by Dataiku), each tested on the last 6 months.
 - **Inference**: the 3-month forecast from either (project variable `model_source`), plus the obligations.
@@ -75,8 +77,8 @@ visual models use Dataiku's built-in Python.
 ## 2. Code
 
 The project library gets two files: `warehouse.py` (the warehouse tables and their column names) and
-`cashflow.py` (categories, the inputs the models see, how the code models are trained). Each recipe below
-becomes a recipe in the flow: Python, or SQL that runs inside the database.
+`cashflow.py` (categories and their default rules, the inputs the models see, how the code models are trained).
+Each recipe below becomes a Python recipe in the flow.
 """),
     code(embedded("WAREHOUSE_CODE", SRC / "warehouse.py")),
     code(embedded("LIBRARY_CODE", SRC / "library_cashflow.py")),
@@ -86,8 +88,8 @@ becomes a recipe in the flow: Python, or SQL that runs inside the database.
     md("""
 ## 3. Build the flow
 
-Links the warehouse tables (read-only), and creates the staging recipes, the load check, the data prep and the
-code training. The code models' folder is only rebuilt when asked by name, like saved models, so building the
+Links the curated warehouse tables (read-only), creates the editable category rules, the staging recipes, the
+load check, the data prep and the code training. The code models' folder is only rebuilt when asked by name, like saved models, so building the
 forecast never retrains by accident.
 """),
     code(read("cells/create_flow.py")),
@@ -143,10 +145,12 @@ write("warehouse_simulator.ipynb", [
 Plays the warehouse team (Informatica) until the real tables exist. Run it in its own project
 (for example `EDW_SIMULATOR`), not in the forecast project.
 
-It generates sample data for the 17 tables of the data requirements, up to `SIM_END`, and publishes them as the
-warehouse would have them at the end of `AS_OF`: what had happened or was scheduled by then, in the warehouse's
-table and column names (`warehouse.py`), into the schema `edw_ai`. Each load adds one row per table to
-`CFF_LOAD_RECORD`, which the forecast project checks before it runs.
+It generates sample data for the 17 detailed tables of the data requirements, up to `SIM_END`, and publishes them
+as the warehouse would have them at the end of `AS_OF` (what had happened or was scheduled by then), then builds
+the 4 curated tables from them, as the warehouse team would: client, monthly flows by origin, scheduled payments,
+monthly balances. All in the warehouse's table and column names (`warehouse.py`), into the schema `edw_ai`.
+Each load adds one row per table to `CFF_LOAD_RECORD`, which the forecast project checks before it runs. The
+forecast project reads only the curated tables.
 
 To simulate the next monthly load, move `AS_OF` to the next month's end, run all cells again, then run the
 forecast project's scenario **Monthly forecast**.
@@ -160,7 +164,8 @@ already exist.
     md("""
 ## Sample data, warehouse names, publishing
 
-The sample data generator, the warehouse table and column names, and the publishing as of a date.
+The sample data generator, the warehouse table and column names, the publishing as of a date, and the curated
+tables.
 """),
     code(read("generate_data.py")),
     code(read("warehouse.py")),

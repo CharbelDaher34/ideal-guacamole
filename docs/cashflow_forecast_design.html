@@ -106,7 +106,7 @@ flowchart LR
 
 <section>
   <h2><span class="n">2</span>The data</h2>
-  <p>The 17 tables from the data requirements fall into four groups. The warehouse team builds them (names like <code>CFF_STATEMENT_ENTRY</code>, <code>CFF_PAYROLL_MSTR</code>, columns like <code>CSTMR_CIF</code>, <code>VAL_DT</code>); the project reads them read-only through the <code>EDW_AI</code> connection. Until they exist, a simulator plays the warehouse team with realistic sample data, in the same names, month by month.</p>
+  <p>The 17 tables from the data requirements fall into four groups. The warehouse team builds them, and from them 4 curated tables that the project reads read-only through the <code>EDW_AI</code> connection: <code>CFF_CLIENT</code>, <code>CFF_CLIENT_MNTHLY_FLOW</code> (money in and out per client, month, origin type and transaction tag), <code>CFF_SCHEDULED_PYMT</code> (every scheduled payment and when it became known) and <code>CFF_CLIENT_MNTHLY_BAL</code>. The detailed tables stay in the warehouse for checks. Until they exist, a simulator plays the warehouse team with realistic sample data, in the same names, month by month.</p>
   <div class="figure">
 <pre class="mermaid">
 mindmap
@@ -339,16 +339,17 @@ flowchart LR
 <pre class="mermaid">
 flowchart TB
   subgraph Z1[Raw data: read-only, EDW_AI]
-    R[(17 warehouse tables)]
+    R[(4 curated warehouse tables)]
     LR[(CFF_LOAD_RECORD)]
   end
   subgraph Z0[Staging]
-    ST[stage_*: SQL, warehouse names to standard names] --> S17[(17 standard tables)]
+    ST[stage_*: SQL, warehouse names to standard names] --> S17[(4 standard tables)]
     LC[load_check: complete load? cut-off month] --> LS[(load_status)]
   end
   subgraph Z2[Data prep]
+    CR[(category_rules: editable)]
+    P1[categorise] --> MF[(monthly_flows)]
     P2[obligations] --> OB[(monthly_obligations)]
-    P1[monthly_flows, monthly_balances: SQL] --> MF[(monthly flows and balances)]
     P3[build_rows] --> TR[(training_rows)]
     P3 --> SR[(scoring_rows)]
   end
@@ -372,6 +373,9 @@ flowchart TB
   LR --> LC
   S17 --> P2
   S17 --> P1
+  CR --> P1
+  CR --> P2
+  S17 --> P3
   LS --> P2
   LS --> P3
   MF --> P3
@@ -408,7 +412,8 @@ flowchart TB
         <li>Two ways to train (code and visual), one inference; <code>model_source</code> picks the models.</li>
         <li>At least 12 months of history to score a client. Otherwise flagged.</li>
         <li>Test on the last 6 months.</li>
-        <li>Production-shaped: the project only reads the warehouse (read-only <code>EDW_AI</code>), checks each load, takes its cut-off from the load record, does the heavy prep in SQL, and runs from two scenarios. Sample data comes from a separate warehouse simulator.</li>
+        <li>Production-shaped: the project only reads the warehouse (read-only <code>EDW_AI</code>), checks each load, takes its cut-off from the load record, and runs from two scenarios. Sample data comes from a separate warehouse simulator.</li>
+        <li>The warehouse does the heavy, mechanical prep (4 curated tables); Dataiku keeps the modelling logic. Categories come from editable rules in Dataiku, not from the warehouse, so they can be tuned without a warehouse change.</li>
       </ul>
     </div>
     <div class="card">
@@ -417,6 +422,7 @@ flowchart TB
         <li>Client total method: review once we see the test results.</li>
         <li>No past versions of schedules: in real data, obligation hints may show slightly more than was known at the time. Tell the tech lead.</li>
         <li>How real transactions are labelled as rent or supplier payments without descriptions (counterparty, transaction code).</li>
+        <li>The tech lead agrees to curated monthly tables next to the detailed ones (the rules ask for no monthly totals).</li>
         <li>Warehouse table and column names are our proposal (<code>CFF_*</code>, EDW style); the warehouse team confirms them. If they differ, only the mapping file changes.</li>
       </ul>
     </div>

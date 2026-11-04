@@ -111,6 +111,7 @@ for name in RAW:
     to_zone("Raw data", project.get_dataset(name))
 for table in lib["TABLES"]:
     to_zone("Staging", project.get_dataset(table))
+to_zone("Data prep", project.get_dataset("category_rules"))
 for _, outputs, zone_name in list(FLOW.values()) + list(FLOW_AFTER_VISUAL.values()):
     for out in outputs:
         to_zone(zone_name, models if out == "models" else project.get_dataset(out))

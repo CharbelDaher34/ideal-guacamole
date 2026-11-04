@@ -1,14 +1,38 @@
-"""Warehouse tables the project reads (project library: python/warehouse.py).
+"""Warehouse tables (project library: python/warehouse.py).
 
-The warehouse team builds one table per item of the data requirements in the schema read through the EDW_AI
-connection. Table names are CFF_ + the source table's name where it is known; columns follow the EDW style
-seen in FCT_PAYROLL_MSTR (CSTMR_CIF, ACNT_NMBR, TOT_AMT, ..._DT, ..._FLG with Y / N). These names are our
-proposal until the warehouse team confirms them: if they differ, only this file changes.
+In the schema read through the EDW_AI connection, the warehouse team builds the 17 detailed tables of the data
+requirements (DETAIL_TABLES) and, from them, 4 curated tables (TABLES) plus a load record. The project reads
+only the curated tables; the detailed ones stay in the warehouse for checks and drill-down.
+Table names are CFF_ + the source table's name where it is known; columns follow the EDW style seen in
+FCT_PAYROLL_MSTR (CSTMR_CIF, ACNT_NMBR, TOT_AMT, ..._DT, ..._FLG with Y / N). These names are our proposal until
+the warehouse team confirms them: if they differ, only this file changes.
 The project's staging recipes rename every column back to the standard names used by the recipes.
 """
 
-# standard name: (warehouse table, where the warehouse team takes it from)
+# curated tables the project reads. standard name: (warehouse table, what the warehouse team builds it from)
 TABLES = {
+    "clients": ("CFF_CLIENT", "detailed tables 1, 2, 16"),
+    "monthly_flows_by_origin": ("CFF_CLIENT_MNTHLY_FLOW", "detailed table 3, and CFF_SCHEDULED_PYMT"),
+    "scheduled_payments": ("CFF_SCHEDULED_PYMT", "detailed tables 5, 7, 8, 9, 11, 13, 17"),
+    "monthly_balances": ("CFF_CLIENT_MNTHLY_BAL", "detailed tables 2, 4"),
+}
+COLUMNS = {
+    "clients": ["client_no", "party_type", "segment", "sub_segment", "sector", "industry", "region", "city",
+                "joining_date", "legal_form", "sole_proprietor_flag", "last_annual_sales", "number_of_employees",
+                "parent_client_no", "status", "closure_date", "current_accounts", "restricted_accounts"],
+    # one row per client, month, direction, origin type and transaction type tag. Leaves out transfers between the
+    # client's own accounts and reversed postings. known_1..3: the part of the amount that came from scheduled
+    # payments known 1, 2 or 3 months before the month
+    "monthly_flows_by_origin": ["client_no", "month", "direction", "origin_type", "txn_type_tag", "amount", "postings",
+                                "known_1", "known_2", "known_3"],
+    # one row per scheduled payment, past and future; known_date: when the schedule existed
+    "scheduled_payments": ["origin_type", "origin_ref", "client_no", "direction", "txn_type_tag", "due_date", "amount",
+                           "known_date"],
+    "monthly_balances": ["client_no", "month", "balance_end", "overdraft_limit"],
+}
+
+# the 17 detailed tables. standard name: (warehouse table, where the warehouse team takes it from)
+DETAIL_TABLES = {
     "clients": ("CFF_CBG_CUSTOMER", "EDW_DM.DM_CBG_CUSTOMER"),
     "accounts": ("CFF_ACNT", "to find"),
     "transactions": ("CFF_STATEMENT_ENTRY", "EDW.FCT_STATEMENT_ENTRY"),
@@ -31,8 +55,7 @@ TABLES = {
 LOAD_RECORD = "CFF_LOAD_RECORD"
 AUDIT_COLUMNS = ["ETL_LOAD_ID", "ETL_LOAD_DTTS"]      # added by the warehouse team to every table
 
-# standard columns of each table (what the recipes use after staging)
-COLUMNS = {
+DETAIL_COLUMNS = {
     "clients": ["client_no", "party_type", "segment", "sub_segment", "sector", "industry", "region", "city",
                 "joining_date", "legal_form", "sole_proprietor_flag", "last_annual_sales", "number_of_employees",
                 "parent_client_no", "status", "closure_date"],
@@ -95,7 +118,8 @@ ABBREVIATIONS = {
     "early": "ERLY", "total": "TOT", "relationship": "RLTNSHP", "month": "MNTH", "avg": "AVG", "online": "ONLN",
     "meaning": "MNNG", "parent": "PRNT", "child": "CHLD", "party": "PRTY", "sub": "SUB", "party_type": "PRTY_TYP",
     "topup": "TOPUP", "due": "DUE", "paid": "PAID", "used": "USED", "own": "OWN", "tag": "TAG", "orig": "ORIG",
-    "salary": "SLRY", "bonus": "BONUS", "loan": "LOAN", "net": "NET",
+    "salary": "SLRY", "bonus": "BONUS", "loan": "LOAN", "net": "NET", "current": "CRNT", "accounts": "ACNTS",
+    "postings": "PSTNG_CNT", "known": "KNWN",
 }
 
 
@@ -123,6 +147,6 @@ def staging_sql(table, schema):
             "SELECT\n    " + ",\n    ".join(select) + f'\nFROM "{schema}"."{warehouse_table}"')
 
 
-for _table, _columns in COLUMNS.items():          # every warehouse name must be unique within its table
+for _table, _columns in list(COLUMNS.items()) + list(DETAIL_COLUMNS.items()):   # names unique within a table
     _names = [warehouse_column(c) for c in _columns]
     assert len(set(_names)) == len(_names), (_table, _names)
