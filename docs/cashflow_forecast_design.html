@@ -340,11 +340,10 @@ flowchart LR
 flowchart TB
   subgraph Z1[Raw data: read-only, EDW_AI]
     R[(4 curated warehouse tables)]
-    LR[(CFF_LOAD_RECORD)]
+    LR[(CFF_LOAD_RECORD: read by the scenarios' load check)]
   end
   subgraph Z0[Staging]
     ST[stage_*: SQL, warehouse names to standard names] --> S17[(4 standard tables)]
-    LC[load_check: complete load? cut-off month] --> LS[(load_status)]
   end
   subgraph Z2[Data prep]
     CR[(category_rules: editable)]
@@ -369,15 +368,11 @@ flowchart TB
     F[final_forecast: model_source + obligations] --> FF[(final_forecast)]
   end
   R --> ST
-  R --> LC
-  LR --> LC
   S17 --> P2
   S17 --> P1
   CR --> P1
   CR --> P2
   S17 --> P3
-  LS --> P2
-  LS --> P3
   MF --> P3
   OB --> P3
   TR --> P4
@@ -396,7 +391,7 @@ flowchart TB
   EV --> CMP
 </pre>
   </div>
-  <p class="caption">Boxes with rounded ends are datasets, folders, saved models or evaluation stores; rectangles are recipes. The 6 groups are the flow zones. The load check stops everything if the latest load is incomplete. The code models' folder, the saved models and the evaluation stores are only rebuilt when built by name, so the monthly forecast never retrains by accident. Shared code is in the project library (<code>python/cashflow.py</code>). Project variables: <code>last_month</code> (the cut-off) and <code>model_source</code> (<code>code</code> or <code>visual</code>).</p>
+  <p class="caption">Boxes with rounded ends are datasets, folders, saved models or evaluation stores; rectangles are recipes. The 6 groups are the flow zones. Each scenario starts with a load check (a Python step): it stops the scenario if the latest load is incomplete, and sets the project variable <code>cutoff_month</code> that the recipes read. The code models' folder, the saved models and the evaluation stores are only rebuilt when built by name, so the monthly forecast never retrains by accident. Shared code is in the project library (<code>python/cashflow.py</code>). Project variables: <code>last_month</code> (the cut-off) and <code>model_source</code> (<code>code</code> or <code>visual</code>).</p>
 </section>
 
 <section>

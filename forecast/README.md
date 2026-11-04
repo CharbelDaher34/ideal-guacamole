@@ -35,7 +35,6 @@ file changes) and the load record; set `EDW_CONNECTION` and `EDW_SCHEMA` in the 
 |---|---|---|
 | Raw data | (none: read-only, `EDW_AI`) | the 4 curated warehouse tables: `CFF_CLIENT`, `CFF_CLIENT_MNTHLY_FLOW` (client × month × direction × origin type × tag), `CFF_SCHEDULED_PYMT` (every scheduled payment and when it became known), `CFF_CLIENT_MNTHLY_BAL`; and `CFF_LOAD_RECORD` |
 | Staging | `stage_*` (SQL, one per table) | the same tables with the standard column names (`clients`, `monthly_flows_by_origin`, `scheduled_payments`, `monthly_balances`); flags Y / N → true / false |
-| Staging | `load_check` | `load_status`: the latest load's as-of date and the forecast's cut-off month. Fails (and stops everything after it) if a table is missing, not loaded, or has fewer or more rows than the load record says |
 | Data prep | (editable dataset) | `category_rules`: origin type + transaction type tag + direction → category, first match wins. Edit it in the flow, then run Monthly forecast |
 | Data prep | `categorise` | `monthly_flows`: money in / out per client, month and category |
 | Data prep | `obligations` | `monthly_obligations`: scheduled payments per client, category, month due and month known |
@@ -45,14 +44,19 @@ file changes) and the load record; set `EDW_CONNECTION` and `EDW_SCHEMA` in the 
 | Inference | `score`, `score_*_visual`, `visual_predictions`, `compare_models`, `final_forecast` | `predictions`, `predictions_visual`, `model_comparison`, `final_forecast` |
 
 Project variable `model_source` (`code` or `visual`) picks which models feed `final_forecast`. The cut-off comes
-from the load record, not from today's date.
+from the load record, not from today's date: each scenario starts with the **load check**
+(`check_latest_load` in the library file `warehouse.py`). For the latest load in `CFF_LOAD_RECORD`, every
+curated table must be loaded with status SUCCESS and hold the number of rows the record says; otherwise the
+scenario stops before anything is built. On success it sets the project variables `load_id`, `as_of_date` and
+`cutoff_month` (the last complete month), which the recipes read. Building datasets by hand uses the cut-off of
+the last successful check.
 
 ## Scenarios
 
 | Scenario | Steps | Trigger (off in the sandbox) |
 |---|---|---|
-| Monthly forecast | check the load → stage, prepare, forecast with the current models | monthly, 2nd at 07:00 Riyadh |
-| Retrain and test the models | check the load → prepare training data → retrain and test the code models → retrain and test the visual models → compare → forecast | every 3 months, 5th at 07:00 Riyadh |
+| Monthly forecast | check the load (Python step) → stage, prepare, forecast with the current models | monthly, 2nd at 07:00 Riyadh |
+| Retrain and test the models | check the load (Python step) → prepare training data → retrain and test the code models → retrain and test the visual models → compare → forecast | every 3 months, 5th at 07:00 Riyadh |
 
 The code models' folder, the visual saved models and the evaluation stores are only rebuilt when built by name,
 so the monthly forecast never retrains by accident. The Free Edition only runs scenarios from the browser.

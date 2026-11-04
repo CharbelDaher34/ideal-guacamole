@@ -90,10 +90,10 @@ def add_months(month, n):
 
 
 def cutoff_month():
-    """The forecast's cut-off: the last complete month of the latest checked warehouse load (dataset load_status).
-    Recipes that use it take load_status as an input, so nothing runs on a load that failed its checks."""
-    status = read_dataset("load_status")
-    return month_start(status["cutoff_month"]).iloc[0]
+    """The forecast's cut-off: the last complete month of the latest checked warehouse load (project variable
+    cutoff_month, set by the load check that starts each scenario)."""
+    import dataiku
+    return pd.Timestamp(dataiku.get_custom_variables()["cutoff_month"] + "-01")
 
 
 def apply_category_rules(df, rules):

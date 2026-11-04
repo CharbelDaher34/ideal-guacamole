@@ -5,7 +5,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["load_check", "categorise", "obligations", "build_rows", "train_models", "test_models", "ml_rows", "score",
+RECIPES = ["categorise", "obligations", "build_rows", "train_models", "test_models", "ml_rows", "score",
            "visual_predictions", "compare_models", "final_forecast"]
 SQL_RECIPES = []          # SQL recipes other than staging (none since the warehouse curates the data)
 
@@ -47,14 +47,15 @@ flows by origin, scheduled payments, monthly balances), through the read-only `E
 column names: `python/warehouse.py` in the project library), and builds:
 
 - **Raw data**: the 4 curated warehouse tables and the load record, read-only.
-- **Staging**: one SQL recipe per table that gives back the standard column names, and a load check
-  that stops everything if the latest load is incomplete. The load also sets the forecast's cut-off month.
+- **Staging**: one SQL recipe per table that gives back the standard column names.
 - **Data prep**: the category rules (an editable dataset), monthly flows by category, obligations, and the model
   rows.
 - **Training (code)** and **Training (visual)**: the same rows trained two ways (Python recipes with
   CatBoost; visual ML, tracked by Dataiku), each tested on the last 6 months.
 - **Inference**: the 3-month forecast from either (project variable `model_source`), plus the obligations.
-- Two scenarios: **Monthly forecast** (after each load) and **Retrain and test the models**.
+- Two scenarios: **Monthly forecast** (after each load) and **Retrain and test the models**. Each starts with
+  the load check (`check_latest_load` in `warehouse.py`): it stops the scenario if the latest load is incomplete,
+  and sets the project variable `cutoff_month` that the recipes read.
 
 It then trains and tests the models once and builds the first forecast.
 
@@ -89,14 +90,15 @@ Each recipe below becomes a Python recipe in the flow.
 ## 3. Build the flow
 
 Links the curated warehouse tables (read-only), creates the editable category rules, the staging recipes, the
-load check, the data prep and the code training. The code models' folder is only rebuilt when asked by name, like saved models, so building the
+data prep and the code training. The code models' folder is only rebuilt when asked by name, like saved models, so building the
 forecast never retrains by accident.
 """),
     code(read("cells/create_flow.py")),
     md("""
 ## 4. Check the load and prepare the data
 
-Runs the load check, the staging and the data prep. The visual models need their data to exist before they can
+Runs the load check (the same one that starts each scenario; it sets `cutoff_month`), then the staging and the
+data prep. The visual models need their data to exist before they can
 be trained.
 """),
     code(read("cells/run_prep.py")),
@@ -114,7 +116,8 @@ model evaluation store, so every retraining is tracked) and a Score recipe on th
 
 Then the two scenarios, with their monthly triggers switched off (switch them on in production):
 
-- **Monthly forecast**: check the latest load, then stage, prepare and forecast with the current models.
+- **Monthly forecast**: check the latest load (a Python step), then stage, prepare and forecast with the
+  current models.
 - **Retrain and test the models**: retrain both ways, test them on the last 6 months, compare, forecast.
 """),
     code(read("cells/visual_ml.py")),

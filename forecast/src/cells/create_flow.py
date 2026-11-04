@@ -13,15 +13,14 @@ RAW = [warehouse_table for warehouse_table, _ in lib["TABLES"].values()] + [lib[
 
 # recipe: (inputs, outputs, flow zone); "models" is a managed folder, everything else a dataset
 FLOW = {
-    "load_check": (RAW, ["load_status"], "Staging"),
     "categorise": (["monthly_flows_by_origin", "category_rules"], ["monthly_flows"], "Data prep"),
-    "obligations": (["load_status", "scheduled_payments", "category_rules"], ["monthly_obligations"], "Data prep"),
-    "build_rows": (["load_status", "monthly_flows", "monthly_obligations", "clients", "monthly_balances"],
+    "obligations": (["scheduled_payments", "category_rules"], ["monthly_obligations"], "Data prep"),
+    "build_rows": (["monthly_flows", "monthly_obligations", "clients", "monthly_balances"],
                    ["training_rows", "scoring_rows"], "Data prep"),
-    "train_models": (["load_status", "training_rows"], ["models"], "Training (code)"),
-    "test_models": (["load_status", "training_rows", "models"], ["test_predictions", "test_results"],
+    "train_models": (["training_rows"], ["models"], "Training (code)"),
+    "test_models": (["training_rows", "models"], ["test_predictions", "test_results"],
                     "Training (code)"),
-    "ml_rows": (["load_status", "training_rows", "scoring_rows"], ["ml_train", "ml_test", "ml_scoring"],
+    "ml_rows": (["training_rows", "scoring_rows"], ["ml_train", "ml_test", "ml_scoring"],
                 "Training (visual)"),
     "score": (["scoring_rows", "models"], ["predictions"], "Inference"),
 }
@@ -31,7 +30,7 @@ FLOW_AFTER_VISUAL = {
                            "Inference"),
     "compare_models": (["test_predictions", "eval_ev_visual_scored", "eval_p10_visual_scored",
                         "eval_p90_visual_scored"], ["model_comparison"], "Inference"),
-    "final_forecast": (["load_status", "predictions", "predictions_visual", "monthly_obligations"], ["final_forecast"],
+    "final_forecast": (["predictions", "predictions_visual", "monthly_obligations"], ["final_forecast"],
                        "Inference"),
 }
 

@@ -147,6 +147,47 @@ def staging_sql(table, schema):
             "SELECT\n    " + ",\n    ".join(select) + f'\nFROM "{schema}"."{warehouse_table}"')
 
 
+def check_latest_load():
+    """The latest warehouse load must be complete before the forecast runs: every curated table loaded with status
+    SUCCESS and holding the number of rows the load record says (a partial load stops here). Sets the project
+    variables load_id, as_of_date and cutoff_month (the last complete month on the as-of date), which the recipes
+    read. Raises an error on any problem, which stops the scenario before anything is built.
+    Run by the first step of each scenario: from warehouse import check_latest_load; check_latest_load()"""
+    import dataiku
+    import pandas as pd
+    from dataiku import SQLExecutor2
+
+    record = dataiku.Dataset(LOAD_RECORD).get_dataframe()
+    latest = record.sort_values("LOAD_DTTS").iloc[-1]["LOAD_ID"]
+    load = record[record["LOAD_ID"] == latest].set_index("TRGT_TBL_NM")
+    problems = []
+    for warehouse_table, _ in TABLES.values():
+        if warehouse_table not in load.index:
+            problems.append(f"{warehouse_table}: not in load {latest}")
+            continue
+        row = load.loc[warehouse_table]
+        if row["LOAD_STA_CD"] != "SUCCESS":
+            problems.append(f"{warehouse_table}: load status {row['LOAD_STA_CD']}")
+        dataset = dataiku.Dataset(warehouse_table)
+        params = dataset.get_config()["params"]
+        count = SQLExecutor2(dataset=dataset).query_to_df(
+            f'SELECT COUNT(*) AS n FROM "{params["schema"]}"."{params["table"]}"')["n"].iloc[0]
+        if count != row["ROW_CNT"]:
+            problems.append(f"{warehouse_table}: {count:,} rows, the load record says {row['ROW_CNT']:,}")
+    if problems:
+        raise ValueError("Warehouse load not usable:\n" + "\n".join(problems))
+
+    as_of = pd.Timestamp(load["AS_OF_DT"].max())
+    as_of = (as_of.tz_convert(None) if as_of.tzinfo else as_of).normalize()
+    cutoff = as_of.to_period("M") if as_of == as_of + pd.offsets.MonthEnd(0) else as_of.to_period("M") - 1
+    project = dataiku.api_client().get_default_project()
+    variables = project.get_variables()
+    variables["standard"].update(load_id=latest, as_of_date=f"{as_of:%Y-%m-%d}", cutoff_month=str(cutoff))
+    project.set_variables(variables)
+    print(f"Load {latest} OK: as of {as_of:%Y-%m-%d}, cut-off month {cutoff}")
+    return str(cutoff)
+
+
 for _table, _columns in list(COLUMNS.items()) + list(DETAIL_COLUMNS.items()):   # names unique within a table
     _names = [warehouse_column(c) for c in _columns]
     assert len(set(_names)) == len(_names), (_table, _names)

@@ -126,13 +126,22 @@ for store in stores:
 print("Flow ready:", ", ".join(zones))
 
 
-# Production runs. Code models (the models folder), visual saved models and evaluation stores are only rebuilt
-# when built by name, so the monthly forecast never retrains by accident.
-def build_step(n, label, items, mode):
-    return {"id": f"step_{n}", "type": "build_flowitem", "name": label, "enabled": True,
-            "runConditionType": "RUN_IF_STATUS_MATCH", "runConditionStatuses": ["SUCCESS", "WARNING"],
-            "params": {"builds": [{"type": t, "itemId": i, "partitionsSpec": ""} for t, i in items], "jobType": mode,
-                       "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
+# Production runs. Each scenario starts with the load check (a Python step): it stops the scenario if the latest
+# warehouse load is incomplete, and sets the cut-off month. Code models (the models folder), visual saved models
+# and evaluation stores are only rebuilt when built by name, so the monthly forecast never retrains by accident.
+CHECK = "from warehouse import check_latest_load\n\ncheck_latest_load()\n"
+
+
+def step(n, label, items, mode=None):
+    common = {"id": f"step_{n}", "name": label, "enabled": True, "runConditionType": "RUN_IF_STATUS_MATCH",
+              "runConditionStatuses": ["SUCCESS", "WARNING"]}
+    if items == "check":
+        return {**common, "type": "custom_python", "params": {
+            "script": CHECK, "envSelection": {"envMode": "INHERIT"}, "proceedOnFailure": False,
+            "handleWarningsAs": "WARNING"}}
+    return {**common, "type": "build_flowitem", "params": {
+        "builds": [{"type": t, "itemId": i, "partitionsSpec": ""} for t, i in items], "jobType": mode,
+        "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
 
 
 datasets = lambda *names: [("DATASET", n) for n in names]
@@ -140,14 +149,14 @@ SCENARIOS = {
     "Monthly forecast": (
         "After each warehouse load: check it, then forecast the next 3 months with the current models",
         dict(day=2, hour=7), [
-            ("Check the latest warehouse load", datasets("load_status"), "NON_RECURSIVE_FORCED_BUILD"),
+            ("Check the latest warehouse load", "check"),
             ("Stage, prepare and forecast", datasets("predictions", "predictions_visual", "final_forecast"),
              "RECURSIVE_FORCED_BUILD"),
         ]),
     "Retrain and test the models": (
         "Retrain both ways (code and visual), test them on the last 6 months, compare, and forecast with them",
         dict(day=5, hour=7, repeat_every=3), [
-            ("Check the latest warehouse load", datasets("load_status"), "NON_RECURSIVE_FORCED_BUILD"),
+            ("Check the latest warehouse load", "check"),
             ("Stage and prepare the training data",
              datasets("training_rows", "scoring_rows", "ml_train", "ml_test", "ml_scoring"), "RECURSIVE_FORCED_BUILD"),
             ("Retrain the code models", [("MANAGED_FOLDER", models.id)], "NON_RECURSIVE_FORCED_BUILD"),
@@ -163,7 +172,7 @@ SCENARIOS = {
 for name, (description, schedule, steps) in SCENARIOS.items():
     scenario = project.create_scenario(name, "step_based", {
         "active": False, "description": description,
-        "params": {"steps": [build_step(n, *step) for n, step in enumerate(steps)]}})
+        "params": {"steps": [step(n, *s) for n, s in enumerate(steps)]}})
     settings = scenario.get_settings()
     settings.add_monthly_trigger(timezone="Asia/Riyadh", **schedule)
     settings.raw_triggers[-1]["active"] = False    # switch on in production (Automation node)
