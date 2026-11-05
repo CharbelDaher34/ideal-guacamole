@@ -20,7 +20,6 @@ log = pd.DataFrame([{
     "as_of_date": variables.get("as_of_date", ""),
     "cutoff_month": f"{first['cutoff_month']:%Y-%m}",
     "model_id": first["model_id"],
-    "model_promoted_at": first["model_promoted_at"],
     "clients": len(clients),
     "clients_not_enough_history": int((clients["status"] == "NOT_ENOUGH_HISTORY").sum()),
     "forecast_rows": len(forecast),

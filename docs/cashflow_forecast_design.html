@@ -261,29 +261,33 @@ mindmap
     </div>
   </div>
   <p>After predicting, we make sure P10 ≤ EV ≤ P90 and that no amount is negative.</p>
+  <p>Which model is trained is a <strong>forecaster</strong>: a small class that learns from the training rows and returns P10, EV and P90. The reference one is the two CatBoost models above; the data scientist can add others. The project variable <code>forecaster</code> says which one is trained.</p>
   <p>Each training run is one <strong>model</strong> with its own <strong>model ID</strong> (for example <code>CFF_202610_20261104T1416</code>: cut-off month and training time), recorded in Dataiku's <strong>Experiment Tracking</strong> and deployed as a new <strong>version</strong> of three saved models: <code>forecast_ev</code>, <code>forecast_p10</code>, <code>forecast_p90</code>. The production model is the <strong>active version</strong>; a new model is activated only if it is better, and the nightly batch always scores with the active version.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart LR
-  T[Train and test a new model] --> X[(Experiment Tracking: model ID, settings, test scores)]
+  T[Train and test a new model with the chosen forecaster] --> X[(Experiment Tracking: model ID, forecaster, settings, test scores)]
   X --> V[(New version of the 3 saved models, not active)]
   V --> CC{Champion / challenger: same last 6 months}
   P[(Active version: production)] --> CC
   CC -- better --> PR[Activate the new version]
   CC -- not better --> K[Keep the active version]
-  PR --> N[Nightly batch: Score recipes use the active version]
-  K --> N
+  PR --> AV[(Active version)]
+  K --> AV
+  AV -. read on its own schedule .-> N[Nightly batch: Score recipes use the active version]
 </pre>
   </div>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Step</th><th>What happens</th></tr></thead>
     <tbody>
-      <tr><td>Tracking</td><td>Settings, cut-off, warehouse load, row counts, test scores on the last 6 months (EV error overall and per category, P10–P90 coverage), the backtest models, and the three MLflow models, under one model ID</td></tr>
+      <tr><td>Forecaster</td><td>The project variable <code>forecaster</code> names the one trained: <code>catboost</code> (the reference) or one of the data scientist's in <code>forecasters.py</code></td></tr>
+      <tr><td>Tracking</td><td>The forecaster and its settings, cut-off, warehouse load, row counts, test scores on the last 6 months (EV error overall and per category, P10–P90 coverage), the backtest forecaster, and the three MLflow models, under one model ID</td></tr>
       <tr><td>Versions</td><td>The three MLflow models are deployed as version <em>model ID</em> of the saved models, with Dataiku's own evaluation on a reference sample</td></tr>
       <tr><td>Champion / challenger</td><td>The new model and the production model are tested on the same last 6 months, each with its version trained without those months</td></tr>
       <tr><td>Promotion (automatic)</td><td>The new version is activated if its EV error is lower (a tie keeps production), its P10–P90 coverage is between 70% and 90%, and it beats the simple guess. Every decision and its reason go to <code>promotion_log</code></td></tr>
       <tr><td>Rollback</td><td>Activate an earlier version in the three saved models and run the nightly batch</td></tr>
+      <tr><td>Lab</td><td>The data scientist tries a forecaster on the same test, next to the production model, without touching production: notebook <code>forecast_lab</code>, or the recipe <code>try_forecaster</code> (<code>lab_results</code>). Tries are recorded in Experiment Tracking (experiment <code>cashflow_lab</code>) and never deployed</td></tr>
     </tbody>
   </table>
   </div>
@@ -348,7 +352,7 @@ flowchart LR
 
 <section>
   <h2><span class="n">9</span>What gets built in Dataiku</h2>
-  <p>A setup notebook builds the project once, in an empty Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. After that, the project runs from two scenarios: <strong>Nightly batch</strong> after each warehouse load, and <strong>Retrain, test and promote</strong> (monthly, or when needed). Training and inference share the data prep and then split: the training path ends in the saved models, and the nightly batch only reads their active version. The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
+  <p>A setup notebook builds the project once, in an empty Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. After that, the project runs from two independent scenarios: <strong>Nightly batch</strong> after each warehouse load, and <strong>Retrain, test and promote</strong> (monthly, or when needed), which never forecasts. Each zone has an owner (shared, data scientist, inference owner), and the zones only meet through three interfaces: <strong>1. the model rows</strong> (<code>model_rows</code>: data prep → training and inference), <strong>2. the forecaster</strong> (lab → training), <strong>3. the active version of the saved models</strong> (training → inference, the only thing inference reads from training). The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart TB
@@ -364,17 +368,21 @@ flowchart TB
     J1[Join: flows + mapping] --> G1[Group: monthly_flows]
     J2[Join: scheduled payments + mapping] --> P2[obligations]
   end
-  subgraph Z3[Training: monthly]
+  subgraph Z3[Training: monthly, data scientist]
     P3[build_training_rows] --> TR[(training_rows)]
     P4[train_and_test: one model ID] --> EX[(experiments: Experiment Tracking)]
     P4 --> SM[(saved models forecast_ev, p10, p90: one version per model ID)]
     CH[champion_challenger] --> PL[(promotion_log)]
   end
-  subgraph Z5[Inference: nightly]
+  subgraph Z5[Inference: nightly, inference owner]
     P5[build_scoring_rows] --> SR[(scoring_rows: latest month)]
     S1[Score x3: active version] --> F[final_forecast: + obligations, model_id, load_id]
     F --> AF[archive_forecast] --> AR[(forecast_archive)]
     AF --> IL[(inference_log: one row per run)]
+  end
+  subgraph Z6[Lab: data scientist]
+    LT[try_forecaster: the forecaster lab_forecaster names] --> LRS[(lab_results: one block of rows per try)]
+    LT --> LX[(lab_experiments: experiment cashflow_lab)]
   end
   R --> ST
   S17 --> J1
@@ -390,12 +398,14 @@ flowchart TB
   TR --> P4
   TR --> CH
   EX --> CH
-  SM --> S1
+  SM -- active version, interface 3 --> S1
   SR --> S1
   P2 --> F
+  TR --> LT
+  EX --> LT
 </pre>
   </div>
-  <p class="caption">Boxes with rounded ends are datasets or folders; rectangles are Python recipes. The 5 groups are the flow zones of the single project. <code>build_training_rows</code> and <code>build_scoring_rows</code> use the same code (<code>model_rows</code> in <code>cashflow.py</code>), so the model sees the same inputs in training and in the forecast. Each scenario starts with a load check (a Python step): it stops the scenario if the latest load is incomplete, and sets the project variable <code>cutoff_month</code> that the recipes read. Training (folder <code>experiments</code>), the promotion log and the saved models are only rebuilt when built by name, so the nightly batch never retrains by accident. Shared code is in the project library (<code>cashflow.py</code>, <code>warehouse.py</code>, <code>tracking.py</code>). In the sandbox, both notebooks (the warehouse simulator and the setup) run in this same project.</p>
+  <p class="caption">Boxes with rounded ends are datasets or folders; rectangles are Python recipes. The 6 groups are the flow zones of the single project. <code>build_training_rows</code> and <code>build_scoring_rows</code> use the same code (<code>model_rows</code> in <code>cashflow.py</code>), so the model sees the same inputs in training and in the forecast. Each scenario starts with a load check (a Python step): it stops the scenario if the latest load is incomplete, and sets the project variable <code>cutoff_month</code> that the recipes read. Training (folder <code>experiments</code>), the promotion log and the saved models are only rebuilt when built by name, so the nightly batch never retrains by accident. The project library is split by owner: shared (<code>cashflow.py</code>, <code>warehouse.py</code>), training and lab (<code>models.py</code>, <code>tracking.py</code>, and the data scientist's <code>forecasters.py</code>, which the setup never overwrites), inference (<code>forecast.py</code>). In the sandbox, both notebooks (the warehouse simulator and the setup) run in this same project.</p>
 </section>
 
 <section>
@@ -407,7 +417,7 @@ flowchart TB
     <tbody>
       <tr><td><code>run_at</code></td><td>When the run happened</td></tr>
       <tr><td><code>load_id</code>, <code>as_of_date</code>, <code>cutoff_month</code></td><td>Which warehouse load it used, and the last full month</td></tr>
-      <tr><td><code>model_id</code>, <code>model_promoted_at</code></td><td>Which model made the forecast, and when it was promoted</td></tr>
+      <tr><td><code>model_id</code></td><td>Which model made the forecast: the active version (when it was promoted is in <code>promotion_log</code>)</td></tr>
       <tr><td><code>clients</code>, <code>clients_not_enough_history</code>, <code>forecast_rows</code></td><td>What it produced</td></tr>
       <tr><td><code>archive_file</code></td><td>The run's file in <code>forecast_archive</code></td></tr>
     </tbody>

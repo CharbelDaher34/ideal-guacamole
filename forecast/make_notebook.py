@@ -1,12 +1,13 @@
-"""Assemble the two notebooks from the files in src/ (edit those, then run: python make_notebook.py):
-build_forecast_project.ipynb (sets up the forecast project) and warehouse_simulator.ipynb (sandbox only)."""
+"""Assemble the notebooks from the files in src/ (edit those, then run: python make_notebook.py):
+build_forecast_project.ipynb (sets up the forecast project), forecast_lab.ipynb (the data scientist's lab) and
+warehouse_simulator.ipynb (sandbox only)."""
 import json
 from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
 RECIPES = ["stage_tables", "obligations", "build_training_rows", "train_and_test", "champion_challenger",
-           "build_scoring_rows", "final_forecast", "archive_forecast"]
+           "build_scoring_rows", "final_forecast", "archive_forecast", "try_forecaster"]
 
 
 def code(text):
@@ -28,10 +29,11 @@ def read(path):
     return (SRC / path).read_text()
 
 
-def write(name, cells):
-    notebook = {"cells": cells, "metadata": {
-        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-        "language_info": {"name": "python"}}, "nbformat": 4, "nbformat_minor": 5}
+def write(name, cells, kernel=None):
+    """kernel: the Jupyter kernel the notebook opens with (default: Dataiku's built-in Python)."""
+    kernelspec = kernel or {"display_name": "Python 3", "language": "python", "name": "python3"}
+    notebook = {"cells": cells, "metadata": {"kernelspec": kernelspec, "language_info": {"name": "python"}},
+                "nbformat": 4, "nbformat_minor": 5}
     (HERE / name).write_text(json.dumps(notebook, indent=1) + "\n")
     print(f"wrote {name} ({len(cells)} cells)")
 
@@ -45,21 +47,28 @@ that name), the way it runs in production. Everything is stored as CSV files. It
 tables (client, monthly flows by origin, scheduled payments, monthly balances) and the load record: in the
 sandbox, the datasets the notebook `warehouse_simulator.ipynb` wrote in this project; in production, the warehouse
 team's CSV files in the landing folder, read-only through `EDW_LANDING` (names: `python/warehouse.py` in the
-project library). It builds:
+project library). It builds 6 flow zones, each with an owner:
 
-- **Raw data**: the 4 curated tables and the load record, read-only.
-- **Staging**: the same tables with the standard column names.
+- **Raw data** and **Staging** (shared): the 4 curated tables and the load record, read-only, then the same tables
+  with the standard column names.
 - **Data prep** (shared by training and inference): the category mapping (a CSV dataset) applied by visual Join
   and Group recipes, the obligations.
-- **Training**: the training rows, then each training run is one model with its own **model ID**, tracked in Dataiku's
-  **Experiment Tracking** and deployed as a new **version** of the saved models `forecast_ev`, `forecast_p10`,
-  `forecast_p90`. A champion / challenger test activates the new version if it beats the production model.
-- **Inference**: the scoring rows (latest month), visual Score recipes with the active version, the 3-month
-  forecast (every row says which model
-  and which load produced it), the forecast archive, and the inference log (one row per run: when, which model,
-  which load, how many clients).
-- Two scenarios: **Nightly batch** and **Retrain, test and promote**. Each starts with the load check
-  (`check_latest_load`): it stops the scenario if the latest load is incomplete, and sets `cutoff_month`.
+- **Training** (data scientist): the training rows, then each training run is one model with its own **model ID**,
+  trained with the **forecaster** the project variable `forecaster` names, tracked in Dataiku's **Experiment
+  Tracking** and deployed as a new **version** of the saved models `forecast_ev`, `forecast_p10`, `forecast_p90`.
+  A champion / challenger test activates the new version if it beats the production model.
+- **Inference** (inference owner): the scoring rows (latest month), visual Score recipes with the active version, the 3-month
+  forecast (every row says which model and which load produced it), the forecast archive, and the inference log
+  (one row per run: when, which model, which load, how many clients).
+- **Lab** (data scientist): `try_forecaster` tries the forecaster the project variable `lab_forecaster` names
+  against the production model and adds the result to `lab_results`, without touching production. The notebook
+  `forecast_lab.ipynb` does the same interactively.
+
+The zones only meet through three interfaces: **1. the model rows** (`model_rows` in `cashflow.py`: data prep →
+training and inference), **2. the forecaster** (`models.py`: lab → training), **3. the active version of the saved
+models** (training → inference). Two independent scenarios run it: **Nightly batch** (inference) and **Retrain,
+test and promote** (training). Each starts with the load check (`check_latest_load`): it stops the scenario if the
+latest load is incomplete, and sets `cutoff_month`.
 
 It then trains, tests and promotes a first model, and runs the first nightly batch.
 
@@ -80,14 +89,24 @@ and otherwise stops with the request to send the admin.
     md("""
 ## 2. Code
 
-The project library gets three files: `warehouse.py` (warehouse table and column names, the load check),
-`cashflow.py` (categories and the default category mapping, the inputs the models see, training and test scores)
-and `tracking.py` (model IDs, Experiment Tracking, saved model versions, promotion). Each recipe
-below becomes a Python recipe in the flow; the visual recipes are created in the next step.
+The project library gets these files, by owner:
+
+- shared: `warehouse.py` (warehouse table and column names, the load check) and `cashflow.py` (categories and the
+  default category mapping, the model rows, the saved model names)
+- training and lab: `models.py` (the forecaster interface, the reference CatBoost forecaster, the test and its
+  scores) and `tracking.py` (model IDs, Experiment Tracking, saved model versions, champion / challenger, promotion)
+- inference: `forecast.py` (the production model's ID, the final forecast table)
+- `forecasters.py`: the data scientist's own forecasters. Written only when it is created: running this notebook
+  again never overwrites it.
+
+Each recipe below becomes a Python recipe in the flow; the visual recipes are created in the next step.
 """),
     code(embedded("WAREHOUSE_CODE", SRC / "warehouse.py")),
     code(embedded("LIBRARY_CODE", SRC / "library_cashflow.py")),
+    code(embedded("MODELS_CODE", SRC / "models.py")),
     code(embedded("TRACKING_CODE", SRC / "tracking.py")),
+    code(embedded("FORECAST_CODE", SRC / "forecast.py")),
+    code(embedded("FORECASTERS_CODE", SRC / "forecasters.py")),
     code("RECIPES = {}"),
     *[code(embedded(f'RECIPES["{r}"]', SRC / "recipes" / f"{r}.py")) for r in RECIPES],
     md("""
@@ -95,9 +114,10 @@ below becomes a Python recipe in the flow; the visual recipes are created in the
 
 Uses the simulated warehouse tables, or links the landing files (read-only), and creates the category
 mapping, the recipes (Python, Join, Group, Score) and their CSV datasets, the folders `experiments` (tracked
-models) and `forecast_archive`, and the three saved models, in 5 zones. Training (folder
-`experiments`), the promotion log and the saved models are only rebuilt when asked by name, so the nightly batch
-never retrains by accident.
+models), `forecast_archive` and `lab_experiments` (lab tries), the three saved models, and the project variables
+`forecaster` (`catboost`) and `lab_forecaster` (`catboost_deeper`) if they are not set yet, in 6 zones. Training
+(folder `experiments`), the promotion log, the saved models and the lab are only rebuilt when asked by name, so the
+nightly batch never retrains by accident.
 """),
     code(read("cells/create_flow.py")),
     md("""
@@ -113,8 +133,9 @@ forecast, archive, log.
 
 - **Nightly batch**: check the load, build the scoring rows, forecast with the production model, archive it and
   log the run. It does not touch the training data.
-- **Retrain, test and promote**: check the load, prepare the training data, train, test and deploy a new model,
-  champion / challenger, activate it if better, then forecast with the production model.
+- **Retrain, test and promote**: check the load, prepare the training data, train, test and deploy a new model
+  with the forecaster the project variable `forecaster` names, champion / challenger, activate it if better. It
+  does not forecast: the next Nightly batch uses the new active version.
 
 Their triggers (daily at 06:00 and monthly on the 5th, Riyadh time) are created switched off; switch them on
 in production.
@@ -128,6 +149,45 @@ To use another model (for example to roll back), activate its version in the thr
 """),
     code(read("cells/results.py")),
 ])
+
+write("forecast_lab.ipynb", [
+    md("""
+# Digital Cash Management Forecast: lab (data scientist)
+
+Try other models here without touching production: nothing in this notebook changes the flow, the saved models or
+the production model.
+
+- **Same test as production.** Your forecaster is trained without the last 6 months before the cut-off and tested
+  on them, the way champion / challenger tests a new model. Your scores sit next to the production model's and the
+  simple guess (the average of the last 3 months), with the decision champion / challenger would take.
+- **Each try is recorded** in Experiment Tracking, experiment `cashflow_lab`: its settings, its test scores and the
+  trained forecaster. Compare tries there (Lab → Experiment tracking). Lab tries are never deployed.
+- **The same try without a notebook:** set the project variable `lab_forecaster` to a forecaster's name and build
+  `lab_results` (Lab zone). Each try adds its rows to `lab_results`.
+
+**Kernel:** the code env `cashflow_forecast` (Kernel → Change kernel). If it is not in the list, the env has no
+Jupyter support yet: ask whoever manages it to enable it, and meanwhile use `lab_results`.
+
+**A forecaster** is a class with `name`, `params` (its settings), `inputs` (the model-row columns it reads),
+`fit(rows)` and `predict(rows)`, which returns `p10`, `ev` and `p90` in SAR (details in `models.py`, project
+library). The amount to predict is the column `target`: the month's amount minus the obligations already known at
+the cut-off, which the forecast adds back.
+"""),
+    code(read("lab_cells/setup.py")),
+    code(read("lab_cells/try_model.py")),
+    md("""
+## Put it in production
+
+1. Copy the class into `forecasters.py` (project library) and add it to `FORECASTERS`. The setup notebook never
+   overwrites that file.
+2. Set the project variable `forecaster` to its name.
+3. Run the scenario **Retrain, test and promote**. Champion / challenger promotes it only if it beats the
+   production model on the same 6 months; the next Nightly batch forecasts with it.
+4. To stop training it, set `forecaster` back to `catboost`. To use an earlier model now, activate its version in
+   the three saved models.
+"""),
+], kernel={"display_name": "Python (env cashflow_forecast)", "language": "python",    # the code env's own kernel
+           "name": "py-dku-venv-cashflow_forecast"})
 
 write("warehouse_simulator.ipynb", [
     md("""

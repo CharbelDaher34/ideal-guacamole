@@ -1,4 +1,4 @@
-print("Production model (active version of forecast_ev, forecast_p10, forecast_p90):", lib["production_model_id"]())
+print("Production model (active version of forecast_ev, forecast_p10, forecast_p90):", tracking.production_model_id())
 print("Promotion log:")
 display(dataiku.Dataset("promotion_log").get_dataframe())
 results = dataiku.Dataset("test_results").get_dataframe()

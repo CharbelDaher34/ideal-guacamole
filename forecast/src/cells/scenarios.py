@@ -1,6 +1,8 @@
-# Production runs. Each scenario starts with the load check (a Python step): it stops the scenario if the latest
-# warehouse load is incomplete, and sets the cut-off month. The tracked models (folder experiments) and the
-# promotion log are only rebuilt when built by name, so the nightly batch never retrains by accident.
+# Production runs: two independent scenarios. Nightly batch (inference) forecasts with the active version of the saved
+# models; Retrain, test and promote (training) adds a version and activates it if it is better, and never forecasts.
+# Each starts with the load check (a Python step): it stops the scenario if the latest warehouse load is incomplete,
+# and sets the cut-off month. The tracked models (folder experiments) and the promotion log are only rebuilt when
+# built by name, so the nightly batch never retrains by accident.
 def step(n, label, what, mode=None):
     common = {"id": f"step_{n}", "name": label, "enabled": True, "runConditionType": "RUN_IF_STATUS_MATCH",
               "runConditionStatuses": ["SUCCESS", "WARNING"]}
@@ -23,14 +25,15 @@ SCENARIOS = {
     "Nightly batch": ("After each warehouse load: forecast the next 3 months with the production model (the active "
                       "version of the saved models), archive it and log the run", "daily", NIGHTLY),
     "Retrain, test and promote": (
-        "Train and test a new model (tracked in Experiment Tracking, deployed as a saved model version), activate it if "
-        "it beats the production model, then forecast with the production model", "monthly", [
+        "Train and test a new model with the forecaster the project variable forecaster names (tracked in Experiment "
+        "Tracking, deployed as a saved model version), and activate it if it beats the production model. It does not "
+        "forecast: the Nightly batch uses the active version", "monthly", [
             ("Check the latest warehouse load", "check_latest_load"),
             ("Prepare the training data", ["training_rows"], "RECURSIVE_FORCED_BUILD"),
             ("Train, test and deploy a new model", ["experiments"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Champion / challenger", ["promotion_log"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Promote if better", "apply_promotion"),
-        ] + NIGHTLY[1:]),
+        ]),
 }
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}
 for name, (description, schedule, steps) in SCENARIOS.items():

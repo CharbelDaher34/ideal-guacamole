@@ -1,25 +1,40 @@
 import json
+import sys
 import time
+import types
 
 import pandas as pd
 
 # Safe to run again in the same project: what already exists is kept (datasets and their data, the category
-# mapping, folders, saved models and their versions, zones), and the code of the Python recipes and the library
-# is updated.
+# mapping, folders, saved models and their versions, zones, the project variables forecaster and lab_forecaster,
+# forecasters.py), and the code of the Python recipes and of the rest of the library is updated.
 flow = project.get_flow()
-lib = {}
-for code in (LIBRARY_CODE, WAREHOUSE_CODE, TRACKING_CODE):   # the shared code is needed here too
-    exec(code, lib)
-RAW = [warehouse_table for warehouse_table, _ in lib["TABLES"].values()]
+
+
+def load_module(name, code):
+    """A library file as a module of this notebook: the code it writes to the project library."""
+    module = types.ModuleType(name)
+    sys.modules[name] = module
+    exec(code, module.__dict__)
+    return module
+
+
+cashflow = load_module("cashflow", LIBRARY_CODE)
+warehouse = load_module("warehouse", WAREHOUSE_CODE)
+tracking = load_module("tracking", TRACKING_CODE)
+RAW = [warehouse_table for warehouse_table, _ in warehouse.TABLES.values()]
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
 
-# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file; experiments and forecast_archive are
-# folders. The visual recipes (Join, Group, Score) are created further down.
-# Training and inference share the data prep, then split: training_rows (Training zone) and scoring_rows (Inference
-# zone) are built by two recipes, so the nightly batch never touches the training data.
+# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file; experiments, forecast_archive and
+# lab_experiments are folders. The visual recipes (Join, Group, Score) are created further down.
+# Each zone has an owner, and the zones only meet through three interfaces:
+#   1. the model rows (cashflow.model_rows): data prep -> training_rows (Training) and scoring_rows (Inference)
+#   2. the forecaster (models.py): lab -> training. The project variable forecaster names the one Retrain trains;
+#      the Lab (try_forecaster, and the notebook forecast_lab) compares one with the production model, untouched.
+#   3. the saved models' active version: training -> inference. Inference reads nothing else from training.
 FLOW = {
-    "stage_tables": (RAW, list(lib["TABLES"]), "Staging"),
+    "stage_tables": (RAW, list(warehouse.TABLES), "Staging"),
     "obligations": (["scheduled_with_category"], ["monthly_obligations"], "Data prep"),
     "build_training_rows": (["monthly_flows", "monthly_obligations", "clients", "monthly_balances"],
                             ["training_rows"], "Training"),
@@ -27,13 +42,14 @@ FLOW = {
     "champion_challenger": (["training_rows", "experiments"], ["promotion_log"], "Training"),
     "build_scoring_rows": (["monthly_flows", "monthly_obligations", "clients", "monthly_balances"],
                            ["scoring_rows"], "Inference"),
-    "final_forecast": (["scored_ev", "scored_p10", "scored_p90", "monthly_obligations", "promotion_log"],
-                       ["final_forecast"], "Inference"),
+    "final_forecast": (["scored_ev", "scored_p10", "scored_p90", "monthly_obligations"], ["final_forecast"],
+                       "Inference"),
     "archive_forecast": (["final_forecast"], ["forecast_archive", "inference_log"], "Inference"),
+    "try_forecaster": (["training_rows", "experiments"], ["lab_experiments", "lab_results"], "Lab"),
 }
-FOLDERS = ["experiments", "forecast_archive"]
-APPENDED = ["promotion_log", "inference_log"]       # logs: each run adds a row
-BUILT_BY_NAME = ["experiments", "promotion_log"]    # never rebuilt by building what comes after them
+FOLDERS = ["experiments", "forecast_archive", "lab_experiments"]
+APPENDED = ["promotion_log", "inference_log", "lab_results"]      # logs: each run adds rows
+BUILT_BY_NAME = ["experiments", "promotion_log", "lab_experiments", "lab_results"]   # only built when asked by name
 
 try:                                                # needs the project's admin right
     metadata = project.get_metadata()
@@ -44,11 +60,26 @@ except Exception as e:
         raise
     print(f"Warning: could not name the project {PROJECT_NAME!r} (no admin right on the project): name it by hand")
 
+# the project library: shared (cashflow.py, warehouse.py), training and lab (models.py, tracking.py), inference
+# (forecast.py). forecasters.py is the data scientist's: written only when it is created, never overwritten.
 library = project.get_library()
 python_folder = library.get_folder("python") or library.add_folder("python")
-for file_name, code in (("cashflow.py", LIBRARY_CODE), ("warehouse.py", WAREHOUSE_CODE),
-                        ("tracking.py", TRACKING_CODE)):
+for file_name, code in (("cashflow.py", LIBRARY_CODE), ("warehouse.py", WAREHOUSE_CODE), ("models.py", MODELS_CODE),
+                        ("tracking.py", TRACKING_CODE), ("forecast.py", FORECAST_CODE)):
     (python_folder.get_file(file_name) or python_folder.add_file(file_name)).write(code)
+if not python_folder.get_file("forecasters.py"):
+    python_folder.add_file("forecasters.py").write(FORECASTERS_CODE)
+    print("forecasters.py created (the data scientist's forecasters)")
+
+# project variables, kept if they are already set: forecaster (the one Retrain trains), lab_forecaster (the one the
+# recipe try_forecaster tries)
+variables = project.get_variables()
+defaults = {"forecaster": "catboost", "lab_forecaster": "catboost_deeper"}
+missing = {k: v for k, v in defaults.items() if not variables["standard"].get(k)}
+if missing:
+    variables["standard"].update(missing)
+    project.set_variables(variables)
+print("Forecasters: Retrain trains {forecaster}, the lab tries {lab_forecaster}".format(**variables["standard"]))
 
 
 # what the project already has (read once, kept up to date below)
@@ -74,8 +105,8 @@ def new_dataset(name):
 
 # the curated warehouse tables and the load record: already here if the warehouse simulator wrote them (sandbox),
 # otherwise CSV files in the warehouse team's landing folder, read-only (production)
-simulated = [name for name in RAW + [lib["LOAD_RECORD"]] if name in datasets]
-for name in RAW + [lib["LOAD_RECORD"]]:
+simulated = [name for name in RAW + [warehouse.LOAD_RECORD] if name in datasets]
+for name in RAW + [warehouse.LOAD_RECORD]:
     if name not in datasets:
         datasets.add(name)
         dataset = project.create_dataset(name, "Filesystem", params={"connection": LANDING_CONNECTION,
@@ -89,7 +120,7 @@ print(f"{len(simulated)} warehouse tables already in the project, {len(RAW) + 1 
 # here, maybe edited, is kept). To change it: a notebook reads it, changes rows and writes it back.
 if "category_mapping" not in datasets:
     dataiku.Dataset(new_dataset("category_mapping")).write_with_schema(pd.DataFrame(
-        lib["DEFAULT_CATEGORY_MAPPING"],
+        cashflow.DEFAULT_CATEGORY_MAPPING,
         columns=["map_origin_type", "map_txn_type_tag", "map_direction", "mapped_category"]))
     print("category_mapping: default mapping written")
 
@@ -107,7 +138,7 @@ for name in FOLDERS:
 ref = lambda name: folders[name].id if name in folders else name
 existing_models = {m["name"]: m["id"] for m in project.list_saved_models()}
 saved_models = {name: project.get_saved_model(existing_models[name]) if name in existing_models
-                else project.create_mlflow_pyfunc_model(name, "REGRESSION") for name in lib["SAVED_MODELS"].values()}
+                else project.create_mlflow_pyfunc_model(name, "REGRESSION") for name in cashflow.SAVED_MODELS.values()}
 
 # visual recipes: categories by Join with category_mapping (+ a formula for anything not mapped), then Group
 NO_FILTER = {"enabled": False, "distinct": False}
@@ -134,7 +165,7 @@ def join_mapping(name, source, output):
                    "on": [{"column1": {"table": 0, "name": c}, "column2": {"table": 1, "name": "map_" + c},
                            "type": "EQ"} for c in ("origin_type", "txn_type_tag", "direction")]}],
         "selectedColumns": [], "resolvedSelectedColumns": [], "postFilter": NO_FILTER,
-        "computedColumns": [{"name": "category", "type": "string", "mode": "GREL", "expr": lib["CATEGORY_FORMULA"]}],
+        "computedColumns": [{"name": "category", "type": "string", "mode": "GREL", "expr": cashflow.CATEGORY_FORMULA}],
         "enableAutoCastInJoinConditions": False}))
     settings.save()
     print("join recipe", name, "->", output)
@@ -180,7 +211,7 @@ for name, (inputs, outputs, _) in FLOW.items():
     print("python recipe", name, "->", ", ".join(outputs))
 
 # Score recipes: the active version of each saved model
-for short, name in lib["SAVED_MODELS"].items():
+for short, name in cashflow.SAVED_MODELS.items():
     if f"score_{short}" in recipes:
         continue
     builder = project.new_recipe("prediction_scoring", f"score_{short}")
@@ -190,9 +221,9 @@ for short, name in lib["SAVED_MODELS"].items():
     builder.create().rename(f"score_{short}")        # Dataiku names a Score recipe after its input
     print("score recipe", f"score_{short}", "->", f"scored_{short}")
 
-ZONES = {"Raw data": RAW + [lib["LOAD_RECORD"]], "Staging": list(lib["TABLES"]),
+ZONES = {"Raw data": RAW + [warehouse.LOAD_RECORD], "Staging": list(warehouse.TABLES),
          "Data prep": ["category_mapping", "flows_with_category", "monthly_flows", "scheduled_with_category"],
-         "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"]}
+         "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"], "Lab": []}
 for _, outputs, zone_name in FLOW.values():
     ZONES[zone_name] += [o for o in outputs if o not in ZONES[zone_name]]
 # the raw data goes in Dataiku's Default zone, renamed (so there is no empty zone). It exists once another zone does.
