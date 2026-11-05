@@ -10,7 +10,7 @@ def build(items, mode):
 
 started = time.time()
 lib["check_latest_load"]()                                   # the first step of both scenarios
-build(["training_rows", "scoring_rows"], "RECURSIVE_FORCED_BUILD")
+build(["training_rows"], "RECURSIVE_FORCED_BUILD")
 build(["experiments"], "NON_RECURSIVE_FORCED_BUILD")         # train, test, track and deploy the first model
 build(["promotion_log"], "NON_RECURSIVE_FORCED_BUILD")       # champion / challenger
 production = lib["apply_promotion"]()                        # activates it in the three saved models

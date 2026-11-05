@@ -21,16 +21,20 @@ NIGHTLY = [
 ]
 SCENARIOS = {
     "Nightly batch": ("After each warehouse load: forecast the next 3 months with the production model (the active "
-                      "version of the saved models), archive it and log the run", dict(day=None), NIGHTLY),
+                      "version of the saved models), archive it and log the run", "daily", NIGHTLY),
     "Retrain, test and promote": (
         "Train and test a new model (tracked in Experiment Tracking, deployed as a saved model version), activate it if "
-        "it beats the production model, then forecast with the production model", dict(day=5), [
+        "it beats the production model, then forecast with the production model", "monthly", [
             ("Check the latest warehouse load", "check_latest_load"),
-            ("Prepare the training data", ["training_rows", "scoring_rows"], "RECURSIVE_FORCED_BUILD"),
+            ("Prepare the training data", ["training_rows"], "RECURSIVE_FORCED_BUILD"),
             ("Train, test and deploy a new model", ["experiments"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Champion / challenger", ["promotion_log"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Promote if better", "apply_promotion"),
         ] + NIGHTLY[1:]),
+    "Try the model": (
+        "Forecast the clients in the CSV files of the folder try_model_uploads with the production model (into "
+        "try_model_forecast). Run by hand after uploading files; changes nothing else", None, [
+            ("Forecast the uploaded clients", ["try_model_forecast"], "NON_RECURSIVE_FORCED_BUILD")]),
 }
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}
 for name, (description, schedule, steps) in SCENARIOS.items():
@@ -44,11 +48,14 @@ for name, (description, schedule, steps) in SCENARIOS.items():
     scenario = project.create_scenario(name, "step_based", {
         "active": False, "description": description,
         "params": {"steps": [step(n, *s) for n, s in enumerate(steps)]}})
+    if schedule is None:                           # run by hand
+        print(f"Scenario ready: {name} (no trigger: run by hand)")
+        continue
     settings = scenario.get_settings()
-    if schedule["day"] is None:
+    if schedule == "daily":
         settings.add_daily_trigger(hour=6, timezone="Asia/Riyadh")
     else:
-        settings.add_monthly_trigger(day=schedule["day"], hour=7, timezone="Asia/Riyadh")
+        settings.add_monthly_trigger(day=5, hour=7, timezone="Asia/Riyadh")
     settings.raw_triggers[-1]["active"] = False    # switch on in production (Automation node)
     try:
         settings.save()

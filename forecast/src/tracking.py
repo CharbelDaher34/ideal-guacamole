@@ -167,6 +167,22 @@ def load_models(model_id, name="backtest"):
     return models
 
 
+def production_models():
+    """The production model ID and its EV, P10 and P90 MLflow models (the ones deployed to the saved models), to
+    score in a Python recipe: model.predict(model_rows) gives amounts in SAR."""
+    model_id = production_model_id()
+    if not model_id:
+        raise ValueError("No production model yet: run the scenario Retrain, test and promote")
+    found = runs()
+    match = found[found["model_id"] == model_id]
+    if match.empty:
+        raise ValueError(f"Model {model_id} not found in Experiment Tracking ({EXPERIMENT})")
+    with _mlflow() as mlflow:
+        paths = {name: mlflow.artifacts.download_artifacts(run_id=match.iloc[0]["run_id"], artifact_path=name)
+                 for name in SAVED_MODELS}
+        return model_id, {name: mlflow.pyfunc.load_model(path) for name, path in paths.items()}
+
+
 def apply_promotion():
     """Apply the latest decision in promotion_log: on PROMOTE, activate the candidate's version in the three saved
     models. Run by a scenario step after the champion / challenger test."""

@@ -348,7 +348,7 @@ flowchart LR
 
 <section>
   <h2><span class="n">9</span>What gets built in Dataiku</h2>
-  <p>A setup notebook builds the project once, in an empty Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. After that, the project runs from two scenarios: <strong>Nightly batch</strong> after each warehouse load, and <strong>Retrain, test and promote</strong> (monthly, or when needed). The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
+  <p>A setup notebook builds the project once, in an empty Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. After that, the project runs from two scenarios: <strong>Nightly batch</strong> after each warehouse load, and <strong>Retrain, test and promote</strong> (monthly, or when needed). A third, <strong>Try the model</strong>, is run by hand to forecast clients you upload. Training and inference share the data prep and then split: the training path ends in the saved models, and the nightly batch only reads their active version. The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart TB
@@ -359,39 +359,47 @@ flowchart TB
   subgraph Z0[Staging]
     ST[stage_tables: warehouse names to standard names] --> S17[(4 standard tables)]
   end
-  subgraph Z2[Data prep]
+  subgraph Z2[Data prep: shared]
     CR[(category_mapping: CSV, kept on re-runs)]
     J1[Join: flows + mapping] --> G1[Group: monthly_flows]
     J2[Join: scheduled payments + mapping] --> P2[obligations]
-    P3[build_rows] --> TR[(training_rows, scoring_rows)]
   end
-  subgraph Z3[Training]
+  subgraph Z3[Training: monthly]
+    P3[build_training_rows] --> TR[(training_rows)]
     P4[train_and_test: one model ID] --> EX[(experiments: Experiment Tracking)]
     P4 --> SM[(saved models forecast_ev, p10, p90: one version per model ID)]
     CH[champion_challenger] --> PL[(promotion_log)]
   end
-  subgraph Z5[Inference]
+  subgraph Z5[Inference: nightly]
+    P5[build_scoring_rows] --> SR[(scoring_rows: latest month)]
     S1[Score x3: active version] --> F[final_forecast: + obligations, model_id, load_id]
     F --> AF[archive_forecast] --> AR[(forecast_archive)]
     AF --> IL[(inference_log: one row per run)]
+  end
+  subgraph Z6[Try the model: by hand]
+    UP[(try_model_uploads: your CSV files)] --> TM[try_the_model] --> TF[(try_model_forecast + chart: dashboard)]
   end
   R --> ST
   S17 --> J1
   S17 --> J2
   S17 --> P3
+  S17 --> P5
   CR --> J1
   CR --> J2
   G1 --> P3
+  G1 --> P5
   P2 --> P3
+  P2 --> P5
   TR --> P4
   TR --> CH
   EX --> CH
   SM --> S1
-  TR --> S1
+  SR --> S1
   P2 --> F
+  EX --> TM
 </pre>
   </div>
-  <p class="caption">Boxes with rounded ends are datasets or folders; rectangles are Python recipes. The 5 groups are the flow zones of the single project. Each scenario starts with a load check (a Python step): it stops the scenario if the latest load is incomplete, and sets the project variable <code>cutoff_month</code> that the recipes read. Training (folder <code>experiments</code>), the promotion log and the saved models are only rebuilt when built by name, so the nightly batch never retrains by accident. Shared code is in the project library (<code>cashflow.py</code>, <code>warehouse.py</code>, <code>tracking.py</code>). In the sandbox, both notebooks (the warehouse simulator and the setup) run in this same project.</p>
+  <p class="caption">Boxes with rounded ends are datasets or folders; rectangles are Python recipes. The 6 groups are the flow zones of the single project. <code>build_training_rows</code> and <code>build_scoring_rows</code> use the same code (<code>model_rows</code> in <code>cashflow.py</code>), so the model sees the same inputs in training and in the forecast. Each scenario starts with a load check (a Python step): it stops the scenario if the latest load is incomplete, and sets the project variable <code>cutoff_month</code> that the recipes read. Training (folder <code>experiments</code>), the promotion log and the saved models are only rebuilt when built by name, so the nightly batch never retrains by accident. Shared code is in the project library (<code>cashflow.py</code>, <code>warehouse.py</code>, <code>tracking.py</code>). In the sandbox, both notebooks (the warehouse simulator and the setup) run in this same project.</p>
 </section>
 
 <section>
@@ -410,6 +418,8 @@ flowchart TB
   </table>
   </div>
   <p class="caption">Scenario run history shows every run and its failures; in production, add a reporter (email, Slack) to the scenarios. Model monitoring (drift, accuracy against actuals) is left out for now.</p>
+  <h3>Try the model</h3>
+  <p>The dashboard <strong>Try the model</strong> has the steps, the uploaded files, a Run button, a chart (each client's net cash flow and its forecast) and the forecast table. Upload CSV files to the folder <code>try_model_uploads</code> and run the scenario <strong>Try the model</strong>: <code>try_model_forecast</code> gets the production model's P10, EV and P90 for those clients, made the same way as the nightly forecast. One row per client, month and category: <code>client_no</code>, <code>month</code>, <code>category</code> (a category code), <code>amount</code> (SAR, positive); optional <code>segment</code>, <code>sector</code>, <code>region</code>, <code>last_annual_sales</code>, <code>number_of_employees</code>, <code>balance_end</code>. A client needs 12 months up to the latest month in the files. Scheduled payments are not uploaded, so every amount counts as not scheduled. The setup writes <code>example_clients.csv</code> (two clients of the data, renamed) to show the format. It changes nothing else in the project.</p>
 </section>
 
 <section>
