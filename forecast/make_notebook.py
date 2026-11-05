@@ -154,32 +154,69 @@ write("forecast_lab.ipynb", [
     md("""
 # Digital Cash Management Forecast: lab (data scientist)
 
-Try other models here without touching production: nothing in this notebook changes the flow, the saved models or
-the production model.
+Explore the data and try models here without touching production: nothing in this notebook changes the flow, the
+saved models or the production model.
 
-- **Same test as production.** Your forecaster is trained without the last 6 months before the cut-off and tested
-  on them, the way champion / challenger tests a new model. Your scores sit next to the production model's and the
-  simple guess (the average of the last 3 months), with the decision champion / challenger would take.
-- **Each try is recorded** in Experiment Tracking, experiment `cashflow_lab`: its settings, its test scores and the
-  trained forecaster. Compare tries there (Lab → Experiment tracking). Lab tries are never deployed.
-- **The same try without a notebook:** set the project variable `lab_forecaster` to a forecaster's name and build
-  `lab_results` (Lab zone). Each try adds its rows to `lab_results`.
+1. **EDA**: the training rows by category, totals over time, seasonality, and what the models learn.
+2. **Models to try**: several forecasters trained and tested side by side on the same test as champion / challenger
+   (trained without the last 6 months before the cut-off, tested on them), next to the production model and the
+   simple guess (the average of the last 3 months), with the decision champion / challenger would take for each.
+   Each try is recorded in Experiment Tracking, experiment `cashflow_lab` (Lab → Experiment tracking); lab tries
+   are never deployed.
+3. **Put one in production.**
 
-**Kernel:** the code env `cashflow_forecast` (Kernel → Change kernel). If it is not in the list, the env has no
-Jupyter support yet: ask whoever manages it to enable it, and meanwhile use `lab_results`.
+**Kernel:** the code env `cashflow_forecast`. If it is not in the kernel list, ask whoever manages it to enable its
+Jupyter support; meanwhile, the recipe `try_forecaster` tries one forecaster without a notebook (set the project
+variable `lab_forecaster` and build `lab_results`, Lab zone).
 
-**A forecaster** is a class with `name`, `params` (its settings), `inputs` (the model-row columns it reads),
-`fit(rows)` and `predict(rows)`, which returns `p10`, `ev` and `p90` in SAR (details in `models.py`, project
-library). The amount to predict is the column `target`: the month's amount minus the obligations already known at
-the cut-off, which the forecast adds back.
+In the sandbox the data is simulated: there, the scores show that the code works, not which model is better.
 """),
     code(read("lab_cells/setup.py")),
-    code(read("lab_cells/try_model.py")),
     md("""
-## Put it in production
+## 1. EDA
 
-1. Copy the class into `forecasters.py` (project library) and add it to `FORECASTERS`. The setup notebook never
-   overwrites that file.
+The training rows: one row per client, category, cut-off month and months ahead (1 to 3). The models predict
+`target`: the month's amount (`actual`) minus the part already scheduled at the cut-off (`obligations_known`), which
+the forecast adds back.
+
+- **zero_months**: the share of months with no movement. Lumpy categories are hard to forecast.
+- **known_at_cutoff**: the share of the amount already scheduled one month ahead. That part is not predicted.
+- **volatility**: how much a client's month varies (median coefficient of variation of the monthly amounts).
+"""),
+    code(read("lab_cells/eda_overview.py")),
+    md("""
+Totals over time and seasonality. Ramadan and Eid move about 11 days earlier each year, so a calendar-month profile
+blurs them.
+"""),
+    code(read("lab_cells/eda_charts.py")),
+    md("""
+What the models learn: `target` divided by the series scale (the client's usual amount in that category), its spread
+per category, and how much each input moves with it.
+"""),
+    code(read("lab_cells/eda_target.py")),
+    md("""
+## 2. Models to try
+
+A forecaster is a class with `name`, `params` (its settings), `inputs` (the model-row columns it reads), `fit(rows)`
+and `predict(rows)`, which returns `p10`, `ev` and `p90` in SAR (details in `models.py`, project library). Three
+examples, next to the reference CatBoost forecaster (`catboost`, the production recipe):
+
+- `simple_guess`: no model, the average of the last 3 months, with a band from its own past errors
+- `catboost_depth8`: the reference CatBoost forecaster with deeper trees
+- `sklearn_boosting`: scikit-learn gradient boosting, one model per output (EV, P10, P90)
+
+Change them or add your own, then run the comparison. CatBoost, scikit-learn, pandas and matplotlib are in the code
+env; other packages need the admin.
+"""),
+    code(read("lab_cells/forecasters_to_try.py")),
+    code(read("lab_cells/compare.py")),
+    code(read("lab_cells/compare_chart.py")),
+    md("""
+## 3. Put one in production
+
+1. Copy its class into `forecasters.py` (project library) with the imports it needs (for example
+   `import numpy as np`, `import pandas as pd`, `from models import CAT_FEATURES, CatBoostForecaster, model_matrix`)
+   and add it to `FORECASTERS`. The setup notebook never overwrites that file.
 2. Set the project variable `forecaster` to its name.
 3. Run the scenario **Retrain, test and promote**. Champion / challenger promotes it only if it beats the
    production model on the same 6 months; the next Nightly batch forecasts with it.

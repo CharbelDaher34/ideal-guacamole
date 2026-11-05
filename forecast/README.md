@@ -10,7 +10,7 @@ Three notebooks, all in the same project:
 |---|---|
 | [`warehouse_simulator.ipynb`](warehouse_simulator.ipynb) | **Sandbox only.** Plays the warehouse team: writes the 4 curated warehouse tables (sample data) and the load record as CSV datasets of the project. Replaced by Informatica in the bank. |
 | [`build_forecast_project.ipynb`](build_forecast_project.ipynb) | Sets up the project once (and names it Digital Cash Management Forecast): flow, first model, scenarios, first nightly batch. |
-| [`forecast_lab.ipynb`](forecast_lab.ipynb) | **The data scientist's lab.** Tries a forecaster against the production model on the same test, records the try in Experiment Tracking, never touches production. Needs the code env as its kernel. |
+| [`forecast_lab.ipynb`](forecast_lab.ipynb) | **The data scientist's lab.** EDA of the training rows, then several forecasters side by side against the production model on the same test; each try is recorded in Experiment Tracking; never touches production. Opens in the code env's kernel. |
 
 ## Run it
 
@@ -88,9 +88,16 @@ batch. Running the setup again keeps it.
 The data scientist tries forecasters without touching production, on the same test as champion / challenger (the
 last 6 months, each forecaster trained without them), next to the production model and the simple guess:
 
-- **Notebook `forecast_lab.ipynb`:** write a forecaster class, run `lab_try`, see the scores per category and the
-  decision champion / challenger would take. Its kernel must be the code env `cashflow_forecast`, which needs
-  Jupyter support (an option of the code env, set by whoever manages it).
+- **Notebook `forecast_lab.ipynb`** (it opens in the kernel of the code env `cashflow_forecast`, which needs
+  Jupyter support: an option of the code env, set by whoever manages it):
+  1. **EDA** of the training rows: per category the share of months with no movement, the share already scheduled
+     at the cut-off and the volatility; monthly totals in and out; seasonality without the trend; the spread of what
+     the models learn and how much each input moves with it.
+  2. **Models to try**: several forecasters side by side with `lab_compare` (examples: the simple guess with a
+     band, CatBoost with deeper trees, scikit-learn gradient boosting), next to the production model: EV error and
+     P10–P90 coverage overall, per category and per months ahead, and the decision champion / challenger would
+     take for each. `catboost`, the production recipe trained again, matches the production model's scores: a
+     check that the test is the same.
 - **Without a notebook:** set the project variable `lab_forecaster` to a forecaster's name and build `lab_results`
   (Lab zone, only built when asked by name). Each try adds its rows to `lab_results`.
 
@@ -128,7 +135,7 @@ The notebooks are assembled from `src/`. Edit those, then run `python make_noteb
 - `src/library_cashflow.py`: the project library `cashflow.py`, shared (categories and the default mapping, the
   model rows, the saved model names, P10 ≤ EV ≤ P90)
 - `src/models.py`: training and lab (the forecaster interface, the reference CatBoost forecaster, the test and its
-  scores, `lab_try`)
+  scores, `lab_try` and `lab_compare`)
 - `src/tracking.py`: training and lab (model IDs, Experiment Tracking, saved model versions, champion / challenger,
   promotion)
 - `src/forecast.py`: inference (the production model's ID, the final forecast table)

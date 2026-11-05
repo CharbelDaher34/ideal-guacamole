@@ -13,7 +13,8 @@ A forecaster is a class with:
     predict(rows)   a DataFrame with the index of rows and the columns p10, ev, p90 (SAR). forecast() then applies
                     P10 <= EV <= P90 and no negative amounts except the net cash flow.
 The data scientist's own forecasters go in forecasters.py: the setup notebook creates that file once and never
-overwrites it. lab_try tries one against the production model without touching production (the Lab zone).
+overwrites it. lab_try and lab_compare try forecasters against the production model without touching
+production (the Lab zone and the notebook forecast_lab).
 """
 import numpy as np
 import pandas as pd
@@ -141,11 +142,12 @@ def test_results(tested):
     """Test scores per category and months ahead, per category (months_ahead ALL), per months ahead (category ALL)
     and overall. The ALL rows count the categories only, not the net cash flow. tested: the test rows with p10, ev,
     p90."""
+    scored = [c for c in ("target", "p10", "ev", "p90", "baseline") if c in tested]   # the columns scores reads
     categories_only = tested[tested["category"] != "NET"]
     results = pd.concat([
-        tested.groupby(["category", "months_ahead"]).apply(scores).reset_index(),
-        tested.groupby("category").apply(scores).reset_index().assign(months_ahead="ALL"),
-        categories_only.groupby("months_ahead").apply(scores).reset_index().assign(category="ALL"),
+        tested.groupby(["category", "months_ahead"])[scored].apply(scores).reset_index(),
+        tested.groupby("category")[scored].apply(scores).reset_index().assign(months_ahead="ALL"),
+        categories_only.groupby("months_ahead")[scored].apply(scores).reset_index().assign(category="ALL"),
         scores(categories_only).to_frame().T.assign(category="ALL", months_ahead="ALL")], ignore_index=True)
     results["months_ahead"] = results["months_ahead"].astype(str)
     results["category_name"] = results["category"].map({c: v[0] for c, v in CATEGORIES.items()}).fillna(
@@ -165,44 +167,103 @@ def run_metrics(results):
     return metrics
 
 
-def lab_try(forecaster, record=True):
-    """Try a forecaster against the production model without touching production (the lab: notebook forecast_lab and
-    recipe try_forecaster). It is trained without the last 6 months and tested on them, the way champion / challenger
-    tests a new model, and the try is recorded in Experiment Tracking (experiment cashflow_lab, never deployed).
-    Returns: per category (all months ahead together) the EV error of the simple guess, of the production model and of
-    the candidate, and their P10-P90 coverage; the decision champion / challenger would take and its reason; the lab
-    run ID (None if not recorded)."""
+def _lab_test():
+    """The lab's test, the same as champion / challenger's: the training rows without the last 6 months (train), those
+    months (test), the production model's ID and its backtest forecast on the test (None without a production model)."""
     import tracking
     from cashflow import read_dataset
     rows = read_dataset("training_rows")
     test = holdout(rows)
-    train = rows.drop(test.index)
-    forecaster.fit(train)
-    candidate = test.join(forecast(forecaster, test))
     production_id = tracking.production_model_id()
     production = test.join(forecast(tracking.load_backtest(production_id), test)) if production_id else None
+    return rows.drop(test.index), test, production_id, production
 
-    def by_category(tested):
-        found = test_results(tested)
-        return found[found["months_ahead"] == "ALL"].set_index("category_name")
 
-    mine = by_category(candidate)
+def _by_category(tested):
+    """Test scores per category (and All categories), all months ahead together, indexed by category name."""
+    found = test_results(tested)
+    return found[found["months_ahead"] == "ALL"].set_index("category_name")
+
+
+def _overall(tested):
+    """The scores champion / challenger decides on: the categories (not the net cash flow), all months ahead."""
+    return scores(tested[tested["category"] != "NET"])
+
+
+def _record_try(forecaster, train, test, tested, production_id):
+    """Record a lab try in Experiment Tracking (experiment cashflow_lab). Returns the run ID."""
+    import tracking
+    params = {"forecaster": forecaster.name, **getattr(forecaster, "params", {}),
+              "cutoff_month": f"{cutoff_month():%Y-%m}", "training_rows": len(train), "test_rows": len(test),
+              "compared_with": production_id or "none", "inputs": ",".join(forecaster.inputs)}
+    run_name = f"{forecaster.name}_{pd.Timestamp.now():%Y%m%dT%H%M}"
+    return tracking.log_lab_run(run_name, params, run_metrics(test_results(tested)), forecaster)
+
+
+def lab_try(forecaster, record=True):
+    """Try a forecaster against the production model without touching production (the lab: recipe try_forecaster;
+    the notebook forecast_lab uses lab_compare). It is trained without the last 6 months and tested on them, the way
+    champion / challenger tests a new model, and the try is recorded in Experiment Tracking (experiment cashflow_lab,
+    never deployed).
+    Returns: per category (all months ahead together) the EV error of the simple guess, of the production model and of
+    the candidate, and their P10-P90 coverage; the decision champion / challenger would take and its reason; the lab
+    run ID (None if not recorded)."""
+    import tracking
+    train, test, production_id, production = _lab_test()
+    forecaster.fit(train)
+    candidate = test.join(forecast(forecaster, test))
+    mine = _by_category(candidate)
     table = pd.DataFrame({"simple_guess_error": mine["wape_baseline"], "production_error": np.nan,
                           "candidate_error": mine["wape_model"], "production_coverage": np.nan,
                           "candidate_coverage": mine["coverage_p10_p90"]})
     if production is not None:
-        theirs = by_category(production)
+        theirs = _by_category(production)
         table["production_error"], table["production_coverage"] = theirs["wape_model"], theirs["coverage_p10_p90"]
-
-    def overall(tested):            # champion / challenger scores the categories, not the net cash flow
-        return scores(tested[tested["category"] != "NET"])
-
-    decision, reason = tracking.decide(overall(candidate), overall(production) if production is not None else None)
-    run_id = None
-    if record:
-        params = {"forecaster": forecaster.name, **getattr(forecaster, "params", {}),
-                  "cutoff_month": f"{cutoff_month():%Y-%m}", "training_rows": len(train), "test_rows": len(test),
-                  "compared_with": production_id or "none", "inputs": ",".join(forecaster.inputs)}
-        run_name = f"{forecaster.name}_{pd.Timestamp.now():%Y%m%dT%H%M}"
-        run_id = tracking.log_lab_run(run_name, params, run_metrics(test_results(candidate)), forecaster)
+    decision, reason = tracking.decide(_overall(candidate), _overall(production) if production is not None else None)
+    run_id = _record_try(forecaster, train, test, candidate, production_id) if record else None
     return table, decision, reason, run_id
+
+
+def lab_compare(forecasters, record=True):
+    """Try several forecasters at once against the production model, on the same test as lab_try and champion /
+    challenger, without touching production. Each forecaster is trained without the last 6 months; each try is
+    recorded in Experiment Tracking (experiment cashflow_lab) unless record is False. Returns a dict:
+        board       one row per model (production first, simple guess last): EV error, P10-P90 coverage, share below
+                    P10 and above P90 (the categories, all months ahead), the decision champion / challenger would
+                    take and its reason, the lab run ID
+        errors      EV error per category: the simple guess, the production model and each forecaster
+        coverage    P10-P90 coverage per category: the production model and each forecaster
+        by_months_ahead  EV error per months ahead (the categories): the production model and each forecaster
+        tested      the test rows with each model's p10, ev, p90, by name, for your own analysis"""
+    import tracking
+    names = [f.name for f in forecasters]
+    if len(set(names)) != len(names) or {"production", "simple_guess_baseline"} & set(names):
+        raise ValueError(f"Give each forecaster its own name: {names}")
+    train, test, production_id, production = _lab_test()
+    tested = {} if production is None else {"production": production}
+    for forecaster in forecasters:
+        forecaster.fit(train)
+        tested[forecaster.name] = test.join(forecast(forecaster, test))
+    run_ids = {f.name: _record_try(f, train, test, tested[f.name], production_id) for f in forecasters} if record else {}
+    reference = _overall(production) if production is not None else None
+    board = []
+    for name, rows in tested.items():
+        s = _overall(rows)
+        decision, reason = (("", f"the production model, {production_id}") if name == "production"
+                            else tracking.decide(s, reference))
+        board.append({"model": name, "ev_error": s["wape_model"], "coverage_p10_p90": s["coverage_p10_p90"],
+                      "below_p10": s["below_p10"], "above_p90": s["above_p90"], "decision": decision,
+                      "reason": reason, "lab_run_id": run_ids.get(name, "")})
+    board.append({"model": "simple_guess_baseline", "ev_error": _overall(next(iter(tested.values())))["wape_baseline"],
+                  "decision": "", "reason": "average of the last 3 months: the bar to beat", "lab_run_id": ""})
+    board = pd.DataFrame(board).set_index("model")
+    per_category = {name: _by_category(rows) for name, rows in tested.items()}
+    first = next(iter(per_category.values()))
+    errors = pd.DataFrame({"simple_guess_baseline": first["wape_baseline"],
+                           **{name: found["wape_model"] for name, found in per_category.items()}})
+    coverage = pd.DataFrame({name: found["coverage_p10_p90"] for name, found in per_category.items()})
+    by_months_ahead = pd.DataFrame({
+        name: test_results(rows).query("category == 'ALL' and months_ahead != 'ALL'").set_index("months_ahead")[
+            "wape_model"] for name, rows in tested.items()})
+    return {"board": board, "errors": errors, "coverage": coverage, "by_months_ahead": by_months_ahead,
+            "tested": tested}

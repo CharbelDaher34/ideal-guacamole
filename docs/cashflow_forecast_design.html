@@ -287,7 +287,7 @@ flowchart LR
       <tr><td>Champion / challenger</td><td>The new model and the production model are tested on the same last 6 months, each with its version trained without those months</td></tr>
       <tr><td>Promotion (automatic)</td><td>The new version is activated if its EV error is lower (a tie keeps production), its P10–P90 coverage is between 70% and 90%, and it beats the simple guess. Every decision and its reason go to <code>promotion_log</code></td></tr>
       <tr><td>Rollback</td><td>Activate an earlier version in the three saved models and run the nightly batch</td></tr>
-      <tr><td>Lab</td><td>The data scientist tries a forecaster on the same test, next to the production model, without touching production: notebook <code>forecast_lab</code>, or the recipe <code>try_forecaster</code> (<code>lab_results</code>). Tries are recorded in Experiment Tracking (experiment <code>cashflow_lab</code>) and never deployed</td></tr>
+      <tr><td>Lab</td><td>The data scientist explores the data and tries forecasters on the same test, next to the production model, without touching production: notebook <code>forecast_lab</code> (EDA, then several forecasters side by side), or the recipe <code>try_forecaster</code> (<code>lab_results</code>). Tries are recorded in Experiment Tracking (experiment <code>cashflow_lab</code>) and never deployed</td></tr>
     </tbody>
   </table>
   </div>
