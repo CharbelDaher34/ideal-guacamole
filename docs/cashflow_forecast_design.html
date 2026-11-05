@@ -1,4 +1,4 @@
-<title>Cash-Flow Forecast Design</title>
+<title>Digital Cash Management Forecast</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Public+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -74,8 +74,8 @@ svg text { font-family: var(--body); }
 
 <div class="page">
 <header>
-  <div class="eyebrow">Cash-flow forecasting · Design before build</div>
-  <h1>Cash-Flow Forecast Design</h1>
+  <div class="eyebrow">Cash-flow forecasting · How it works</div>
+  <h1>Digital Cash Management Forecast</h1>
   <p class="lead">For every business client, we forecast money in and money out for each of the next 3 months, by category, as a low value (P10), an expected value (EV) and a high value (P90). Two models predict the part nobody has scheduled. Payments already scheduled, called obligations, are added on top.</p>
   <div class="meta">4 November 2026 · Draft for the squad and the tech lead</div>
 </header>
@@ -106,7 +106,7 @@ flowchart LR
 
 <section>
   <h2><span class="n">2</span>The data</h2>
-  <p>The 17 tables from the data requirements fall into four groups. The warehouse team builds them, and from them 4 curated tables that the project reads read-only through the <code>EDW_AI</code> connection: <code>CFF_CLIENT</code>, <code>CFF_CLIENT_MNTHLY_FLOW</code> (money in and out per client, month, origin type and transaction tag), <code>CFF_SCHEDULED_PYMT</code> (every scheduled payment and when it became known) and <code>CFF_CLIENT_MNTHLY_BAL</code>. The detailed tables stay in the warehouse for checks. Until they exist, a simulator plays the warehouse team with realistic sample data, in the same names, month by month.</p>
+  <p>The 17 tables from the data requirements fall into four groups. The warehouse team builds them, and from them 4 curated tables that it drops as CSV files in a landing folder, which the project reads read-only through the <code>EDW_LANDING</code> connection: <code>CFF_CLIENT</code>, <code>CFF_CLIENT_MNTHLY_FLOW</code> (money in and out per client, month, origin type and transaction tag), <code>CFF_SCHEDULED_PYMT</code> (every scheduled payment and when it became known) and <code>CFF_CLIENT_MNTHLY_BAL</code>. The detailed tables stay in the warehouse for checks. Until they exist, a simulator plays the warehouse team with realistic sample data, in the same names, month by month.</p>
   <div class="figure">
 <pre class="mermaid">
 mindmap
@@ -261,15 +261,29 @@ mindmap
     </div>
   </div>
   <p>After predicting, we make sure P10 ≤ EV ≤ P90 and that no amount is negative.</p>
-  <p>The project trains these models in two ways, side by side. Both see the same rows and inputs, are tested on the same 6 months, and feed the same inference. <code>model_comparison</code> shows them side by side; the project variable <code>model_source</code> picks which one feeds the final forecast (<code>code</code> by default).</p>
+  <p>Each training run is one <strong>model</strong> with its own <strong>model ID</strong> (for example <code>CFF_202610_20261104T1416</code>: cut-off month and training time), recorded in Dataiku's <strong>Experiment Tracking</strong> and deployed as a new <strong>version</strong> of three saved models: <code>forecast_ev</code>, <code>forecast_p10</code>, <code>forecast_p90</code>. The production model is the <strong>active version</strong>; a new model is activated only if it is better, and the nightly batch always scores with the active version.</p>
+  <div class="figure">
+<pre class="mermaid">
+flowchart LR
+  T[Train and test a new model] --> X[(Experiment Tracking: model ID, settings, test scores)]
+  X --> V[(New version of the 3 saved models, not active)]
+  V --> CC{Champion / challenger: same last 6 months}
+  P[(Active version: production)] --> CC
+  CC -- better --> PR[Activate the new version]
+  CC -- not better --> K[Keep the active version]
+  PR --> N[Nightly batch: Score recipes use the active version]
+  K --> N
+</pre>
+  </div>
   <div class="tablewrap">
   <table>
-    <thead><tr><th></th><th>Training (code)</th><th>Training (visual)</th></tr></thead>
+    <thead><tr><th>Step</th><th>What happens</th></tr></thead>
     <tbody>
-      <tr><td>How</td><td>Python recipes</td><td>Visual ML in the Lab, deployed to the flow as saved models</td></tr>
-      <tr><td>EV</td><td>One CatBoost model</td><td>LightGBM and XGBoost compared; the better one is kept</td></tr>
-      <tr><td>P10 / P90</td><td>One CatBoost model gives both</td><td>Two LightGBM models (a visual model predicts one number)</td></tr>
-      <tr><td>Tracking</td><td><code>test_results</code> dataset</td><td>Every Lab training session, saved model versions, and an evaluation store per model with the history of its test results</td></tr>
+      <tr><td>Tracking</td><td>Settings, cut-off, warehouse load, row counts, test scores on the last 6 months (EV error overall and per category, P10–P90 coverage), the backtest models, and the three MLflow models, under one model ID</td></tr>
+      <tr><td>Versions</td><td>The three MLflow models are deployed as version <em>model ID</em> of the saved models, with Dataiku's own evaluation on a reference sample</td></tr>
+      <tr><td>Champion / challenger</td><td>The new model and the production model are tested on the same last 6 months, each with its version trained without those months</td></tr>
+      <tr><td>Promotion (automatic)</td><td>The new version is activated if its EV error is lower (a tie keeps production), its P10–P90 coverage is between 70% and 90%, and it beats the simple guess. Every decision and its reason go to <code>promotion_log</code></td></tr>
+      <tr><td>Rollback</td><td>Activate an earlier version in the three saved models and run the nightly batch</td></tr>
     </tbody>
   </table>
   </div>
@@ -334,68 +348,72 @@ flowchart LR
 
 <section>
   <h2><span class="n">9</span>What gets built in Dataiku</h2>
-  <p>A setup notebook builds the project once, in an empty Dataiku project (about 15 minutes, including the first training), and refuses to touch a project that already has a flow. After that, the project runs from two scenarios: <strong>Monthly forecast</strong> after each warehouse load, and <strong>Retrain and test the models</strong> (every 3 months, or when needed). The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
+  <p>A setup notebook builds the project once, in an empty Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. After that, the project runs from two scenarios: <strong>Nightly batch</strong> after each warehouse load, and <strong>Retrain, test and promote</strong> (monthly, or when needed). The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart TB
-  subgraph Z1[Raw data: read-only, EDW_AI]
+  subgraph Z1[Raw data: CSV, from the simulator or the warehouse landing files]
     R[(4 curated warehouse tables)]
     LR[(CFF_LOAD_RECORD: read by the scenarios' load check)]
   end
   subgraph Z0[Staging]
-    ST[stage_*: SQL, warehouse names to standard names] --> S17[(4 standard tables)]
+    ST[stage_tables: warehouse names to standard names] --> S17[(4 standard tables)]
   end
   subgraph Z2[Data prep]
-    CR[(category_rules: editable)]
-    P1[categorise] --> MF[(monthly_flows)]
-    P2[obligations] --> OB[(monthly_obligations)]
-    P3[build_rows] --> TR[(training_rows)]
-    P3 --> SR[(scoring_rows)]
+    CR[(category_mapping: CSV, kept on re-runs)]
+    J1[Join: flows + mapping] --> G1[Group: monthly_flows]
+    J2[Join: scheduled payments + mapping] --> P2[obligations]
+    P3[build_rows] --> TR[(training_rows, scoring_rows)]
   end
-  subgraph Z3[Training: code]
-    P4[train_models: CatBoost EV and P10 / P90] --> MD[(models folder)]
-    P7[test_models: last 6 months] --> BT[(test_results)]
-  end
-  subgraph Z4[Training: visual]
-    ML[ml_rows] --> MT[(ml_train, ml_test, ml_scoring)]
-    LAB[Lab: EV, P10 and P90 visual models] --> SM[(3 saved models)]
-    EV[Evaluate: last 6 months] --> MES[(evaluation stores)]
+  subgraph Z3[Training]
+    P4[train_and_test: one model ID] --> EX[(experiments: Experiment Tracking)]
+    P4 --> SM[(saved models forecast_ev, p10, p90: one version per model ID)]
+    CH[champion_challenger] --> PL[(promotion_log)]
   end
   subgraph Z5[Inference]
-    S1[score: code models] --> PR[(predictions)]
-    S2[Score: visual models] --> PV[(predictions_visual)]
-    CMP[compare_models] --> MC[(model_comparison)]
-    F[final_forecast: model_source + obligations] --> FF[(final_forecast)]
+    S1[Score x3: active version] --> F[final_forecast: + obligations, model_id, load_id]
+    F --> AF[archive_forecast] --> AR[(forecast_archive)]
+    AF --> IL[(inference_log: one row per run)]
   end
   R --> ST
-  S17 --> P2
-  S17 --> P1
-  CR --> P1
-  CR --> P2
+  S17 --> J1
+  S17 --> J2
   S17 --> P3
-  MF --> P3
-  OB --> P3
+  CR --> J1
+  CR --> J2
+  G1 --> P3
+  P2 --> P3
   TR --> P4
-  MD --> P7
-  TR --> ML
-  SR --> ML
-  MT --> LAB
-  SM --> EV
-  MD --> S1
-  SR --> S1
-  SM --> S2
-  PR --> F
-  PV --> F
-  OB --> F
-  BT --> CMP
-  EV --> CMP
+  TR --> CH
+  EX --> CH
+  SM --> S1
+  TR --> S1
+  P2 --> F
 </pre>
   </div>
-  <p class="caption">Boxes with rounded ends are datasets, folders, saved models or evaluation stores; rectangles are recipes. The 6 groups are the flow zones. Each scenario starts with a load check (a Python step): it stops the scenario if the latest load is incomplete, and sets the project variable <code>cutoff_month</code> that the recipes read. The code models' folder, the saved models and the evaluation stores are only rebuilt when built by name, so the monthly forecast never retrains by accident. Shared code is in the project library (<code>python/cashflow.py</code>). Project variables: <code>last_month</code> (the cut-off) and <code>model_source</code> (<code>code</code> or <code>visual</code>).</p>
+  <p class="caption">Boxes with rounded ends are datasets or folders; rectangles are Python recipes. The 5 groups are the flow zones of the single project. Each scenario starts with a load check (a Python step): it stops the scenario if the latest load is incomplete, and sets the project variable <code>cutoff_month</code> that the recipes read. Training (folder <code>experiments</code>), the promotion log and the saved models are only rebuilt when built by name, so the nightly batch never retrains by accident. Shared code is in the project library (<code>cashflow.py</code>, <code>warehouse.py</code>, <code>tracking.py</code>). In the sandbox, both notebooks (the warehouse simulator and the setup) run in this same project.</p>
 </section>
 
 <section>
-  <h2><span class="n">10</span>Decisions and open points</h2>
+  <h2><span class="n">10</span>Inference log</h2>
+  <p>Every forecast run adds one row to <code>inference_log</code> (in the Inference zone) and keeps the forecast as it was made in the folder <code>forecast_archive</code>.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Column</th><th>What it says</th></tr></thead>
+    <tbody>
+      <tr><td><code>run_at</code></td><td>When the run happened</td></tr>
+      <tr><td><code>load_id</code>, <code>as_of_date</code>, <code>cutoff_month</code></td><td>Which warehouse load it used, and the last full month</td></tr>
+      <tr><td><code>model_id</code>, <code>model_promoted_at</code></td><td>Which model made the forecast, and when it was promoted</td></tr>
+      <tr><td><code>clients</code>, <code>clients_not_enough_history</code>, <code>forecast_rows</code></td><td>What it produced</td></tr>
+      <tr><td><code>archive_file</code></td><td>The run's file in <code>forecast_archive</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="caption">Scenario run history shows every run and its failures; in production, add a reporter (email, Slack) to the scenarios. Model monitoring (drift, accuracy against actuals) is left out for now.</p>
+</section>
+
+<section>
+  <h2><span class="n">11</span>Decisions and open points</h2>
   <div class="grid2">
     <div class="card">
       <h3>Agreed</h3>
@@ -403,12 +421,13 @@ flowchart TB
         <li>One forecast per month, for each of the next 3 months. No daily forecasts.</li>
         <li>Money in and money out kept separate. Own-account transfers left out.</li>
         <li>Obligations are not predicted. They are taken out of the answer, shown as a hint, and added back.</li>
-        <li>Two models: EV, and P10/P90 together (the visual path needs three: EV, P10, P90).</li>
-        <li>Two ways to train (code and visual), one inference; <code>model_source</code> picks the models.</li>
+        <li>Two models: EV, and P10/P90 together (CatBoost). One training path, in Python recipes.</li>
+        <li>Each training run is tracked with a model ID and deployed as a saved model version; a new version is activated automatically if it is better; the nightly batch scores with the active version.</li>
+        <li>Everything is stored as CSV files: the warehouse's landing files, the project's datasets, the archive and the logs.</li>
         <li>At least 12 months of history to score a client. Otherwise flagged.</li>
         <li>Test on the last 6 months.</li>
-        <li>Production-shaped: the project only reads the warehouse (read-only <code>EDW_AI</code>), checks each load, takes its cut-off from the load record, and runs from two scenarios. Sample data comes from a separate warehouse simulator.</li>
-        <li>The warehouse does the heavy, mechanical prep (4 curated tables); Dataiku keeps the modelling logic. Categories come from editable rules in Dataiku, not from the warehouse, so they can be tuned without a warehouse change.</li>
+        <li>One project (Digital Cash Management Forecast), with the warehouse simulator inside it in the sandbox. Production-shaped: the project only reads the warehouse's tables (read-only landing files in production), checks each load, takes its cut-off from the load record, and runs from two scenarios. Sample data comes from a separate warehouse simulator.</li>
+        <li>The warehouse does the heavy, mechanical prep (4 curated tables); Dataiku keeps the modelling logic. Categories come from an mapping dataset in Dataiku (visual Join and Group recipes), not from the warehouse, so they can be tuned without a warehouse change.</li>
       </ul>
     </div>
     <div class="card">
@@ -418,6 +437,7 @@ flowchart TB
         <li>No past versions of schedules: in real data, obligation hints may show slightly more than was known at the time. Tell the tech lead.</li>
         <li>How real transactions are labelled as rent or supplier payments without descriptions (counterparty, transaction code).</li>
         <li>The tech lead agrees to curated monthly tables next to the detailed ones (the rules ask for no monthly totals).</li>
+        <li>Code env: the project needs a Python code env with <code>catboost</code>, <code>scikit-learn</code> and <code>mlflow 3.16</code>. We cannot create one: a Dataiku admin creates it once.</li>
         <li>Warehouse table and column names are our proposal (<code>CFF_*</code>, EDW style); the warehouse team confirms them. If they differ, only the mapping file changes.</li>
       </ul>
     </div>

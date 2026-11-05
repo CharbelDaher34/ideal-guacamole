@@ -1,13 +1,16 @@
 """Warehouse tables (project library: python/warehouse.py).
 
-In the schema read through the EDW_AI connection, the warehouse team builds the 17 detailed tables of the data
-requirements (DETAIL_TABLES) and, from them, 4 curated tables (TABLES) plus a load record. The project reads
+In the landing folder read through the EDW_LANDING connection (CSV files, one folder per table), the warehouse
+team drops the 17 detailed tables of the data requirements (DETAIL_TABLES) and, built from them, 4 curated tables
+(TABLES) plus a load record. The project reads
 only the curated tables; the detailed ones stay in the warehouse for checks and drill-down.
 Table names are CFF_ + the source table's name where it is known; columns follow the EDW style seen in
 FCT_PAYROLL_MSTR (CSTMR_CIF, ACNT_NMBR, TOT_AMT, ..._DT, ..._FLG with Y / N). These names are our proposal until
 the warehouse team confirms them: if they differ, only this file changes.
-The project's staging recipes rename every column back to the standard names used by the recipes.
+The project's staging recipe renames every column back to the standard names used by the recipes.
 """
+import pandas as pd
+
 
 # curated tables the project reads. standard name: (warehouse table, what the warehouse team builds it from)
 TABLES = {
@@ -20,8 +23,8 @@ COLUMNS = {
     "clients": ["client_no", "party_type", "segment", "sub_segment", "sector", "industry", "region", "city",
                 "joining_date", "legal_form", "sole_proprietor_flag", "last_annual_sales", "number_of_employees",
                 "parent_client_no", "status", "closure_date", "current_accounts", "restricted_accounts"],
-    # one row per client, month, direction, origin type and transaction type tag. Leaves out transfers between the
-    # client's own accounts and reversed postings. known_1..3: the part of the amount that came from scheduled
+    # one row per client, month, direction, origin type and transaction type tag (NONE when the posting has no
+    # origin or tag). Leaves out transfers between the client's own accounts and reversed postings. known_1..3: the part of the amount that came from scheduled
     # payments known 1, 2 or 3 months before the month
     "monthly_flows_by_origin": ["client_no", "month", "direction", "origin_type", "txn_type_tag", "amount", "postings",
                                 "known_1", "known_2", "known_3"],
@@ -136,15 +139,13 @@ def is_flag(column):
     return column.endswith("_flag")
 
 
-def staging_sql(table, schema):
-    """SELECT that reads a warehouse table and gives back the standard column names and types."""
-    warehouse_table = TABLES[table][0]
-    select = []
+def to_standard(df, table):
+    """A curated warehouse table with the standard column names; flags Y / N become true / false."""
+    out = {}
     for column in COLUMNS[table]:
-        source = f'"{warehouse_column(column)}"'
-        select.append(f"({source} = 'Y') AS {column}" if is_flag(column) else f'{source} AS "{column}"')
-    return (f"-- {warehouse_table} -> {table}: warehouse column names back to the standard names\n"
-            "SELECT\n    " + ",\n    ".join(select) + f'\nFROM "{schema}"."{warehouse_table}"')
+        values = df[warehouse_column(column)]
+        out[column] = values.astype(str).str.upper().eq("Y") if is_flag(column) else values
+    return pd.DataFrame(out)
 
 
 def check_latest_load():
@@ -154,8 +155,6 @@ def check_latest_load():
     read. Raises an error on any problem, which stops the scenario before anything is built.
     Run by the first step of each scenario: from warehouse import check_latest_load; check_latest_load()"""
     import dataiku
-    import pandas as pd
-    from dataiku import SQLExecutor2
 
     record = dataiku.Dataset(LOAD_RECORD).get_dataframe()
     latest = record.sort_values("LOAD_DTTS").iloc[-1]["LOAD_ID"]
@@ -168,10 +167,8 @@ def check_latest_load():
         row = load.loc[warehouse_table]
         if row["LOAD_STA_CD"] != "SUCCESS":
             problems.append(f"{warehouse_table}: load status {row['LOAD_STA_CD']}")
-        dataset = dataiku.Dataset(warehouse_table)
-        params = dataset.get_config()["params"]
-        count = SQLExecutor2(dataset=dataset).query_to_df(
-            f'SELECT COUNT(*) AS n FROM "{params["schema"]}"."{params["table"]}"')["n"].iloc[0]
+        first_column = warehouse_column(COLUMNS[next(t for t, v in TABLES.items() if v[0] == warehouse_table)][0])
+        count = len(dataiku.Dataset(warehouse_table).get_dataframe(columns=[first_column]))
         if count != row["ROW_CNT"]:
             problems.append(f"{warehouse_table}: {count:,} rows, the load record says {row['ROW_CNT']:,}")
     if problems:

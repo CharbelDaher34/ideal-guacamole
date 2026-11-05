@@ -1,5 +1,5 @@
 tables = generate(n_clients=N_CLIENTS, last_month=SIM_END, seed=SEED)
-load_id = load_warehouse(tables, AS_OF, LOADER_CONNECTION, SCHEMA)
+load_id = load_warehouse(tables, AS_OF, CONNECTION, detailed=WRITE_DETAILED_TABLES)
 print(f"Load {load_id} done: warehouse as of {AS_OF}")
 display(dataiku.Dataset(LOAD_RECORD).get_dataframe().groupby(["LOAD_ID", "AS_OF_DT"], as_index=False)
         .agg(tables=("TRGT_TBL_NM", "count"), rows=("ROW_CNT", "sum"), loaded_at=("LOAD_DTTS", "max"))

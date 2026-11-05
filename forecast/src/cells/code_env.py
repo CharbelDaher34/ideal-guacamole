@@ -2,29 +2,25 @@ import dataiku
 
 client = dataiku.api_client()
 project = client.get_project(dataiku.default_project_key())
+# catboost: the models; mlflow: Experiment Tracking and the saved models
+PACKAGES = ("catboost>=1.2", "scikit-learn", "mlflow==3.16.0")
 
 
-def ensure_code_env(name, packages=("catboost>=1.2", "scikit-learn")):
-    """Create a Python code env with CatBoost, unless one with this name already exists (takes a few minutes)."""
-    if name in [e["envName"] for e in client.list_code_envs()]:
-        print(f"Code env {name} already exists")
+def check_code_env(name, packages=PACKAGES):
+    """Check the code env exists and lists the packages. It is not created here: an admin creates it once."""
+    request = (f"Ask a Dataiku admin to create the Python code env {name} (Python 3.10 to 3.12) with these "
+               f"packages: {', '.join(packages)}. Or set CODE_ENV to an existing env that has them.")
+    if name not in [e["envName"] for e in client.list_code_envs()]:
+        raise RuntimeError(f"Code env {name} not found. {request}")
+    try:
+        listed = " ".join(client.get_code_env("PYTHON", name).get_settings().get_required_packages(as_list=True))
+    except Exception:          # no right to read the env settings: it is checked when the first recipe runs
+        print(f"Code env {name} found (could not read its packages)")
         return
-    error = None
-    for interpreter in ("PYTHON312", "PYTHON311", "PYTHON310", "PYTHON39"):
-        try:
-            client.create_code_env("PYTHON", name, "DESIGN_MANAGED", {
-                "pythonInterpreter": interpreter, "installCorePackages": True, "installJupyterSupport": False})
-            break
-        except Exception as e:          # interpreter not installed on this DSS: try the next one
-            error = e
-    else:
-        raise RuntimeError(f"Could not create code env {name}: {error}")
-    env = client.get_code_env("PYTHON", name)
-    settings = env.get_settings()
-    settings.set_required_packages(*packages)
-    settings.save()
-    env.update_packages()
-    print(f"Code env {name} created ({interpreter}) with {', '.join(packages)}")
+    missing = [p for p in packages if p.split("=")[0].split(">")[0] not in listed]
+    if missing:
+        raise RuntimeError(f"Code env {name} lacks {', '.join(missing)}. {request}")
+    print(f"Code env {name} has {', '.join(packages)}")
 
 
-ensure_code_env(CODE_ENV)
+check_code_env(CODE_ENV)

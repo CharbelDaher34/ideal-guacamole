@@ -27,33 +27,35 @@ QUANTILES = (0.1, 0.9)      # P10 and P90
 CATBOOST = {"iterations": 600, "depth": 6, "learning_rate": 0.08, "random_seed": 0, "verbose": 0}
 FX_TO_SAR = {"SAR": 1.0, "USD": 3.75, "EUR": 4.05}
 
-# Category rules: (origin type, transaction type tag, direction) -> category, the first matching rule wins;
-# "*" matches anything. The warehouse gives money in and out by origin type and tag; these rules turn them into
-# categories, the same way for postings and for scheduled payments. The setup copies them into the editable
-# dataset category_rules: edit them there (Flow > category_rules > Edit), then run the scenario Monthly forecast.
-DEFAULT_CATEGORY_RULES = [
-    ("PAYROLL", "*", "*", "PAYROLL"),
-    ("LOAN", "*", "OUT", "FINANCING"),
-    ("SADAD", "*", "*", "SADAD_GOV"),
-    ("CARD_SETTLEMENT", "*", "*", "CARD_SALES"),
-    ("CORP_CARD", "*", "*", "CORP_CARD"),
-    ("LC", "*", "*", "SUPPLIERS"),
-    ("DEPOSIT", "*", "IN", "DEPOSIT_MAT"),
-    ("CHEQUE", "*", "IN", "CHEQUES_IN"),
-    ("INVOICE", "*", "*", "RECEIPTS"),
-    ("*", "RENT", "*", "RENT"),
-    ("*", "SUPPLIER", "OUT", "SUPPLIERS"),
-    ("*", "COLLECTION", "IN", "RECEIPTS"),
-    ("*", "SALARY", "*", "PAYROLL"),
-    ("*", "UTILITY", "*", "SADAD_GOV"),
-    ("*", "GOV", "*", "SADAD_GOV"),
-    ("*", "*", "IN", "OTHER_IN"),
-    ("*", "*", "OUT", "OTHER_OUT"),
+# Category mapping: (origin type, transaction type tag, direction) -> category, one row per combination the
+# warehouse sends (NONE = no origin or tag). Anything not in the mapping is other in / other out. The setup copies
+# it into the editable dataset category_mapping: edit it there (Flow > category_mapping > Edit), then run the
+# scenario Nightly batch. Postings and scheduled payments use the same mapping (visual Join recipes).
+DEFAULT_CATEGORY_MAPPING = [
+    ("NONE", "COLLECTION", "IN", "RECEIPTS"),
+    ("NONE", "SUPPLIER", "OUT", "SUPPLIERS"),
+    ("NONE", "RENT", "OUT", "RENT"),
+    ("NONE", "OTHER", "IN", "OTHER_IN"),
+    ("NONE", "OTHER", "OUT", "OTHER_OUT"),
+    ("NONE", "FEE", "OUT", "OTHER_OUT"),
+    ("INVOICE", "COLLECTION", "IN", "RECEIPTS"),
+    ("CARD_SETTLEMENT", "CARD_SETTLEMENT", "IN", "CARD_SALES"),
+    ("CHEQUE", "CHEQUE", "IN", "CHEQUES_IN"),
+    ("CORP_CARD", "CARD", "OUT", "CORP_CARD"),
+    ("DEPOSIT", "OWN", "IN", "DEPOSIT_MAT"),
+    ("DEPOSIT", "DEPOSIT", "IN", "DEPOSIT_MAT"),
+    ("LC", "SUPPLIER", "OUT", "SUPPLIERS"),
+    ("LOAN", "FINANCING", "OUT", "FINANCING"),
+    ("PAYROLL", "SALARY", "OUT", "PAYROLL"),
+    ("SADAD", "UTILITY", "OUT", "SADAD_GOV"),
+    ("SADAD", "GOV", "OUT", "SADAD_GOV"),
+    ("STANDING_ORDER", "RENT", "OUT", "RENT"),
+    ("STANDING_ORDER", "SUPPLIER", "OUT", "SUPPLIERS"),
+    ("STANDING_ORDER", "OTHER", "OUT", "OTHER_OUT"),
 ]
+# formula of the join's category column: the mapped category, else other in / other out
+CATEGORY_FORMULA = 'if(isBlank(mapped_category), if(direction == "IN", "OTHER_IN", "OTHER_OUT"), mapped_category)'
 
-# Amounts are divided by a usual size, so small and large clients and categories compare:
-# a category's own amounts by its usual monthly amount (series_scale), the client's totals by its usual
-# monthly flow (scale). The models predict the target divided by series_scale.
 CAT_FEATURES = ["category", "direction", "segment", "sector", "region"]
 SERIES_FEATURES = ["last_amount", "avg_3m", "same_month_last_year", "free_last", "free_avg_3m", "oblig_target_month"]
 CLIENT_FEATURES = ["client_in_avg_3m", "client_out_avg_3m", "balance_end", "oblig_in_next_3m", "oblig_out_next_3m"]
@@ -96,23 +98,6 @@ def cutoff_month():
     return pd.Timestamp(dataiku.get_custom_variables()["cutoff_month"] + "-01")
 
 
-def apply_category_rules(df, rules):
-    """Category of each row from its origin_type, txn_type_tag and direction: the first matching rule wins."""
-    rules = rules.sort_values("rule_order")
-    keys = {c: df[c].fillna("").astype(str) for c in ("origin_type", "txn_type_tag", "direction")}
-    category = pd.Series(np.where(df["direction"] == "IN", "OTHER_IN", "OTHER_OUT"), index=df.index)
-    unset = pd.Series(True, index=df.index)
-    for r in rules.itertuples():
-        match = unset.copy()
-        for column in ("origin_type", "txn_type_tag", "direction"):
-            wanted = getattr(r, column)
-            if wanted != "*":
-                match &= keys[column] == ("" if pd.isna(wanted) else str(wanted))
-        category[match] = r.category
-        unset &= ~match
-    return category
-
-
 def model_matrix(rows):
     rows = rows.assign(series_share=rows["series_scale"] / rows["scale"])
     X = rows[FEATURES].copy()
@@ -152,3 +137,23 @@ def predict(models, rows):
     scale = rows["series_scale"].values
     q = models["p10_p90"].predict(X)
     return finish(models["ev"].predict(X) * scale, q[:, 0] * scale, q[:, 1] * scale, rows["category"], rows.index)
+
+
+def scores(d):
+    """Test scores of predictions (columns target, p10, ev, p90, baseline): EV error (WAPE) of the model and of the
+    simple guess, and the share of actual values below P10, between P10 and P90, and above P90."""
+    size = d["target"].abs().sum()
+    wape = lambda column: round((d["target"] - d[column]).abs().sum() / size, 4) if size else np.nan
+    return pd.Series({"rows": len(d), "actual_total": round(d["target"].sum(), 0), "wape_model": wape("ev"),
+                      "wape_baseline": wape("baseline") if "baseline" in d else np.nan,
+                      "coverage_p10_p90": round(((d["target"] >= d["p10"]) & (d["target"] <= d["p90"])).mean(), 4),
+                      "below_p10": round((d["target"] < d["p10"]).mean(), 4),
+                      "above_p90": round((d["target"] > d["p90"]).mean(), 4)})
+
+
+def holdout(rows):
+    """The test rows: predicted month in the last 6 months before the cut-off, with the simple guess."""
+    rows = rows.assign(target_month=month_start(rows["target_month"]))
+    test = rows[rows["target_month"] >= add_months(cutoff_month(), -(HOLDOUT_MONTHS - 1))].copy()
+    test["baseline"] = np.where(test["category"] == "NET", test["free_avg_3m"], test["free_avg_3m"].clip(lower=0))
+    return test

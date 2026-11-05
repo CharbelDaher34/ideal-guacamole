@@ -1,74 +1,99 @@
-# Cash-flow forecast
+# Digital Cash Management Forecast
 
 A Dataiku project that forecasts each business client's money in and out for the next 3 months, by category
-(P10, EV, P90), set up the way it runs in production. How it works, in plain words:
-[`../docs/cashflow_forecast_design.html`](../docs/cashflow_forecast_design.html).
+(P10, EV, P90), set up the way it runs in production, in a single project. All data is stored as CSV files. How it
+works, in plain words: [`../docs/cashflow_forecast_design.html`](../docs/cashflow_forecast_design.html).
 
-Two notebooks:
+Two notebooks, both in the same project:
 
-| Notebook | Project | Role |
-|---|---|---|
-| [`warehouse_simulator.ipynb`](warehouse_simulator.ipynb) | `EDW_SIMULATOR` | **Sandbox only.** Plays the warehouse team: writes the 17 detailed tables (sample data), the 4 curated tables built from them, and the load record into the schema `edw_ai`. Replaced by Informatica in the bank. |
-| [`build_forecast_project.ipynb`](build_forecast_project.ipynb) | `CASHFLOW_FORECAST` | Sets up the forecast project once, in an empty project: flow, models, scenarios, first forecast. |
+| Notebook | Role |
+|---|---|
+| [`warehouse_simulator.ipynb`](warehouse_simulator.ipynb) | **Sandbox only.** Plays the warehouse team: writes the 4 curated warehouse tables (sample data) and the load record as CSV datasets of the project. Replaced by Informatica in the bank. |
+| [`build_forecast_project.ipynb`](build_forecast_project.ipynb) | Sets up the project once (and names it Digital Cash Management Forecast): flow, first model, scenarios, first nightly batch. |
 
 ## Run it
 
-1. **Warehouse (sandbox):** create a project `EDW_SIMULATOR`, import `warehouse_simulator.ipynb`
-   (Notebooks → New notebook → Import), **Run All**. The first time it also creates the schema `edw_ai` and two
-   connections: `EDW_AI_LOADER` (the warehouse team's, read and write) and `EDW_AI` (read-only).
-2. **Forecast project:** create an empty project `CASHFLOW_FORECAST`, import `build_forecast_project.ipynb`, check
-   the settings in its first cell, **Run All** (about 15 minutes the first time). It refuses to run in a project
-   that already has a flow.
-3. **Every month after a load:** Scenarios → **Monthly forecast** → Run. To retrain: **Retrain and test the models**.
+1. In the project, import both notebooks (Notebooks → New notebook → Import).
+2. **Sandbox:** run `warehouse_simulator.ipynb` (Run All, about 1 minute). It writes `CFF_CLIENT`,
+   `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT`, `CFF_CLIENT_MNTHLY_BAL` and `CFF_LOAD_RECORD` as of `AS_OF`,
+   for `N_CLIENTS` sample clients (40: a quick run; scores need more, for example 300).
+3. Run `build_forecast_project.ipynb` (check the settings in its first cell, Run All, a few minutes).
+   It needs an existing Python code env (`CODE_ENV`) with `catboost>=1.2`, `scikit-learn` and `mlflow==3.16.0`:
+   it does not create one (that takes admin rights). It checks the env and, if something is missing, stops with
+   the request to send a Dataiku admin.
+   It uses the simulated tables if they are there, otherwise it links the warehouse team's landing files
+   (`LANDING_CONNECTION`, read-only). It needs no admin right on the project (without one, it cannot rename the
+   project and says so). It can be run again in the same project: what exists is kept (data, the category
+   mapping, saved model versions, zones, scenario history) and the recipes' code is updated.
+4. **Every night after a load:** Scenarios → **Nightly batch** → Run. To retrain: **Retrain, test and promote**.
 
-To simulate the next monthly load: in `EDW_SIMULATOR`, set `AS_OF` to the next month's end (for example
-`2026-11-30`), Run All, then run the scenario **Monthly forecast** in `CASHFLOW_FORECAST`: the cut-off moves to
-the new month.
-
-In the bank: no simulator. The warehouse team builds the curated tables (and keeps the detailed ones) with the
-names in [`src/warehouse.py`](src/warehouse.py) (our proposal until they confirm; if they change, only that
-file changes) and the load record; set `EDW_CONNECTION` and `EDW_SCHEMA` in the first cell.
+To simulate the next load: set `AS_OF` in the simulator to the next month's end (for example `2026-11-30`), Run
+All, then run **Nightly batch**: the cut-off moves to the new month.
 
 ## What the project builds
 
-| Zone | Recipes | Outputs |
+| Zone | Recipes | Outputs (CSV files unless noted) |
 |---|---|---|
-| Raw data | (none: read-only, `EDW_AI`) | the 4 curated warehouse tables: `CFF_CLIENT`, `CFF_CLIENT_MNTHLY_FLOW` (client × month × direction × origin type × tag), `CFF_SCHEDULED_PYMT` (every scheduled payment and when it became known), `CFF_CLIENT_MNTHLY_BAL`; and `CFF_LOAD_RECORD` |
-| Staging | `stage_*` (SQL, one per table) | the same tables with the standard column names (`clients`, `monthly_flows_by_origin`, `scheduled_payments`, `monthly_balances`); flags Y / N → true / false |
-| Data prep | (editable dataset) | `category_rules`: origin type + transaction type tag + direction → category, first match wins. Edit it in the flow, then run Monthly forecast |
-| Data prep | `categorise` | `monthly_flows`: money in / out per client, month and category |
-| Data prep | `obligations` | `monthly_obligations`: scheduled payments per client, category, month due and month known |
-| Data prep | `build_rows` | `training_rows` (every past cut-off with its answer), `scoring_rows` (latest cut-off) |
-| Training (code) | `train_models`, `test_models` | `models` folder (CatBoost EV and P10/P90; rebuilt only when built by name), `test_predictions`, `test_results` |
-| Training (visual) | `ml_rows`, Lab analyses, `train_*_visual`, `evaluate_*_visual` | `ml_train`, `ml_test`, `ml_scoring`; saved models `ev_visual`, `p10_visual`, `p90_visual`; an evaluation store per model |
-| Inference | `score`, `score_*_visual`, `visual_predictions`, `compare_models`, `final_forecast` | `predictions`, `predictions_visual`, `model_comparison`, `final_forecast` |
+| Raw data (Dataiku's Default zone, renamed) | (simulator, or read-only landing files) | `CFF_CLIENT`, `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT`, `CFF_CLIENT_MNTHLY_BAL`, `CFF_LOAD_RECORD` |
+| Staging | `stage_tables` | `clients`, `monthly_flows_by_origin`, `scheduled_payments`, `monthly_balances`: standard column names, flags Y / N → true / false |
+| Data prep | (CSV dataset) | `category_mapping`: origin type + transaction type tag + direction → category, one row per combination |
+| Data prep | `join_flows_category` (Join), `group_monthly_flows` (Group), `join_scheduled_category` (Join), `obligations`, `build_rows` | `flows_with_category`, `monthly_flows`, `scheduled_with_category`, `monthly_obligations`, `training_rows`, `scoring_rows` |
+| Training | `train_and_test`, `champion_challenger` | folder `experiments` (Experiment Tracking), `test_results`, `model_reference` (a sample of the model inputs, gives each version its input columns), `promotion_log` (appended) |
+| Inference | `score_ev`, `score_p10`, `score_p90` (Score), `final_forecast`, `archive_forecast` | saved models `forecast_ev`, `forecast_p10`, `forecast_p90` (one version per model ID, next to the Score recipes that use them), `scored_*`, `final_forecast` (with `model_id`, `model_promoted_at`, `load_id`), folder `forecast_archive`, `inference_log` (appended) |
 
-Project variable `model_source` (`code` or `visual`) picks which models feed `final_forecast`. The cut-off comes
-from the load record, not from today's date: each scenario starts with the **load check**
-(`check_latest_load` in the library file `warehouse.py`). For the latest load in `CFF_LOAD_RECORD`, every
-curated table must be loaded with status SUCCESS and hold the number of rows the record says; otherwise the
-scenario stops before anything is built. On success it sets the project variables `load_id`, `as_of_date` and
-`cutoff_month` (the last complete month), which the recipes read. Building datasets by hand uses the cut-off of
-the last successful check.
+The zones run left to right in one row: Raw data → Staging → Data prep → Training → Inference.
+
+Categories: anything not in `category_mapping` becomes other in / other out (a formula column in the Join). To
+change a category, change `category_mapping` from a notebook (read it, change rows, write it back) and run Nightly
+batch. Running the setup again keeps it.
+
+## Models: tracking, versions, promotion
+
+- **Tracking:** every run of `train_and_test` is one model with a model ID like `CFF_202610_20261104T1329`
+  (cut-off month, training time), recorded in **Experiment Tracking** (Lab → Experiment tracking): settings,
+  cut-off, load, row counts, test scores on the last 6 months (EV error overall and per category, P10–P90
+  coverage), the backtest models, and three MLflow models (EV, P10, P90).
+- **Versions:** those three are deployed as a new version, named by the model ID, of the saved models
+  `forecast_ev`, `forecast_p10` and `forecast_p90` (not activated yet).
+- **Promotion (automatic if better):** `champion_challenger` tests the new model and the production model on the
+  same last 6 months (each with its version trained without those months). With no production model yet, the new
+  model is promoted (the forecast needs one), with a warning in `promotion_log` if it fails the checks below.
+  Otherwise it is promoted if its EV error is lower (a tie keeps production), its P10–P90 coverage is between 70%
+  and 90%, and it beats the simple guess. The step "Promote if better" activates its version in the three saved
+  models.
+- **Nightly batch:** the Score recipes always use the **active version**; `final_forecast` checks the three saved
+  models have the same one and writes it on every row. To roll back, activate an earlier version in the three
+  saved models.
+
+## Inference log
+
+`inference_log` gets one row per forecast run: `run_at`, `load_id`, `as_of_date`, `cutoff_month`, `model_id`,
+`model_promoted_at`, `clients`, `clients_not_enough_history`, `forecast_rows`, `archive_file` (the run's file in
+`forecast_archive`). Run history and failures are in the scenarios' Last runs; in production, add a reporter
+(email, Slack) to the scenarios.
 
 ## Scenarios
 
 | Scenario | Steps | Trigger (off in the sandbox) |
 |---|---|---|
-| Monthly forecast | check the load (Python step) → stage, prepare, forecast with the current models | monthly, 2nd at 07:00 Riyadh |
-| Retrain and test the models | check the load (Python step) → prepare training data → retrain and test the code models → retrain and test the visual models → compare → forecast | every 3 months, 5th at 07:00 Riyadh |
+| Nightly batch | check the load → forecast with the production model, archive it and log the run | daily, 06:00 Riyadh |
+| Retrain, test and promote | check the load → prepare the training data → train, test and deploy a new model → champion / challenger → promote if better → forecast with the production model, archive and log | monthly, 5th at 07:00 Riyadh |
 
-The code models' folder, the visual saved models and the evaluation stores are only rebuilt when built by name,
-so the monthly forecast never retrains by accident. The Free Edition only runs scenarios from the browser.
+Each starts with the load check (`check_latest_load` in `warehouse.py`): for the latest load in
+`CFF_LOAD_RECORD`, every curated table must be loaded with status SUCCESS and hold the number of rows the record
+says; otherwise the scenario stops. On success it sets `load_id`, `as_of_date` and `cutoff_month`. Training
+(folder `experiments`), the promotion log and the saved models are only rebuilt when built by name, so the nightly
+batch never retrains by accident. The Free Edition only runs scenarios from the browser and has no scheduled
+triggers.
 
 ## Change the code
 
 The notebooks are assembled from `src/`. Edit those, then run `python make_notebook.py`:
 
-- `src/warehouse.py`: warehouse table and column names (curated and detailed), and the staging SQL built from them
-- `src/library_cashflow.py`: the project library `cashflow.py` (categories and default category rules, model
-  inputs, training)
-- `src/recipes/*.py`: one file per recipe
+- `src/warehouse.py`: warehouse table and column names, staging, the load check
+- `src/library_cashflow.py`: the project library `cashflow.py` (categories and the default mapping, model inputs,
+  training and test scores)
+- `src/tracking.py`: model IDs, Experiment Tracking, saved model versions, promotion
+- `src/recipes/*.py`: one file per Python recipe; the visual recipes are created in `src/cells/create_flow.py`
 - `src/cells/*.py`: the setup notebook's own cells
-- `src/generate_data.py`, `src/simulator.py`, `src/sim_cells/*.py`: the warehouse simulator (sample data,
-  publishing as of a date, curated tables)
+- `src/generate_data.py`, `src/simulator.py`, `src/sim_cells/*.py`: the warehouse simulator

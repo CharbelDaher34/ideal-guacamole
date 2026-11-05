@@ -5,9 +5,8 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["categorise", "obligations", "build_rows", "train_models", "test_models", "ml_rows", "score",
-           "visual_predictions", "compare_models", "final_forecast"]
-SQL_RECIPES = []          # SQL recipes other than staging (none since the warehouse curates the data)
+RECIPES = ["stage_tables", "obligations", "build_rows", "train_and_test", "champion_challenger", "final_forecast",
+           "archive_forecast"]
 
 
 def code(text):
@@ -39,128 +38,111 @@ def write(name, cells):
 
 write("build_forecast_project.ipynb", [
     md("""
-# Cash-flow forecast: set up the project
+# Digital Cash Management Forecast: set up the project
 
-This notebook sets up the cash-flow forecasting project in this (empty) Dataiku project, the way it runs in
-production. It reads the 4 curated tables the warehouse team builds from the 17 detailed ones (client, monthly
-flows by origin, scheduled payments, monthly balances), through the read-only `EDW_AI` connection (table and
-column names: `python/warehouse.py` in the project library), and builds:
+This notebook sets up the Digital Cash Management Forecast in this Dataiku project (it also gives the project
+that name), the way it runs in production. Everything is stored as CSV files. It reads the 4 curated warehouse
+tables (client, monthly flows by origin, scheduled payments, monthly balances) and the load record: in the
+sandbox, the datasets the notebook `warehouse_simulator.ipynb` wrote in this project; in production, the warehouse
+team's CSV files in the landing folder, read-only through `EDW_LANDING` (names: `python/warehouse.py` in the
+project library). It builds:
 
-- **Raw data**: the 4 curated warehouse tables and the load record, read-only.
-- **Staging**: one SQL recipe per table that gives back the standard column names.
-- **Data prep**: the category rules (an editable dataset), monthly flows by category, obligations, and the model
-  rows.
-- **Training (code)** and **Training (visual)**: the same rows trained two ways (Python recipes with
-  CatBoost; visual ML, tracked by Dataiku), each tested on the last 6 months.
-- **Inference**: the 3-month forecast from either (project variable `model_source`), plus the obligations.
-- Two scenarios: **Monthly forecast** (after each load) and **Retrain and test the models**. Each starts with
-  the load check (`check_latest_load` in `warehouse.py`): it stops the scenario if the latest load is incomplete,
-  and sets the project variable `cutoff_month` that the recipes read.
+- **Raw data**: the 4 curated tables and the load record, read-only.
+- **Staging**: the same tables with the standard column names.
+- **Data prep**: the category mapping (a CSV dataset) applied by visual Join and Group recipes,
+  obligations, model rows.
+- **Training**: each training run is one model with its own **model ID**, tracked in Dataiku's
+  **Experiment Tracking** and deployed as a new **version** of the saved models `forecast_ev`, `forecast_p10`,
+  `forecast_p90`. A champion / challenger test activates the new version if it beats the production model.
+- **Inference**: visual Score recipes with the active version, the 3-month forecast (every row says which model
+  and which load produced it), the forecast archive, and the inference log (one row per run: when, which model,
+  which load, how many clients).
+- Two scenarios: **Nightly batch** and **Retrain, test and promote**. Each starts with the load check
+  (`check_latest_load`): it stops the scenario if the latest load is incomplete, and sets `cutoff_month`.
 
-It then trains and tests the models once and builds the first forecast.
+It then trains, tests and promotes a first model, and runs the first nightly batch.
 
-**How to use it:** create an empty project, import this notebook (Notebooks > New notebook > Import), check the
-settings below, then run all cells (Cell > Run All): about 15 minutes the first time (creating the code env and
-training). It only sets up an empty project: after that, work in the flow and run the scenarios.
-
-In the sandbox, the warehouse tables come from the notebook `warehouse_simulator.ipynb` (run it first).
+**How to use it:** in the project, import this notebook and `warehouse_simulator.ipynb` (Notebooks > New notebook
+> Import). In the sandbox, run the simulator first. Then check the settings below and run all cells (Cell > Run All):
+a few minutes with the small sample data. It can be run again in the same project: what exists is kept (data, the
+category mapping, saved model versions, zones, scenario history), and the recipes' code is updated.
 """),
     code(read("cells/settings.py")),
     md("""
 ## 1. Code environment
 
-The Python recipes need CatBoost. This creates a code env with it, unless it already exists. If you are not
-allowed to create code envs, ask an admin, or set `CODE_ENV` above to an existing env that has CatBoost. The
-visual models use Dataiku's built-in Python.
+The recipes need CatBoost, and MLflow for Dataiku's Experiment Tracking, in an existing code env (`CODE_ENV`
+above). This notebook does not create it: an admin creates it once. This checks it is there with those packages,
+and otherwise stops with the request to send the admin.
 """),
     code(read("cells/code_env.py")),
     md("""
 ## 2. Code
 
-The project library gets two files: `warehouse.py` (the warehouse tables and their column names) and
-`cashflow.py` (categories and their default rules, the inputs the models see, how the code models are trained).
-Each recipe below becomes a Python recipe in the flow.
+The project library gets three files: `warehouse.py` (warehouse table and column names, the load check),
+`cashflow.py` (categories and the default category mapping, the inputs the models see, training and test scores)
+and `tracking.py` (model IDs, Experiment Tracking, saved model versions, promotion). Each recipe
+below becomes a Python recipe in the flow; the visual recipes are created in the next step.
 """),
     code(embedded("WAREHOUSE_CODE", SRC / "warehouse.py")),
     code(embedded("LIBRARY_CODE", SRC / "library_cashflow.py")),
-    code("RECIPES, SQL_RECIPES = {}, {}"),
+    code(embedded("TRACKING_CODE", SRC / "tracking.py")),
+    code("RECIPES = {}"),
     *[code(embedded(f'RECIPES["{r}"]', SRC / "recipes" / f"{r}.py")) for r in RECIPES],
-    *[code(embedded(f'SQL_RECIPES["{r}"]', SRC / "recipes" / f"{r}.sql")) for r in SQL_RECIPES],
     md("""
 ## 3. Build the flow
 
-Links the curated warehouse tables (read-only), creates the editable category rules, the staging recipes, the
-data prep and the code training. The code models' folder is only rebuilt when asked by name, like saved models, so building the
-forecast never retrains by accident.
+Uses the simulated warehouse tables, or links the landing files (read-only), and creates the category
+mapping, the recipes (Python, Join, Group, Score) and their CSV datasets, the folders `experiments` (tracked
+models) and `forecast_archive`, and the three saved models, in 5 zones. Training (folder
+`experiments`), the promotion log and the saved models are only rebuilt when asked by name, so the nightly batch
+never retrains by accident.
 """),
     code(read("cells/create_flow.py")),
     md("""
-## 4. Check the load and prepare the data
+## 4. First run
 
-Runs the load check (the same one that starts each scenario; it sets `cutoff_month`), then the staging and the
-data prep. The visual models need their data to exist before they can
-be trained.
+Checks the load, trains, tests and deploys a model, runs champion / challenger (with no production model yet, the
+first model is promoted, with a warning in promotion_log if its checks fail), then runs the nightly batch: score,
+forecast, archive, log.
 """),
-    code(read("cells/run_prep.py")),
+    code(read("cells/first_run.py")),
     md("""
-## 5. Visual models and scenarios
+## 5. Scenarios
 
-Three visual ML tasks in the Lab (Lab > Visual analyses), trained on `ml_train` and tested on `ml_test`:
+- **Nightly batch**: check the load, forecast with the production model, archive it and log the run.
+- **Retrain, test and promote**: check the load, prepare the training data, train, test and deploy a new model,
+  champion / challenger, activate it if better, then forecast with the production model.
 
-- **EV (visual)**: LightGBM and XGBoost, the better one (lowest RMSE) is deployed.
-- **P10 (visual)** and **P90 (visual)**: LightGBM set to predict the 10th and 90th percentile (a custom
-  algorithm in the Lab), scored with the pinball loss and the share of actual values below the prediction.
-
-Each is deployed to the flow as a saved model, with an Evaluate recipe on the last 6 months (results kept in a
-model evaluation store, so every retraining is tracked) and a Score recipe on the latest cut-off.
-
-Then the two scenarios, with their monthly triggers switched off (switch them on in production):
-
-- **Monthly forecast**: check the latest load (a Python step), then stage, prepare and forecast with the
-  current models.
-- **Retrain and test the models**: retrain both ways, test them on the last 6 months, compare, forecast.
+Their triggers (daily at 06:00 and monthly on the 5th, Riyadh time) are created switched off; switch them on
+in production.
 """),
-    code(read("cells/visual_ml.py")),
+    code(read("cells/scenarios.py")),
     md("""
-## 6. First training and forecast
+## 6. Results
 
-Trains and tests the code models, tests the visual ones, and builds the comparison and the first forecast.
-"""),
-    code(read("cells/run_flow.py")),
-    md("""
-## 7. Results
-
-`model_comparison`: the code and visual models on the same last 6 months (both trained without them).
-`wape` is the EV error as a share of the actual amounts (lower is better); `coverage_p10_p90` should be close
-to 0.8. `test_results` has more detail on the code models (per month ahead, and a simple guess to beat).
-
-`final_forecast`: per client, category and month ahead, P10, EV and P90 in SAR, with the obligations
-included. `NET` is the client's net cash flow. To switch models, set the project variable `model_source` to
-`code` or `visual` and run the scenario Monthly forecast.
+To use another model (for example to roll back), activate its version in the three saved models
+(`forecast_ev`, `forecast_p10`, `forecast_p90`) and run the Nightly batch.
 """),
     code(read("cells/results.py")),
 ])
 
 write("warehouse_simulator.ipynb", [
     md("""
-# Warehouse simulator (sandbox only)
+# Digital Cash Management Forecast: warehouse simulator (sandbox only)
 
-Plays the warehouse team (Informatica) until the real tables exist. Run it in its own project
-(for example `EDW_SIMULATOR`), not in the forecast project.
+Plays the warehouse team (Informatica) until the real files exist. Run it in the same project as the forecast,
+before `build_forecast_project.ipynb`.
 
 It generates sample data for the 17 detailed tables of the data requirements, up to `SIM_END`, and publishes them
 as the warehouse would have them at the end of `AS_OF` (what had happened or was scheduled by then), then builds
 the 4 curated tables from them, as the warehouse team would: client, monthly flows by origin, scheduled payments,
-monthly balances. All in the warehouse's table and column names (`warehouse.py`), into the schema `edw_ai`.
-Each load adds one row per table to `CFF_LOAD_RECORD`, which the forecast project checks before it runs. The
-forecast project reads only the curated tables.
+monthly balances. They are written as CSV datasets of this project, in the warehouse's table and column names
+(`warehouse.py`). Each load adds one row per table to `CFF_LOAD_RECORD`, which the forecast checks before it runs.
+Set `WRITE_DETAILED_TABLES = True` to also write the 17 detailed tables (the forecast does not read them).
 
-To simulate the next monthly load, move `AS_OF` to the next month's end, run all cells again, then run the
-forecast project's scenario **Monthly forecast**.
-
-The first time, it also creates the schema `edw_ai` and two connections on the local PostgreSQL: `EDW_AI_LOADER`
-(the warehouse team's, read and write) and `EDW_AI` (the forecast project's, read-only). In the bank, these
-already exist.
+To simulate the next load, move `AS_OF` to the next month's end, run all cells again, then run the scenario
+**Nightly batch**.
 """),
     code(read("sim_cells/settings.py")),
     code(read("sim_cells/setup.py")),

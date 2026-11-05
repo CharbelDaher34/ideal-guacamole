@@ -1,6 +1,6 @@
 # Plays the warehouse team (Informatica): publishes the sample data as it was known on a date (AS_OF), in the
-# warehouse's table and column names: the 17 detailed tables, and the 4 curated tables built from them (the ones
-# the forecast project reads). Records each load in CFF_LOAD_RECORD.
+# warehouse's table and column names: the 4 curated tables the forecast reads (built from the 17 detailed tables,
+# which can be written too), as CSV datasets of this project. Records each load in CFF_LOAD_RECORD.
 # The sample data is generated once up to SIM_END; publishing "as of" a date keeps what had happened or was
 # scheduled by then, and resets what was only known later (a bill paid after AS_OF is still unpaid, ...).
 import uuid
@@ -13,6 +13,10 @@ def as_of(tables, day):
     """The tables as the warehouse would have them at the end of `day`."""
     d = pd.Timestamp(day)
     t = {name: df.copy() for name, df in tables.items()}
+    for name, df in t.items():          # a table with no rows (few sample clients) still gets its columns
+        if df.empty and name in DETAIL_COLUMNS:
+            t[name] = pd.DataFrame({c: pd.Series(dtype="datetime64[ns]" if c.endswith("_date") else "object")
+                                    for c in DETAIL_COLUMNS[name]})
     later = lambda s: pd.to_datetime(s) > d
 
     c = t["clients"][t["clients"]["joining_date"] <= d].copy()
@@ -88,7 +92,8 @@ def curate(t, day):
     tx = tx[~tx["reversal_flag"].astype(bool) & ~tx["txn_id"].isin(reversed_ids) & ~tx["own_account_flag"].astype(bool)]
     tx = tx.assign(client_no=tx["account_no"].map(client_of), month=month(tx["value_date"]),
                    direction=np.where(tx["debit_credit"] == "C", "IN", "OUT"),
-                   origin_type=tx["origin_type"].fillna(""), txn_type_tag=tx["txn_type_tag"].fillna(""))
+                   origin_type=tx["origin_type"].replace("", np.nan).fillna("NONE"),
+                   txn_type_tag=tx["txn_type_tag"].replace("", np.nan).fillna("NONE"))
     known = (scheduled.assign(known_month=month(scheduled["known_date"]))
              .groupby(["origin_type", "origin_ref"], as_index=False)["known_month"].min())
     tx = tx.merge(known, on=["origin_type", "origin_ref"], how="left")
@@ -170,34 +175,39 @@ def to_warehouse(df, columns, load_id, loaded_at):
     return out.reset_index(drop=True)
 
 
-def load_warehouse(tables, day, connection, schema):
-    """Full load of every warehouse table as of `day` (detailed, then curated), then one row per table in the
-    load record."""
+def load_warehouse(tables, day, connection, detailed=False):
+    """Full load of the warehouse tables as of `day` (the curated ones, and the detailed ones if asked), then one
+    row per table in the load record."""
     load_id, loaded_at = f"L{pd.Timestamp.now():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:4]}", pd.Timestamp.now().floor("s")
     published = as_of(tables, day)
     curated = curate(published, day)
     existing = {d["name"] for d in project.list_datasets()}
     record = []
-    for data, names, columns in ((published, DETAIL_TABLES, DETAIL_COLUMNS), (curated, TABLES, COLUMNS)):
+    loads = [(curated, TABLES, COLUMNS)] + ([(published, DETAIL_TABLES, DETAIL_COLUMNS)] if detailed else [])
+    for data, names, columns in loads:
         for table, (warehouse_table, source) in names.items():
             rows = to_warehouse(data[table], columns[table], load_id, loaded_at)
-            write_table(warehouse_table, rows, connection, schema, existing)
+            write_table(warehouse_table, rows, connection, existing)
             record.append({"LOAD_ID": load_id, "LOAD_DTTS": loaded_at, "AS_OF_DT": pd.Timestamp(day),
                            "SRC_TBL_NM": source, "TRGT_TBL_NM": warehouse_table, "ROW_CNT": len(rows),
                            "LOAD_STA_CD": "SUCCESS"})
             print(f"{warehouse_table:26s} {len(rows):>9,} rows")
     previous = dataiku.Dataset(LOAD_RECORD).get_dataframe() if LOAD_RECORD in existing else None
-    write_table(LOAD_RECORD, pd.concat([previous, pd.DataFrame(record)], ignore_index=True), connection, schema,
-                existing)
+    write_table(LOAD_RECORD, pd.concat([previous, pd.DataFrame(record)], ignore_index=True), connection, existing)
     return load_id
 
 
-def write_table(name, df, connection, schema, existing):
-    """Write a warehouse table (a dataset of this project stored as <schema>.<name>)."""
+CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
+       "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
+
+
+def write_table(name, df, connection, existing):
+    """Write a warehouse table: a CSV dataset of this project."""
     if name not in existing:
         dataset = project.new_managed_dataset(name).with_store_into(connection).create()
         settings = dataset.get_settings()
-        settings.get_raw()["params"].update(table=name, schema=schema)
+        settings.get_raw()["formatType"] = "csv"
+        settings.get_raw()["formatParams"].update(CSV)
         settings.save()
         existing.add(name)
-    dataiku.Dataset(name).write_with_schema(df, drop_and_create=True)
+    dataiku.Dataset(name).write_with_schema(df)

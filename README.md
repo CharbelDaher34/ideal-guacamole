@@ -1,14 +1,18 @@
 # Dataiku DSS — Free Edition (sandbox)
 
-The cash-flow forecast project is built by one notebook: see [`forecast/`](forecast/README.md).
+The cash-flow forecast project (CSV files, no database) is built by a notebook: see [`forecast/`](forecast/README.md).
 
 Dataiku DSS 15.2.0 running in Docker (rootless) for testing development work.
 
 - Image: `dataiku/dss:15.2.0`
 - URL (server-local only): http://127.0.0.1:10000
 - Data dir (projects, code envs, config, logs): `./dss_data` → `/home/dataiku/dss` in the container
+- Code env `cashflow_forecast` (CatBoost, MLflow): created by the forecast notebook if missing
+  (**Administration → Code Envs**).
 
 ## PostgreSQL
+
+Not used by the cash-flow forecast (it stores CSV files); kept for other work.
 
 A `postgres:17` container (`dataiku-postgres`) runs next to DSS, with data in `./pg_data`.
 It is **not exposed to the server** — only reachable on the Docker network as `postgres:5432`.
@@ -17,7 +21,6 @@ It is **not exposed to the server** — only reachable on the Docker network as 
   On a fresh clone: `cp .env.example .env`, set a password, `chmod 600 .env`
 - DSS connection: `postgres_local` (pre-created in `dss_data/config/connections.json`).
   After logging in, check it under **Administration → Connections → postgres_local → Test**.
-- Code env `cashflow_forecast` (CatBoost): created by the forecast notebook if missing (**Administration → Code Envs**).
 - psql shell: `docker exec -it dataiku-postgres psql -U dataiku -d dataiku`
 
 ## Start / stop

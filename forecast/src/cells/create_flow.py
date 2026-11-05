@@ -1,103 +1,218 @@
+import json
 import time
 
 import pandas as pd
 
+# Safe to run again in the same project: what already exists is kept (datasets and their data, the category
+# mapping, folders, saved models and their versions, zones), and the code of the Python recipes and the library
+# is updated.
 flow = project.get_flow()
-if project.list_recipes():
-    raise RuntimeError("This project already has a flow. This notebook sets up an empty project only; "
-                       "change the flow in Dataiku, or create a new project to set it up again.")
 lib = {}
-exec(LIBRARY_CODE, lib)     # the shared settings (FEATURES, ...) are needed here too, for the visual models
-exec(WAREHOUSE_CODE, lib)   # the curated warehouse tables (TABLES, COLUMNS, staging_sql)
-RAW = [warehouse_table for warehouse_table, _ in lib["TABLES"].values()] + [lib["LOAD_RECORD"]]
+for code in (LIBRARY_CODE, WAREHOUSE_CODE, TRACKING_CODE):   # the shared code is needed here too
+    exec(code, lib)
+RAW = [warehouse_table for warehouse_table, _ in lib["TABLES"].values()]
+CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
+       "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
 
-# recipe: (inputs, outputs, flow zone); "models" is a managed folder, everything else a dataset
+# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file; experiments and forecast_archive are
+# folders. The visual recipes (Join, Group, Score) are created further down.
 FLOW = {
-    "categorise": (["monthly_flows_by_origin", "category_rules"], ["monthly_flows"], "Data prep"),
-    "obligations": (["scheduled_payments", "category_rules"], ["monthly_obligations"], "Data prep"),
+    "stage_tables": (RAW, list(lib["TABLES"]), "Staging"),
+    "obligations": (["scheduled_with_category"], ["monthly_obligations"], "Data prep"),
     "build_rows": (["monthly_flows", "monthly_obligations", "clients", "monthly_balances"],
                    ["training_rows", "scoring_rows"], "Data prep"),
-    "train_models": (["training_rows"], ["models"], "Training (code)"),
-    "test_models": (["training_rows", "models"], ["test_predictions", "test_results"],
-                    "Training (code)"),
-    "ml_rows": (["training_rows", "scoring_rows"], ["ml_train", "ml_test", "ml_scoring"],
-                "Training (visual)"),
-    "score": (["scoring_rows", "models"], ["predictions"], "Inference"),
+    "train_and_test": (["training_rows"], ["experiments", "test_results", "model_reference"], "Training"),
+    "champion_challenger": (["training_rows", "experiments"], ["promotion_log"], "Training"),
+    "final_forecast": (["scored_ev", "scored_p10", "scored_p90", "monthly_obligations", "promotion_log"],
+                       ["final_forecast"], "Inference"),
+    "archive_forecast": (["final_forecast"], ["forecast_archive", "inference_log"], "Inference"),
 }
-# created after the visual models exist (they read their Evaluate and Score outputs)
-FLOW_AFTER_VISUAL = {
-    "visual_predictions": (["scored_ev_visual", "scored_p10_visual", "scored_p90_visual"], ["predictions_visual"],
-                           "Inference"),
-    "compare_models": (["test_predictions", "eval_ev_visual_scored", "eval_p10_visual_scored",
-                        "eval_p90_visual_scored"], ["model_comparison"], "Inference"),
-    "final_forecast": (["predictions", "predictions_visual", "monthly_obligations"], ["final_forecast"],
-                       "Inference"),
-}
+FOLDERS = ["experiments", "forecast_archive"]
+APPENDED = ["promotion_log", "inference_log"]       # logs: each run adds a row
+BUILT_BY_NAME = ["experiments", "promotion_log"]    # never rebuilt by building what comes after them
 
-variables = project.get_variables()
-variables["standard"]["model_source"] = MODEL_SOURCE
-project.set_variables(variables)
+try:                                                # needs the project's admin right
+    metadata = project.get_metadata()
+    metadata["label"] = PROJECT_NAME
+    project.set_metadata(metadata)
+except Exception as e:
+    if not any(w in str(e).lower() for w in ("unauthorized", "forbidden", "permission", "not allowed")):
+        raise
+    print(f"Warning: could not name the project {PROJECT_NAME!r} (no admin right on the project): name it by hand")
 
 library = project.get_library()
 python_folder = library.get_folder("python") or library.add_folder("python")
-for file_name, code in (("cashflow.py", LIBRARY_CODE), ("warehouse.py", WAREHOUSE_CODE)):
+for file_name, code in (("cashflow.py", LIBRARY_CODE), ("warehouse.py", WAREHOUSE_CODE),
+                        ("tracking.py", TRACKING_CODE)):
     (python_folder.get_file(file_name) or python_folder.add_file(file_name)).write(code)
 
 
+# what the project already has (read once, kept up to date below)
+datasets = {d["name"] for d in project.list_datasets()}
+recipes = {r["name"] for r in project.list_recipes()}
+
+
 def new_dataset(name):
-    """Managed dataset of the project on CONNECTION; on a SQL connection its table is <PROJECTKEY>_<name>."""
+    """Managed dataset of the project: a CSV file (comma-separated, with a header row) on CONNECTION. Kept if it
+    exists."""
+    if name in datasets:
+        return name
+    datasets.add(name)
     dataset = project.new_managed_dataset(name).with_store_into(CONNECTION).create()
     settings = dataset.get_settings()
-    if "table" in settings.get_raw()["params"]:
-        settings.get_raw()["params"]["table"] = "${projectKey}_" + name
-        settings.save()
-
-
-# the curated warehouse tables: read-only, through the EDW_AI connection
-for name in RAW:
-    dataset = project.create_dataset(name, "PostgreSQL", params={
-        "connection": EDW_CONNECTION, "mode": "table", "schema": EDW_SCHEMA, "table": name})
-    dataset.autodetect_settings().save()
-print(f"{len(RAW)} warehouse tables linked (read-only, {EDW_CONNECTION})")
-
-# category rules: an editable dataset (Flow > category_rules > Edit), filled with the default rules
-project.create_dataset("category_rules", "Inline", params={}, formatType="", formatParams={})
-dataiku.Dataset("category_rules").write_with_schema(pd.DataFrame(
-    [(n, *rule) for n, rule in enumerate(lib["DEFAULT_CATEGORY_RULES"], 1)],
-    columns=["rule_order", "origin_type", "txn_type_tag", "direction", "category"]))
-
-models = project.create_managed_folder("models", connection_name=FOLDER_CONNECTION)
-folder_settings = models.get_settings()
-folder_settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"   # retrained only when asked
-folder_settings.save()
-ref = lambda name: models.id if name == "models" else name
-existing = {d["name"] for d in project.list_datasets()}
-
-
-def recipe(kind, name, inputs, outputs, code):
-    """A Python or SQL recipe (SQL runs inside the database)."""
-    for out in outputs:
-        if out != "models" and out not in existing:
-            new_dataset(out)
-            existing.add(out)
-    builder = project.new_recipe("python" if kind == "python" else "sql_query", name)
-    for i in inputs:
-        builder.with_input(ref(i))
-    for o in outputs:
-        builder.with_output(ref(o))
-    created = builder.create()
-    settings = created.get_settings()
-    settings.set_payload(code)
-    if kind == "python":
-        settings.set_code_env(code_env=CODE_ENV)
+    settings.get_raw()["formatType"] = "csv"
+    settings.get_raw()["formatParams"].update(CSV)
+    if name in BUILT_BY_NAME:
+        settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
     settings.save()
-    if kind == "sql" and all(i in RAW for i in inputs):    # other SQL recipes get their schema on their first run
-        created.compute_schema_updates().apply()
-    print(f"{kind} recipe", name, "->", ", ".join(outputs))
+    return name
 
 
-# staging: one SQL recipe per warehouse table, warehouse names back to the standard names
-for table, (warehouse_table, _) in lib["TABLES"].items():
-    recipe("sql", f"stage_{table}", [warehouse_table], [table], lib["staging_sql"](table, EDW_SCHEMA))
+# the curated warehouse tables and the load record: already here if the warehouse simulator wrote them (sandbox),
+# otherwise CSV files in the warehouse team's landing folder, read-only (production)
+simulated = [name for name in RAW + [lib["LOAD_RECORD"]] if name in datasets]
+for name in RAW + [lib["LOAD_RECORD"]]:
+    if name not in datasets:
+        datasets.add(name)
+        dataset = project.create_dataset(name, "Filesystem", params={"connection": LANDING_CONNECTION,
+                                                                     "path": "/" + name},
+                                          formatType="csv", formatParams=CSV)
+        dataset.autodetect_settings().save()
+print(f"{len(simulated)} warehouse tables already in the project, {len(RAW) + 1 - len(simulated)} linked from "
+      f"{LANDING_CONNECTION}")
+
+# category mapping: a CSV dataset with the default mapping, written only when it is created (a mapping already
+# here, maybe edited, is kept). To change it: a notebook reads it, changes rows and writes it back.
+if "category_mapping" not in datasets:
+    dataiku.Dataset(new_dataset("category_mapping")).write_with_schema(pd.DataFrame(
+        lib["DEFAULT_CATEGORY_MAPPING"],
+        columns=["map_origin_type", "map_txn_type_tag", "map_direction", "mapped_category"]))
+    print("category_mapping: default mapping written")
+
+existing_folders = {f["name"]: f["id"] for f in project.list_managed_folders()}
+folders = {}
+for name in FOLDERS:
+    if name in existing_folders:
+        folders[name] = project.get_managed_folder(existing_folders[name])
+        continue
+    folders[name] = project.create_managed_folder(name, connection_name=FOLDER_CONNECTION)
+    if name in BUILT_BY_NAME:
+        folder_settings = folders[name].get_settings()
+        folder_settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
+        folder_settings.save()
+ref = lambda name: folders[name].id if name in folders else name
+existing_models = {m["name"]: m["id"] for m in project.list_saved_models()}
+saved_models = {name: project.get_saved_model(existing_models[name]) if name in existing_models
+                else project.create_mlflow_pyfunc_model(name, "REGRESSION") for name in lib["SAVED_MODELS"].values()}
+
+# visual recipes: categories by Join with category_mapping (+ a formula for anything not mapped), then Group
+NO_FILTER = {"enabled": False, "distinct": False}
+
+
+def join_mapping(name, source, output):
+    if name in recipes:
+        recipe = project.get_recipe(name)
+    else:
+        builder = project.new_recipe("join", name)
+        builder.with_input(source)
+        builder.with_input("category_mapping")
+        builder.with_existing_output(new_dataset(output))
+        recipe = builder.create()
+        recipes.add(name)
+    settings = recipe.get_settings()
+    if not settings.get_recipe_inputs():          # the Join creator does not always register its inputs
+        settings.add_input("main", source)
+        settings.add_input("main", "category_mapping")
+    settings.set_payload(json.dumps({
+        "virtualInputs": [{"index": i, "preFilter": NO_FILTER, "computedColumns": [],
+                           "outputColumnsSelectionMode": "AUTO_NON_CONFLICTING"} for i in (0, 1)],
+        "joins": [{"table1": 0, "table2": 1, "type": "LEFT", "conditionsMode": "AND", "outerJoinOnTheLeft": True,
+                   "on": [{"column1": {"table": 0, "name": c}, "column2": {"table": 1, "name": "map_" + c},
+                           "type": "EQ"} for c in ("origin_type", "txn_type_tag", "direction")]}],
+        "selectedColumns": [], "resolvedSelectedColumns": [], "postFilter": NO_FILTER,
+        "computedColumns": [{"name": "category", "type": "string", "mode": "GREL", "expr": lib["CATEGORY_FORMULA"]}],
+        "enableAutoCastInJoinConditions": False}))
+    settings.save()
+    print("join recipe", name, "->", output)
+
+
+join_mapping("join_flows_category", "monthly_flows_by_origin", "flows_with_category")
+join_mapping("join_scheduled_category", "scheduled_payments", "scheduled_with_category")
+if "group_monthly_flows" in recipes:
+    group = project.get_recipe("group_monthly_flows").get_settings()
+else:
+    builder = project.new_recipe("grouping", "group_monthly_flows")
+    builder.with_input("flows_with_category")
+    builder.with_existing_output(new_dataset("monthly_flows"))
+    group = builder.create().get_settings()
+    recipes.add("group_monthly_flows")
+summed = ("amount", "known_1", "known_2", "known_3", "postings")
+group.set_payload(json.dumps({
+    "keys": [{"column": k} for k in ("client_no", "month", "category", "direction")],
+    "values": [{"column": c, "sum": True} for c in summed], "globalCount": False,
+    "preFilter": NO_FILTER, "postFilter": NO_FILTER, "computedColumns": [],
+    "outputColumnNameOverrides": {f"{c}_sum": c for c in summed}, "enlargeYourBits": True}))
+group.save()
+print("group recipe group_monthly_flows -> monthly_flows")
+
 for name, (inputs, outputs, _) in FLOW.items():
-    recipe("sql" if name in SQL_RECIPES else "python", name, inputs, outputs, SQL_RECIPES.get(name) or RECIPES[name])
+    for item in inputs + outputs:      # inputs made by recipes created later (Score) get their dataset now
+        if item not in folders:
+            new_dataset(item)
+    if name in recipes:                # already there: only its code and code env are updated
+        recipe = project.get_recipe(name)
+    else:
+        builder = project.new_recipe("python", name)
+        for i in inputs:
+            builder.with_input(ref(i))
+        for o in outputs:
+            builder.with_output(ref(o), append=o in APPENDED)
+        recipe = builder.create()
+        recipes.add(name)
+    settings = recipe.get_settings()
+    settings.set_payload(RECIPES[name])
+    settings.set_code_env(code_env=CODE_ENV)
+    settings.save()
+    print("python recipe", name, "->", ", ".join(outputs))
+
+# Score recipes: the active version of each saved model
+for short, name in lib["SAVED_MODELS"].items():
+    if f"score_{short}" in recipes:
+        continue
+    builder = project.new_recipe("prediction_scoring", f"score_{short}")
+    builder.with_input_model(saved_models[name].id)
+    builder.with_input("scoring_rows")
+    builder.with_existing_output(new_dataset(f"scored_{short}"))
+    builder.create().rename(f"score_{short}")        # Dataiku names a Score recipe after its input
+    print("score recipe", f"score_{short}", "->", f"scored_{short}")
+
+ZONES = {"Raw data": RAW + [lib["LOAD_RECORD"]], "Staging": list(lib["TABLES"]),
+         "Data prep": ["category_mapping", "flows_with_category", "monthly_flows", "scheduled_with_category"],
+         "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"]}
+for _, outputs, zone_name in FLOW.values():
+    ZONES[zone_name] += [o for o in outputs if o not in ZONES[zone_name]]
+# the raw data goes in Dataiku's Default zone, renamed (so there is no empty zone). It exists once another zone does.
+existing_zones = {z.name: z for z in flow.list_zones()}
+zones = {z: existing_zones.get(z) or flow.create_zone(z) for z in ZONES if z != "Raw data"}
+zones["Raw data"] = existing_zones.get("Raw data") or flow.get_default_zone()
+if zones["Raw data"].name != "Raw data":
+    zone_settings = zones["Raw data"].get_settings()
+    zone_settings.name = "Raw data"
+    zone_settings.save()
+
+
+def safe_add(zone, item):
+    """Put an item in a zone (already there: nothing to do)."""
+    try:
+        zone.add_item(item)
+    except Exception as e:
+        if "already" not in str(e).lower():
+            raise
+
+
+for zone_name, items in ZONES.items():
+    for item in items:
+        safe_add(zones[zone_name], folders[item] if item in folders else project.get_dataset(item))
+for model in saved_models.values():       # next to the Score recipes that use them
+    safe_add(zones["Inference"], model)
+print("Flow ready:", ", ".join(zones))

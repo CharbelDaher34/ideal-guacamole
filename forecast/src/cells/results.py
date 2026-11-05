@@ -1,11 +1,9 @@
-comparison = dataiku.Dataset("model_comparison").get_dataframe()
-print("Code vs visual models on the last 6 months (wape: lower is better; coverage: close to 0.8 is best):")
-display(comparison[["category_name", "wape_code", "wape_visual", "coverage_p10_p90_code",
-                    "coverage_p10_p90_visual", "better_ev"]])
-
-forecast = dataiku.Dataset("final_forecast").get_dataframe()
-example = forecast.loc[forecast["status"] == "OK", "client_no"].iloc[0]
-print(f"Forecast for client {example} (SAR, models: {MODEL_SOURCE}):")
-display(forecast[forecast["client_no"] == example]
-        .pivot_table(index="category_name", columns="months_ahead", values=["p10", "ev", "p90"], sort=False)
-        .round(0))
+print("Production model (active version of forecast_ev, forecast_p10, forecast_p90):", lib["production_model_id"]())
+print("Promotion log:")
+display(dataiku.Dataset("promotion_log").get_dataframe())
+results = dataiku.Dataset("test_results").get_dataframe()
+print("Test on the last 6 months (all months ahead together):")
+display(results[results["months_ahead"].astype(str) == "ALL"][
+    ["category_name", "wape_model", "wape_baseline", "coverage_p10_p90", "below_p10", "above_p90"]])
+print("Inference log (one row per forecast run):")
+display(dataiku.Dataset("inference_log").get_dataframe())
