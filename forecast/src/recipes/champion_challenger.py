@@ -13,7 +13,6 @@ from models import forecast, holdout, scores
 from tracking import decide, latest_model_id, load_backtest, production_model_id, runs
 
 test = holdout(read_dataset("training_rows"))
-test = test[test["category"] != "NET"]
 candidate = latest_model_id()
 production = production_model_id()
 tracked = runs()

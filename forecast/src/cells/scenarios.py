@@ -1,13 +1,13 @@
 # Production runs: two independent scenarios. Nightly batch (inference) forecasts with the active version of the saved
 # models; Retrain, test and promote (training) adds a version and activates it if it is better, and never forecasts.
-# Each starts with the load check (a Python step): it stops the scenario if the latest warehouse load is incomplete,
-# and sets the cut-off month. The tracked models (folder experiments) and the promotion log are only rebuilt when
-# built by name, so the nightly batch never retrains by accident.
+# Each starts by setting the cut-off month (a Python step); the staging recipe stops if the postings do not reach
+# it. The tracked models (folder experiments) and the promotion log are only rebuilt when built by name, so the
+# nightly batch never retrains by accident.
 def step(n, label, what, mode=None):
     common = {"id": f"step_{n}", "name": label, "enabled": True, "runConditionType": "RUN_IF_STATUS_MATCH",
               "runConditionStatuses": ["SUCCESS", "WARNING"]}
     if isinstance(what, str):           # a Python step: library function to call
-        module = "warehouse" if what == "check_latest_load" else "tracking"
+        module = "warehouse" if what == "set_cutoff" else "tracking"
         return {**common, "type": "custom_python", "params": {
             "script": f"from {module} import {what}\n\n{what}()\n", "envSelection": {"envMode": "INHERIT"},
             "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
@@ -18,7 +18,7 @@ def step(n, label, what, mode=None):
 
 
 NIGHTLY = [
-    ("Check the latest warehouse load", "check_latest_load"),
+    ("Set the cut-off month", "set_cutoff"),
     ("Forecast with the production model, archive and log it", ["inference_log"], "RECURSIVE_FORCED_BUILD"),
 ]
 SCENARIOS = {
@@ -28,7 +28,7 @@ SCENARIOS = {
         "Train and test a new model with the forecaster the project variable forecaster names (tracked in Experiment "
         "Tracking, deployed as a saved model version), and activate it if it beats the production model. It does not "
         "forecast: the Nightly batch uses the active version", "monthly", [
-            ("Check the latest warehouse load", "check_latest_load"),
+            ("Set the cut-off month", "set_cutoff"),
             ("Prepare the training data", ["training_rows"], "RECURSIVE_FORCED_BUILD"),
             ("Train, test and deploy a new model", ["experiments"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Champion / challenger", ["promotion_log"], "NON_RECURSIVE_FORCED_BUILD"),

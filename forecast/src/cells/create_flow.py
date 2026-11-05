@@ -5,8 +5,7 @@ import types
 
 import pandas as pd
 
-# Safe to run again in the same project: what already exists is kept (datasets and their data, the category
-# mapping, folders, saved models and their versions, zones, the project variables forecaster and lab_forecaster,
+# Safe to run again in the same project: what already exists is kept (datasets and their data, folders, saved models and their versions, zones, the project variables forecaster and lab_forecaster,
 # forecasters.py), and the code of the Python recipes and of the rest of the library is updated.
 flow = project.get_flow()
 
@@ -29,18 +28,17 @@ CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', 
 # Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file; experiments, forecast_archive and
 # lab_experiments are folders. The visual recipes (Join, Group, Score) are created further down.
 # Each zone has an owner, and the zones only meet through three interfaces:
-#   1. the model rows (cashflow.model_rows): data prep -> training_rows (Training) and scoring_rows (Inference)
+#   1. the model rows (cashflow.model_rows): staging -> training_rows (Training) and scoring_rows (Inference)
 #   2. the forecaster (models.py): lab -> training. The project variable forecaster names the one Retrain trains;
 #      the Lab (try_forecaster, and the notebook forecast_lab) compares one with the production model, untouched.
 #   3. the saved models' active version: training -> inference. Inference reads nothing else from training.
 FLOW = {
     "stage_tables": (RAW, warehouse.STAGED, "Staging"),
-    "obligations": (["scheduled_with_category"], ["monthly_obligations"], "Data prep"),
-    "build_training_rows": (["monthly_flows", "monthly_obligations", "clients"], ["training_rows"], "Training"),
+    "build_training_rows": (["monthly_flows", "clients"], ["training_rows"], "Training"),
     "train_and_test": (["training_rows"], ["experiments", "test_results", "model_reference"], "Training"),
     "champion_challenger": (["training_rows", "experiments"], ["promotion_log"], "Training"),
-    "build_scoring_rows": (["monthly_flows", "monthly_obligations", "clients"], ["scoring_rows"], "Inference"),
-    "final_forecast": (["scored_ev", "scored_p10", "scored_p90", "monthly_obligations"], ["final_forecast"],
+    "build_scoring_rows": (["monthly_flows", "clients"], ["scoring_rows"], "Inference"),
+    "final_forecast": (["scored_ev", "scored_p10", "scored_p90"], ["final_forecast"],
                        "Inference"),
     "archive_forecast": (["final_forecast"], ["forecast_archive", "inference_log"], "Inference"),
     "try_forecaster": (["training_rows", "experiments"], ["lab_experiments", "lab_results"], "Lab"),
@@ -101,39 +99,30 @@ def new_dataset(name):
     return name
 
 
-# the warehouse tables and the load record: already here if the warehouse simulator wrote them (sandbox, CSV),
-# otherwise read-only from the warehouse (production): tables of WAREHOUSE_SQL_SCHEMA through the database
-# connection WAREHOUSE_SQL_CONNECTION, or CSV files in the landing folder (LANDING_CONNECTION)
-simulated = [name for name in RAW + [warehouse.LOAD_RECORD] if name in datasets]
+# the 2 warehouse tables: already here if the warehouse simulator wrote them (sandbox, CSV), otherwise read-only from
+# the warehouse as they are (production): tables of WAREHOUSE_SQL_SCHEMA through the database connection
+# WAREHOUSE_SQL_CONNECTION, or CSV files in the landing folder (LANDING_CONNECTION). Nothing is created there.
+simulated = [name for name in RAW if name in datasets]
 source = WAREHOUSE_SQL_CONNECTION or LANDING_CONNECTION
-if WAREHOUSE_SQL_CONNECTION and len(simulated) < len(RAW) + 1:
+if WAREHOUSE_SQL_CONNECTION and len(simulated) < len(RAW):
     try:
         database = client.get_connection(WAREHOUSE_SQL_CONNECTION).get_info().get_type()   # Oracle, Teradata, ...
     except Exception as e:
         raise RuntimeError(f"Cannot use the connection {WAREHOUSE_SQL_CONNECTION!r} ({e}). Ask a Dataiku admin for a "
                            "read-only database connection to the warehouse, usable by your group, or check its "
                            "name in WAREHOUSE_SQL_CONNECTION.") from None
-for name in RAW + [warehouse.LOAD_RECORD]:
+for name in RAW:
     if name in datasets:
         continue
     datasets.add(name)
     if WAREHOUSE_SQL_CONNECTION:
-        schema = warehouse.STATEMENT_SCHEMA if name == warehouse.TABLES["transactions"][0] else WAREHOUSE_SQL_SCHEMA
-        project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name, schema)
+        project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name, WAREHOUSE_SQL_SCHEMA)
     else:
         dataset = project.create_dataset(name, "Filesystem", params={"connection": LANDING_CONNECTION,
                                                                      "path": "/" + name},
                                           formatType="csv", formatParams=CSV)
         dataset.autodetect_settings().save()
-print(f"{len(simulated)} warehouse tables already in the project, {len(RAW) + 1 - len(simulated)} read from {source}")
-
-# category mapping: a CSV dataset with the default mapping, written only when it is created (a mapping already
-# here, maybe edited, is kept). To change it: a notebook reads it, changes rows and writes it back.
-if "category_mapping" not in datasets:
-    dataiku.Dataset(new_dataset("category_mapping")).write_with_schema(pd.DataFrame(
-        cashflow.DEFAULT_CATEGORY_MAPPING,
-        columns=["map_origin_type", "map_txn_type_tag", "map_direction", "mapped_category"]))
-    print("category_mapping: default mapping written")
+print(f"{len(simulated)} warehouse tables already in the project, {len(RAW) - len(simulated)} read from {source}")
 
 existing_folders = {f["name"]: f["id"] for f in project.list_managed_folders()}
 folders = {}
@@ -150,56 +139,6 @@ ref = lambda name: folders[name].id if name in folders else name
 existing_models = {m["name"]: m["id"] for m in project.list_saved_models()}
 saved_models = {name: project.get_saved_model(existing_models[name]) if name in existing_models
                 else project.create_mlflow_pyfunc_model(name, "REGRESSION") for name in cashflow.SAVED_MODELS.values()}
-
-# visual recipes: categories by Join with category_mapping (+ a formula for anything not mapped), then Group
-NO_FILTER = {"enabled": False, "distinct": False}
-
-
-def join_mapping(name, source, output):
-    if name in recipes:
-        recipe = project.get_recipe(name)
-    else:
-        builder = project.new_recipe("join", name)
-        builder.with_input(source)
-        builder.with_input("category_mapping")
-        builder.with_existing_output(new_dataset(output))
-        recipe = builder.create()
-        recipes.add(name)
-    settings = recipe.get_settings()
-    if not settings.get_recipe_inputs():          # the Join creator does not always register its inputs
-        settings.add_input("main", source)
-        settings.add_input("main", "category_mapping")
-    settings.set_payload(json.dumps({
-        "virtualInputs": [{"index": i, "preFilter": NO_FILTER, "computedColumns": [],
-                           "outputColumnsSelectionMode": "AUTO_NON_CONFLICTING"} for i in (0, 1)],
-        "joins": [{"table1": 0, "table2": 1, "type": "LEFT", "conditionsMode": "AND", "outerJoinOnTheLeft": True,
-                   "on": [{"column1": {"table": 0, "name": c}, "column2": {"table": 1, "name": "map_" + c},
-                           "type": "EQ"} for c in ("origin_type", "txn_type_tag", "direction")]}],
-        "selectedColumns": [], "resolvedSelectedColumns": [], "postFilter": NO_FILTER,
-        "computedColumns": [{"name": "category", "type": "string", "mode": "GREL", "expr": cashflow.CATEGORY_FORMULA}],
-        "enableAutoCastInJoinConditions": False}))
-    settings.save()
-    print("join recipe", name, "->", output)
-
-
-join_mapping("join_flows_category", "monthly_flows_by_origin", "flows_with_category")
-join_mapping("join_scheduled_category", "scheduled_payments", "scheduled_with_category")
-if "group_monthly_flows" in recipes:
-    group = project.get_recipe("group_monthly_flows").get_settings()
-else:
-    builder = project.new_recipe("grouping", "group_monthly_flows")
-    builder.with_input("flows_with_category")
-    builder.with_existing_output(new_dataset("monthly_flows"))
-    group = builder.create().get_settings()
-    recipes.add("group_monthly_flows")
-summed = ("amount", "postings")
-group.set_payload(json.dumps({
-    "keys": [{"column": k} for k in ("client_no", "month", "category", "direction")],
-    "values": [{"column": c, "sum": True} for c in summed], "globalCount": False,
-    "preFilter": NO_FILTER, "postFilter": NO_FILTER, "computedColumns": [],
-    "outputColumnNameOverrides": {f"{c}_sum": c for c in summed}, "enlargeYourBits": True}))
-group.save()
-print("group recipe group_monthly_flows -> monthly_flows")
 
 for name, (inputs, outputs, _) in FLOW.items():
     for item in inputs + outputs:      # inputs made by recipes created later (Score) get their dataset now
@@ -232,9 +171,7 @@ for short, name in cashflow.SAVED_MODELS.items():
     builder.create().rename(f"score_{short}")        # Dataiku names a Score recipe after its input
     print("score recipe", f"score_{short}", "->", f"scored_{short}")
 
-ZONES = {"Raw data": RAW + [warehouse.LOAD_RECORD], "Staging": list(warehouse.STAGED),
-         "Data prep": ["category_mapping", "flows_with_category", "monthly_flows", "scheduled_with_category"],
-         "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"], "Lab": []}
+ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"], "Lab": []}
 for _, outputs, zone_name in FLOW.values():
     ZONES[zone_name] += [o for o in outputs if o not in ZONES[zone_name]]
 # the raw data goes in Dataiku's Default zone, renamed (so there is no empty zone). It exists once another zone does.

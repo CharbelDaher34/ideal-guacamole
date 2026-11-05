@@ -1,6 +1,3 @@
 tables = generate(n_clients=N_CLIENTS, last_month=SIM_END, seed=SEED)
-load_id = load_warehouse(tables, AS_OF, CONNECTION)
-print(f"Load {load_id} done: warehouse as of {AS_OF}")
-display(dataiku.Dataset(LOAD_RECORD).get_dataframe().groupby(["LOAD_ID", "AS_OF_DT"], as_index=False)
-        .agg(tables=("TRGT_TBL_NM", "count"), rows=("ROW_CNT", "sum"), loaded_at=("LOAD_DTTS", "max"))
-        .sort_values("loaded_at"))
+cutoff = load_warehouse(tables, AS_OF, CONNECTION)
+print(f"Warehouse as of {AS_OF}: cut-off month {cutoff} (project variable cutoff_override)")

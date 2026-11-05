@@ -76,84 +76,59 @@ svg text { font-family: var(--body); }
 <header>
   <div class="eyebrow">Cash-flow forecasting · How it works</div>
   <h1>Digital Cash Management Forecast</h1>
-  <p class="lead">For every business client, we forecast money in and money out for each of the next 3 months, by category, as a low value (P10), an expected value (EV) and a high value (P90). Two models predict the part nobody has scheduled. Payments already scheduled, called obligations, are added on top.</p>
+  <p class="lead">For every business client, we forecast the net cash flow (money in minus money out) for each of the next 3 months, as a low value (P10), an expected value (EV) and a high value (P90). Two models predict the part nobody has scheduled.</p>
   <div class="meta">4 November 2026 · Draft for the squad and the tech lead</div>
 </header>
 
 <section>
   <h2><span class="n">1</span>The whole journey</h2>
-  <p>Raw tables become monthly totals, obligations are taken out, the two models learn the rest, and obligations are added back at the end.</p>
+  <p>Daily postings become each client's money in, money out and net cash flow per month, and the two models learn the net cash flow from each client's history.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart LR
-  A[Statement entries: EDW.FCT_STATEMENT_ENTRY] --> B[A category for each T24 module and transaction type]
-  B --> C[Monthly totals per client, category, in or out]
-  C --> D[Take out obligations]
-  D --> E[Training rows: cut-off month + 3 months ahead]
+  A[Statement entries: EDW.FCT_STATEMENT_ENTRY] --> C[Monthly money in and out per client: net cash flow]
+  C --> E[Training rows: cut-off month + 3 months ahead]
   E --> F[EV model]
   E --> G[P10 / P90 model]
-  F --> H[Add obligations back]
-  G --> H
-  H --> I[Final forecast + client total]
-  S[Scheduled payments: financing, deposits, standing orders] --> O[Obligations per month]
-  O --> D
-  O -. shown to models as a hint .-> E
-  O --> H
+  F --> I[Final forecast + client total]
+  G --> I
 </pre>
   </div>
-  <p class="caption">Obligations play three roles: they are removed from what the models must predict, shown to the models as a hint, and added back to the final numbers.</p>
+  <p class="caption">No schedule of future payments is used: the warehouse tables give none, so the net cash flow is forecast from each client's history.</p>
 </section>
 
 <section>
   <h2><span class="n">2</span>The data</h2>
-  <p>The forecast reads 3 warehouse tables, read-only: through the database connection to the warehouse (Oracle), or as CSV files in a landing folder. The SQL for the two tables the warehouse team builds is in <code>warehouse_tables.sql</code>; the daily postings are read as they are. Columns keep their EDW names. Until the real tables are connected, a simulator plays the warehouse team with sample data, in the same names, month by month.</p>
+  <p>The project reads 2 tables of the bank's warehouse as they are, read-only, through the database connection (Oracle) or as CSV files in a landing folder. Nothing is created or run in the warehouse. Until the connection is set, a simulator writes sample tables shaped like the bank's.</p>
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Table</th><th>Built from</th><th>One row per</th></tr></thead>
+    <thead><tr><th>Table</th><th>What the project reads</th><th>What it does with it, in Dataiku</th></tr></thead>
     <tbody>
-      <tr><td><code>CFF_CLIENT</code></td><td><code>EDW.DIM_CUSTOMER</code>, current row, business clients only: companies and businesses owned by one person (the legal entity tells them apart)</td><td>Client</td></tr>
-      <tr><td><code>FCT_STATEMENT_ENTRY</code></td><td><code>EDW.FCT_STATEMENT_ENTRY</code> itself: the daily postings. The staging recipe sums them per client, month (value date), in or out, T24 module (<code>SYS_ID</code>) and transaction type (<code>TRNS_TYP</code>), without reversed postings and transfers between the client's own accounts: in the warehouse, as one Oracle query through the read-only connection, so only the monthly totals come into Dataiku</td><td>Posting</td></tr>
-      <tr><td><code>CFF_SCHEDULED_PYMT</code></td><td>The payments already known for the coming months, the sources stacked: financing instalments, deposit maturities, standing orders (later: letters of credit, card statements, SADAD bills, post-dated cheques)</td><td>Scheduled payment, with its due date and the date the bank first knew of it</td></tr>
+      <tr><td><code>EDW.DIM_CUSTOMER</code></td><td>The clients: CIF, customer type, line of business, legal entity, ID type, segment, sector, industry, city, status. Personal fields are never read.</td><td>Keeps the business clients: every line of business but retail, plus retail clients with a commercial registration (businesses owned by one person)</td></tr>
+      <tr><td><code>EDW.FCT_STATEMENT_ENTRY</code></td><td>The daily postings: CIF, value date, credit or debit, amount in SAR, reference, reversal marker</td><td>Reads them in chunks and sums them per client, month and direction (in or out), without reversed postings and transfers between the client's own accounts</td></tr>
     </tbody>
   </table>
   </div>
   <ul>
-    <li>The client number (<code>CSTMR_CIF</code>) ties the 3 tables together.</li>
-    <li>Each posting carries its T24 module and transaction type: that is how it gets a category (the editable dataset <code>category_mapping</code>). A scheduled payment carries the values its posting will have, so the same mapping applies.</li>
-    <li>Annual sales and number of employees are not in <code>DIM_CUSTOMER</code>: the warehouse sends them if it finds them, otherwise the model leaves those two inputs empty. There are no account balances.</li>
+    <li>The client number (<code>CSTMR_CIF</code>) ties the 2 tables together.</li>
+    <li>No schedule of future payments: the net cash flow is forecast from each client's history. A table of loan, deposit or standing order schedules can be added later.</li>
+    <li>Annual sales and number of employees are not in <code>DIM_CUSTOMER</code>: those two model inputs stay empty. There are no account balances.</li>
     <li>Sample clients have different history lengths: some 1 year, some 2, some 5.</li>
-    <li>No past versions are kept. Obligations use today's schedule.</li>
   </ul>
 </section>
 
 <section>
-  <h2><span class="n">3</span>Categories</h2>
-  <p>Every transaction gets one category and one direction. Transfers between a client's own accounts are left out. Financing instalments and deposit maturities are fully scheduled, so no model is needed for them.</p>
-  <div class="tablewrap">
-  <table>
-    <thead><tr><th>Category</th><th>Direction</th><th>Where it comes from</th><th>Obligation part (added after)</th><th>Model?</th></tr></thead>
-    <tbody>
-      <tr><td>Payroll</td><td><span class="chip out">Out</span></td><td>Salary payments in the statement entries</td><td>None</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Rent</td><td><span class="chip out">Out</span></td><td>Transfers to landlords</td><td>Rent standing orders</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Financing instalments</td><td><span class="chip out">Out</span></td><td>Financing schedules</td><td>All of it</td><td><span class="chip no">No</span></td></tr>
-      <tr><td>SADAD and government bills</td><td><span class="chip out">Out</span></td><td>SADAD payments</td><td>Bills issued, not yet paid</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Supplier payments</td><td><span class="chip out">Out</span></td><td>Outgoing transfers to businesses</td><td>Supplier standing orders, trade finance payments with a fixed date</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Corporate card</td><td><span class="chip out">Out</span></td><td>Corporate card statements</td><td>Statements already issued</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Other out</td><td><span class="chip out">Out</span></td><td>Everything else going out</td><td>Other standing orders</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Customer receipts</td><td><span class="chip in">In</span></td><td>Incoming transfers from businesses and people</td><td>None</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Card sales settlements</td><td><span class="chip in">In</span></td><td>Card sales paid to the client</td><td>None</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Cheques in</td><td><span class="chip in">In</span></td><td>Deposited cheques</td><td>Post-dated cheques held</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Deposit maturities</td><td><span class="chip in">In</span></td><td>Deposits and investments</td><td>All of it</td><td><span class="chip no">No</span></td></tr>
-      <tr><td>Other in</td><td><span class="chip in">In</span></td><td>Everything else coming in</td><td>None</td><td><span class="chip md">Yes</span></td></tr>
-      <tr><td>Own-account transfers</td><td>Both</td><td>Own-account flag</td><td colspan="2">Left out entirely</td></tr>
-    </tbody>
-  </table>
-  </div>
+  <h2><span class="n">3</span>One value per client</h2>
+  <p>The forecast is one value per client and month: the <strong>net cash flow</strong>, money in minus money out. There are no categories, so the postings need no category and no code mapping. Money in and money out still feed the model as inputs (each client's last 3 months).</p>
+  <ul>
+    <li>Transfers between a client's own accounts and cancelled (reversed) payments are left out: no real money moved.</li>
+    <li>The net cash flow can be negative: a month where more money went out than came in.</li>
+  </ul>
 </section>
 
 <section>
   <h2><span class="n">4</span>How a training row is built</h2>
-  <p>We stand at the end of a month (the cut-off), look back at least 12 months, and predict each of the next 3 months. One row = one client, one category, one cut-off, one month ahead.</p>
+  <p>We stand at the end of a month (the cut-off), look back at least 12 months, and predict each of the next 3 months. One row = one client, one cut-off, one month ahead.</p>
   <div class="figure">
     <svg viewBox="0 0 760 205" width="100%" role="img" style="min-width:640px">
       <title>Cut-off timeline</title>
@@ -196,12 +171,11 @@ flowchart LR
       <text class="tl-m" x="380" y="192" text-anchor="middle">Slide the cut-off one month back and repeat: every past month gives new training rows.</text>
     </svg>
   </div>
-  <p class="example">Example row: client 1043 · Rent · Out · cut-off 30 Jun 2026 · 2 months ahead → the model must predict August 2026 rent, minus any rent standing orders.</p>
+  <p class="example">Example row: client 1043 · cut-off 30 Jun 2026 · 2 months ahead → the model must predict the client's August 2026 net cash flow.</p>
   <ul>
     <li>A client is used at a cut-off only if it has at least 12 months of history before it.</li>
     <li>At scoring time, clients with less than 12 months get no forecast and are flagged.</li>
-    <li>Months with no payment count as 0. They are real information (rent paid twice a year, for example).</li>
-    <li>A category the client has not used in the last 12 months is forecast as 0 (plus any obligations) and left out of training.</li>
+    <li>Months with no movement count as 0. They are real information.</li>
   </ul>
 </section>
 
@@ -212,22 +186,21 @@ flowchart LR
   <table>
     <thead><tr><th>Group</th><th>Inputs</th></tr></thead>
     <tbody>
-      <tr><td>What we ask</td><td>Category, direction (in or out), months ahead (1, 2 or 3), calendar month being predicted</td></tr>
-      <tr><td>This category's past</td><td>Last month's amount, average of the last 3 months, same month last year, and the same for the unscheduled part only</td></tr>
+      <tr><td>What we ask</td><td>Months ahead (1, 2 or 3), calendar month being predicted</td></tr>
+      <tr><td>The client's net cash flow</td><td>Last month's, average of the last 3 months, same month last year</td></tr>
       <tr><td>The client's overall flow</td><td>Average total in and total out over the last 3 months</td></tr>
-      <tr><td>Obligations (hint)</td><td>Scheduled amounts in the predicted month and over the next 3 months, in and out</td></tr>
       <tr><td>Client profile</td><td>Segment, sector, city, company or sole proprietor, annual sales and number of employees (if the warehouse has them), months with the bank</td></tr>
     </tbody>
   </table>
   </div>
-  <div class="formula">Answer to learn = actual amount of that category in the predicted month − scheduled payments of that category due that month and already known at the cut-off</div>
-  <p>Amounts are divided by a usual size, so a small client and a large one look alike to the model. A category's own amounts are divided by its average month over the last 12 months. The client's totals are divided by the client's average month. The model predicts in that unit, and we multiply back to SAR.</p>
+  <div class="formula">Answer to learn = the client's net cash flow in the predicted month (money in − money out)</div>
+  <p>Amounts are divided by a usual size, so a small client and a large one look alike to the model: the client's average month (money in and out) over the last 12 months. The model predicts in that unit, and we multiply back to SAR.</p>
   <p class="caption">The model never sees names, transaction descriptions, or anything dated after the cut-off.</p>
 </section>
 
 <section>
   <h2><span class="n">6</span>The two models</h2>
-  <p>Both models learn from the same rows and the same inputs. Category, direction and months ahead are inputs, so one model covers all categories and all 3 months.</p>
+  <p>Both models learn from the same rows and the same inputs. Months ahead is an input, so one model covers all 3 months.</p>
   <div class="grid2">
     <div class="card">
       <span class="chip md" style="justify-self:start">Model 1</span>
@@ -266,7 +239,7 @@ flowchart LR
     <thead><tr><th>Step</th><th>What happens</th></tr></thead>
     <tbody>
       <tr><td>Forecaster</td><td>The project variable <code>forecaster</code> names the one trained: <code>catboost</code> (the reference) or one of the data scientist's in <code>forecasters.py</code></td></tr>
-      <tr><td>Tracking</td><td>The forecaster and its settings, cut-off, warehouse load, row counts, test scores on the last 6 months (EV error overall and per category, P10–P90 coverage), the backtest forecaster, and the three MLflow models, under one model ID</td></tr>
+      <tr><td>Tracking</td><td>The forecaster and its settings, cut-off, warehouse load, row counts, test scores on the last 6 months (EV error overall and per months ahead, P10–P90 coverage), the backtest forecaster, and the three MLflow models, under one model ID</td></tr>
       <tr><td>Versions</td><td>The three MLflow models are deployed as version <em>model ID</em> of the saved models, with Dataiku's own evaluation on a reference sample</td></tr>
       <tr><td>Champion / challenger</td><td>The new model and the production model are tested on the same last 6 months, each with its version trained without those months</td></tr>
       <tr><td>Promotion (automatic)</td><td>The new version is activated if its EV error is lower (a tie keeps production), its P10–P90 coverage is between 70% and 90%, and it beats the simple guess. Every decision and its reason go to <code>promotion_log</code></td></tr>
@@ -279,28 +252,24 @@ flowchart LR
 
 <section>
   <h2><span class="n">7</span>The final forecast</h2>
-  <p>Model predictions plus obligations give the final number for each category. A total row gives one P10, EV and P90 for the client's net cash flow each month.</p>
+  <p>The model predictions are the final numbers: one P10, EV and P90 for each client's net cash flow, 1, 2 and 3 months ahead.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart LR
-  M1[EV model] --> P[Predicted part: P10, EV, P90]
-  M2[P10 / P90 model] --> P
-  O[Obligations for that month] --> S[Category forecast: P10, EV, P90]
-  P --> S
-  S --> T[Client total row: net cash flow P10, EV, P90]
+  M1[EV model] --> S[Net cash flow forecast: P10, EV, P90]
+  M2[P10 / P90 model] --> S
 </pre>
   </div>
   <ul>
-    <li>Obligations are certain, so the same amount is added to P10, EV and P90.</li>
-    <li>EVs add up across categories, but P10s and P90s do not. So the client total is treated as one more category ("net cash flow") that the same two models predict. To be checked once we see results.</li>
+    <li>P10 ≤ EV ≤ P90 always holds. The net cash flow can be negative.</li>
   </ul>
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Client</th><th>Month</th><th>Ahead</th><th>Category</th><th>Dir.</th><th>P10</th><th>EV</th><th>P90</th><th>Of which obligations</th></tr></thead>
+    <thead><tr><th>Client</th><th>Month</th><th>Ahead</th><th>P10</th><th>EV</th><th>P90</th></tr></thead>
     <tbody>
-      <tr><td class="mono">1043</td><td class="mono">2026-08</td><td>2</td><td>Rent</td><td>Out</td><td class="mono">0</td><td class="mono">40,000</td><td class="mono">120,000</td><td class="mono">0</td></tr>
-      <tr><td class="mono">1043</td><td class="mono">2026-08</td><td>2</td><td>Financing instalments</td><td>Out</td><td class="mono">85,000</td><td class="mono">85,000</td><td class="mono">85,000</td><td class="mono">85,000</td></tr>
-      <tr><td class="mono">1043</td><td class="mono">2026-08</td><td>2</td><td>Net cash flow</td><td>Net</td><td class="mono">−210,000</td><td class="mono">35,000</td><td class="mono">260,000</td><td class="mono">−85,000</td></tr>
+      <tr><td class="mono">1043</td><td class="mono">2026-07</td><td>1</td><td class="mono">−120,000</td><td class="mono">60,000</td><td class="mono">230,000</td></tr>
+      <tr><td class="mono">1043</td><td class="mono">2026-08</td><td>2</td><td class="mono">−210,000</td><td class="mono">35,000</td><td class="mono">260,000</td></tr>
+      <tr><td class="mono">1043</td><td class="mono">2026-09</td><td>3</td><td class="mono">−240,000</td><td class="mono">40,000</td><td class="mono">300,000</td></tr>
     </tbody>
   </table>
   </div>
@@ -331,26 +300,20 @@ flowchart LR
     </tbody>
   </table>
   </div>
-  <p class="caption">Results are shown per category and per months ahead, so we see where the model is weak.</p>
+  <p class="caption">Results are shown per months ahead, so we see how the error grows with the horizon.</p>
 </section>
 
 <section>
   <h2><span class="n">9</span>What gets built in Dataiku</h2>
-  <p>A setup notebook builds the project once, in an empty Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. After that, the project runs from two independent scenarios: <strong>Nightly batch</strong> after each warehouse load, and <strong>Retrain, test and promote</strong> (monthly, or when needed), which never forecasts. Each zone has an owner (shared, data scientist, inference owner), and the zones only meet through three interfaces: <strong>1. the model rows</strong> (<code>model_rows</code>: data prep → training and inference), <strong>2. the forecaster</strong> (lab → training), <strong>3. the active version of the saved models</strong> (training → inference, the only thing inference reads from training). The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
+  <p>A setup notebook builds the project once, in an empty Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. After that, the project runs from two independent scenarios: <strong>Nightly batch</strong> after each warehouse load, and <strong>Retrain, test and promote</strong> (monthly, or when needed), which never forecasts. Each zone has an owner (shared, data scientist, inference owner), and the zones only meet through three interfaces: <strong>1. the model rows</strong> (<code>model_rows</code>: staging → training and inference), <strong>2. the forecaster</strong> (lab → training), <strong>3. the active version of the saved models</strong> (training → inference, the only thing inference reads from training). The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart TB
   subgraph Z1[Raw data: CSV, from the simulator or the warehouse landing files]
-    R[(3 curated warehouse tables)]
-    LR[(CFF_LOAD_RECORD: read by the scenarios' load check)]
+    R[(EDW.DIM_CUSTOMER, EDW.FCT_STATEMENT_ENTRY: read-only)]
   end
   subgraph Z0[Staging]
-    ST[stage_tables: EDW names to standard names and values] --> S17[(3 standard tables)]
-  end
-  subgraph Z2[Data prep: shared]
-    CR[(category_mapping: CSV, kept on re-runs)]
-    J1[Join: flows + mapping] --> G1[Group: monthly_flows]
-    J2[Join: scheduled payments + mapping] --> P2[obligations]
+    ST[stage_tables: business clients, postings summed per month] --> S17[(clients, monthly_flows)]
   end
   subgraph Z3[Training: monthly, data scientist]
     P3[build_training_rows] --> TR[(training_rows)]
@@ -360,7 +323,7 @@ flowchart TB
   end
   subgraph Z5[Inference: nightly, inference owner]
     P5[build_scoring_rows] --> SR[(scoring_rows: latest month)]
-    S1[Score x3: active version] --> F[final_forecast: + obligations, model_id, load_id]
+    S1[Score x3: active version] --> F[final_forecast: model_id, load_id]
     F --> AF[archive_forecast] --> AR[(forecast_archive)]
     AF --> IL[(inference_log: one row per run)]
   end
@@ -369,27 +332,18 @@ flowchart TB
     LT --> LX[(lab_experiments: experiment cashflow_lab)]
   end
   R --> ST
-  S17 --> J1
-  S17 --> J2
   S17 --> P3
   S17 --> P5
-  CR --> J1
-  CR --> J2
-  G1 --> P3
-  G1 --> P5
-  P2 --> P3
-  P2 --> P5
   TR --> P4
   TR --> CH
   EX --> CH
   SM -- active version, interface 3 --> S1
   SR --> S1
-  P2 --> F
   TR --> LT
   EX --> LT
 </pre>
   </div>
-  <p class="caption">Boxes with rounded ends are datasets or folders; rectangles are Python recipes. The 6 groups are the flow zones of the single project. <code>build_training_rows</code> and <code>build_scoring_rows</code> use the same code (<code>model_rows</code> in <code>cashflow.py</code>), so the model sees the same inputs in training and in the forecast. Each scenario starts with a load check (a Python step): it stops the scenario if the latest load is incomplete, and sets the project variable <code>cutoff_month</code> that the recipes read. Training (folder <code>experiments</code>), the promotion log and the saved models are only rebuilt when built by name, so the nightly batch never retrains by accident. The project library is split by owner: shared (<code>cashflow.py</code>, <code>warehouse.py</code>), training and lab (<code>models.py</code>, <code>tracking.py</code>, and the data scientist's <code>forecasters.py</code>, which the setup never overwrites), inference (<code>forecast.py</code>). In the sandbox, both notebooks (the warehouse simulator and the setup) run in this same project.</p>
+  <p class="caption">Boxes with rounded ends are datasets or folders; rectangles are Python recipes. The 5 groups are the flow zones of the single project. <code>build_training_rows</code> and <code>build_scoring_rows</code> use the same code (<code>model_rows</code> in <code>cashflow.py</code>), so the model sees the same inputs in training and in the forecast. Each scenario starts by setting the cut-off month (a Python step: the month before today), which the recipes read; the staging recipe stops if the postings do not reach it. Training (folder <code>experiments</code>), the promotion log and the saved models are only rebuilt when built by name, so the nightly batch never retrains by accident. The project library is split by owner: shared (<code>cashflow.py</code>, <code>warehouse.py</code>), training and lab (<code>models.py</code>, <code>tracking.py</code>, and the data scientist's <code>forecasters.py</code>, which the setup never overwrites), inference (<code>forecast.py</code>). In the sandbox, both notebooks (the warehouse simulator and the setup) run in this same project.</p>
 </section>
 
 <section>
@@ -418,25 +372,23 @@ flowchart TB
       <ul>
         <li>One forecast per month, for each of the next 3 months. No daily forecasts.</li>
         <li>Money in and money out kept separate. Own-account transfers left out.</li>
-        <li>Obligations are not predicted. They are taken out of the answer, shown as a hint, and added back.</li>
         <li>Two models: EV, and P10/P90 together (CatBoost). One training path, in Python recipes.</li>
         <li>Each training run is tracked with a model ID and deployed as a saved model version; a new version is activated automatically if it is better; the nightly batch scores with the active version.</li>
         <li>Everything is stored as CSV files: the warehouse's landing files, the project's datasets, the archive and the logs.</li>
         <li>At least 12 months of history to score a client. Otherwise flagged.</li>
         <li>Test on the last 6 months.</li>
         <li>One project (Digital Cash Management Forecast), with the warehouse simulator inside it in the sandbox. Production-shaped: the project only reads the warehouse's tables (read-only landing files in production), checks each load, takes its cut-off from the load record, and runs from two scenarios. Sample data comes from a separate warehouse simulator.</li>
-        <li>The warehouse does the heavy, mechanical prep (3 curated tables); Dataiku keeps the modelling logic. Categories come from an mapping dataset in Dataiku (visual Join and Group recipes), not from the warehouse, so they can be tuned without a warehouse change.</li>
+        <li>The warehouse is only read, never written to: Dataiku does all the prep (business clients, monthly sums) and the modelling.</li>
       </ul>
     </div>
     <div class="card">
       <h3>To check</h3>
       <ul>
         <li>Client total method: review once we see the test results.</li>
-        <li>No past versions of schedules: in real data, obligation hints may show slightly more than was known at the time. Tell the tech lead.</li>
         <li>How real transactions are labelled as rent or supplier payments without descriptions (counterparty, transaction code).</li>
-        <li>The project sums the daily postings itself, in the warehouse through the read-only connection: confirm the query load with the warehouse team.</li>
+        <li>The project reads the daily postings row by row through the read-only connection and sums them in Dataiku: check the reading time on the full table.</li>
         <li>Code env: the project needs a Python code env with <code>catboost 1.2.7</code>, <code>scikit-learn</code> and <code>mlflow 2.22.0</code> (Python 3.9) or <code>3.10.1</code> (Python 3.10 or later): the versions Dataiku tested. We cannot create one: a Dataiku admin creates it once.</li>
-        <li>Warehouse table and column names are our proposal (<code>CFF_*</code>, EDW style); the warehouse team confirms them. If they differ, only the mapping file changes.</li>
+        <li>The codes the project relies on (status values, retail line of business, commercial registration, sole proprietor legal entities) come from a small data profile: confirm them on business clients. If they differ, only <code>warehouse.py</code> changes.</li>
       </ul>
     </div>
   </div>

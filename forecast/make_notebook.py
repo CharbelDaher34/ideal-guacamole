@@ -6,7 +6,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["stage_tables", "obligations", "build_training_rows", "train_and_test", "champion_challenger",
+RECIPES = ["stage_tables", "build_training_rows", "train_and_test", "champion_challenger",
            "build_scoring_rows", "final_forecast", "archive_forecast", "try_forecaster"]
 
 
@@ -43,18 +43,17 @@ write("build_forecast_project.ipynb", [
 # Digital Cash Management Forecast: set up the project
 
 This notebook sets up the Digital Cash Management Forecast in this Dataiku project (it also gives the project
-that name), the way it runs in production. Everything is stored as CSV files. It reads 3 warehouse tables: the
-clients (`EDW.DIM_CUSTOMER`), the daily postings (`EDW.FCT_STATEMENT_ENTRY`, summed per month by the staging recipe)
-and the scheduled payments, and the load record (in production: tables through a
-database connection, `WAREHOUSE_SQL_CONNECTION`, or CSV files in the landing folder): in the
-sandbox, the datasets the notebook `warehouse_simulator.ipynb` wrote in this project; in production, the warehouse
-team's CSV files in the landing folder, read-only through `EDW_LANDING` (names: `python/warehouse.py` in the
-project library). It builds 6 flow zones, each with an owner:
+that name), the way it runs in production. Everything the project writes is a CSV file. It reads 2 warehouse tables
+as they are, read-only, and creates nothing in the warehouse: the clients (`EDW.DIM_CUSTOMER`) and the daily
+postings (`EDW.FCT_STATEMENT_ENTRY`), which the staging recipe sums per month in Dataiku. In the sandbox, they are
+the datasets the notebook `warehouse_simulator.ipynb` wrote in this project; in production, the warehouse's tables
+through the read-only database connection `WAREHOUSE_SQL_CONNECTION` (or CSV files in the landing folder). Names and
+codes: `python/warehouse.py` in the
+project library). It forecasts one value per client and month: the net cash flow (money in minus money out), 1,
+2 and 3 months ahead, as P10, EV and P90; there are no categories. It builds 5 flow zones, each with an owner:
 
-- **Raw data** and **Staging** (shared): the 3 tables and the load record, read-only, then the same tables with the
-  standard column names and the project's values (direction, client status, sole proprietor).
-- **Data prep** (shared by training and inference): the category mapping (a CSV dataset) applied by visual Join
-  and Group recipes, the obligations.
+- **Raw data** and **Staging** (shared): the 2 warehouse tables, read-only, then the business clients and the
+  postings summed per client and month, with the standard names and values.
 - **Training** (data scientist): the training rows, then each training run is one model with its own **model ID**,
   trained with the **forecaster** the project variable `forecaster` names, tracked in Dataiku's **Experiment
   Tracking** and deployed as a new **version** of the saved models `forecast_ev`, `forecast_p10`, `forecast_p90`.
@@ -66,18 +65,18 @@ project library). It builds 6 flow zones, each with an owner:
   against the production model and adds the result to `lab_results`, without touching production. The notebook
   `forecast_lab.ipynb` does the same interactively.
 
-The zones only meet through three interfaces: **1. the model rows** (`model_rows` in `cashflow.py`: data prep →
+The zones only meet through three interfaces: **1. the model rows** (`model_rows` in `cashflow.py`: staging →
 training and inference), **2. the forecaster** (`models.py`: lab → training), **3. the active version of the saved
 models** (training → inference). Two independent scenarios run it: **Nightly batch** (inference) and **Retrain,
-test and promote** (training). Each starts with the load check (`check_latest_load`): it stops the scenario if the
-latest load is incomplete, and sets `cutoff_month`.
+test and promote** (training). Each starts by setting the cut-off month (`set_cutoff`: the month before today, or
+the project variable `cutoff_override`); the staging recipe stops if the postings do not reach it.
 
 It then trains, tests and promotes a first model, and runs the first nightly batch.
 
 **How to use it:** in the project, import this notebook and `warehouse_simulator.ipynb` (Notebooks > New notebook
 > Import). In the sandbox, run the simulator first. Then check the settings below and run all cells (Cell > Run All):
-a few minutes with the small sample data. It can be run again in the same project: what exists is kept (data, the
-category mapping, saved model versions, zones, scenario history), and the recipes' code is updated.
+a few minutes with the small sample data. It can be run again in the same project: what exists is kept (data,
+saved model versions, zones, scenario history), and the recipes' code is updated.
 """),
     code(read("cells/settings.py")),
     md("""
@@ -93,8 +92,8 @@ and otherwise stops with the request to send the admin.
 
 The project library gets these files, by owner:
 
-- shared: `warehouse.py` (warehouse table and column names, the load check) and `cashflow.py` (categories and the
-  default category mapping, the model rows, the saved model names)
+- shared: `warehouse.py` (the warehouse tables and columns read, codes, monthly sums, cut-off month) and
+  `cashflow.py` (dates, the model rows, the saved model names)
 - training and lab: `models.py` (the forecaster interface, the reference CatBoost forecaster, the test and its
   scores) and `tracking.py` (model IDs, Experiment Tracking, saved model versions, champion / challenger, promotion)
 - inference: `forecast.py` (the production model's ID, the final forecast table)
@@ -114,10 +113,10 @@ Each recipe below becomes a Python recipe in the flow; the visual recipes are cr
     md("""
 ## 3. Build the flow
 
-Uses the simulated warehouse tables, or links the landing files (read-only), and creates the category
-mapping, the recipes (Python, Join, Group, Score) and their CSV datasets, the folders `experiments` (tracked
+Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the recipes (Python and
+Score) and their CSV datasets, the folders `experiments` (tracked
 models), `forecast_archive` and `lab_experiments` (lab tries), the three saved models, and the project variables
-`forecaster` (`catboost`) and `lab_forecaster` (`catboost_deeper`) if they are not set yet, in 6 zones. Training
+`forecaster` (`catboost`) and `lab_forecaster` (`catboost_deeper`) if they are not set yet, in 5 zones. Training
 (folder `experiments`), the promotion log, the saved models and the lab are only rebuilt when asked by name, so the
 nightly batch never retrains by accident.
 """),
@@ -159,7 +158,8 @@ write("forecast_lab.ipynb", [
 Explore the data and try models here without touching production: nothing in this notebook changes the flow, the
 saved models or the production model.
 
-1. **EDA**: the training rows by category, totals over time, seasonality, and what the models learn.
+1. **EDA**: money in, money out and net per client and month, totals over time, seasonality, and what the models
+   learn.
 2. **Models to try**: several forecasters trained and tested side by side on the same test as champion / challenger
    (trained without the last 6 months before the cut-off, tested on them), next to the production model and the
    simple guess (the average of the last 3 months), with the decision champion / challenger would take for each.
@@ -177,13 +177,9 @@ In the sandbox the data is simulated: there, the scores show that the code works
     md("""
 ## 1. EDA
 
-The training rows: one row per client, category, cut-off month and months ahead (1 to 3). The models predict
-`target`: the month's amount (`actual`) minus the part already scheduled at the cut-off (`obligations_known`), which
-the forecast adds back.
-
-- **zero_months**: the share of months with no movement. Lumpy categories are hard to forecast.
-- **known_at_cutoff**: the share of the amount already scheduled one month ahead. That part is not predicted.
-- **volatility**: how much a client's month varies (median coefficient of variation of the monthly amounts).
+The models predict one value per client and month: the net cash flow (money in minus money out), 1, 2 and 3 months
+ahead. First the monthly money in, money out and net per client, by segment (**negative_months**: the share of
+months where more money went out than came in).
 """),
     code(read("lab_cells/eda_overview.py")),
     md("""
@@ -192,8 +188,8 @@ blurs them.
 """),
     code(read("lab_cells/eda_charts.py")),
     md("""
-What the models learn: `target` divided by the series scale (the client's usual amount in that category), its spread
-per category, and how much each input moves with it.
+What the models learn: `target` (the net cash flow) divided by the client's scale (its usual month), its spread by
+segment, and how much each input moves with it.
 """),
     code(read("lab_cells/eda_target.py")),
     md("""
@@ -232,16 +228,15 @@ write("warehouse_simulator.ipynb", [
     md("""
 # Digital Cash Management Forecast: warehouse simulator (sandbox only)
 
-Plays the warehouse team (Informatica) until the real files exist. Run it in the same project as the forecast,
+Plays the warehouse until the project is connected to the real one. Run it in the same project as the forecast,
 before `build_forecast_project.ipynb`.
 
-It generates sample data up to `SIM_END` (accounts, postings, loans, deposits, standing orders and so on) and
-publishes, as the warehouse would have them at the end of `AS_OF` (what had happened or was scheduled by then), the
-3 tables the forecast reads, as the warehouse has them (`warehouse_tables.sql`): the clients (`EDW.DIM_CUSTOMER`),
-the daily postings (`EDW.FCT_STATEMENT_ENTRY`) and the scheduled payments. They are written as CSV datasets of this project, in their EDW column names (`warehouse.py`). Each load
-adds one row per table to `CFF_LOAD_RECORD`, which the forecast checks before it runs.
+It generates sample data up to `SIM_END` and writes, as the warehouse would have them at the end of `AS_OF`, the 2
+tables the forecast reads, shaped like the bank's (`warehouse.py`): `DIM_CUSTOMER` (the business clients, and a few
+retail customers the forecast must leave out) and `FCT_STATEMENT_ENTRY` (the daily postings). They are CSV datasets
+of this project. It also sets the project variable `cutoff_override` to the month of `AS_OF`.
 
-To simulate the next load, move `AS_OF` to the next month's end, run all cells again, then run the scenario
+To simulate the next month, move `AS_OF` to the next month's end, run all cells again, then run the scenario
 **Nightly batch**.
 """),
     code(read("sim_cells/settings.py")),
@@ -249,7 +244,7 @@ To simulate the next load, move `AS_OF` to the next month's end, run all cells a
     md("""
 ## Sample data, warehouse names, publishing
 
-The sample data generator, the warehouse table and column names, the publishing as of a date, and the 3 tables.
+The sample data generator, the warehouse table and column names, the publishing as of a date, and the 2 tables.
 """),
     code(read("generate_data.py")),
     code(read("warehouse.py")),

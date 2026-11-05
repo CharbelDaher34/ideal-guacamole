@@ -1,11 +1,10 @@
-# Plays the warehouse team (Informatica): publishes the sample data as it was known on a date (AS_OF), as the 3
-# tables the forecast reads, in their EDW names (warehouse.py), as CSV datasets of this project: the clients
-# (EDW.DIM_CUSTOMER), the daily statement entries (EDW.FCT_STATEMENT_ENTRY) and the scheduled payments.
-# Records each load in CFF_LOAD_RECORD. The generator's own 17 source tables stay inside the simulator.
+# Plays the warehouse: publishes the sample data as it was known on a date (AS_OF), as the
+# 2 warehouse tables the forecast reads, as CSV datasets of this project, shaped like the bank's: DIM_CUSTOMER (the
+# clients, with some retail customers the forecast must leave out) and FCT_STATEMENT_ENTRY (the daily postings).
+# It also sets the project variable cutoff_override to the month of AS_OF. The generator's own source tables (loans,
+# deposits, standing orders, ...) stay inside the simulator.
 # The sample data is generated once up to SIM_END; publishing "as of" a date keeps what had happened or was
 # scheduled by then, and resets what was only known later (a bill paid after AS_OF is still unpaid, ...).
-import uuid
-
 import numpy as np
 import pandas as pd
 
@@ -131,12 +130,9 @@ def as_of(tables, day):
 
 
 def curate(t, day):
-    """The 3 tables the forecast reads, built from the source tables as of `day` the way the warehouse team builds
-    them from EDW (warehouse_tables.sql), with the standard column names."""
+    """The 2 warehouse tables the forecast reads, as of `day`, with the standard column names."""
     d = pd.Timestamp(day)
     client_of = t["accounts"].set_index("account_no")["client_no"]
-    scheduled = scheduled_payments(t, d, client_of)
-    scheduled["origin_type"] = scheduled["origin_type"].map(SYS_ID)
 
     # the daily postings as T24 statement entries: amount negative for money out; a reversing posting is marked and
     # carries the reference of the posting it reverses; a transfer between the client's own accounts has both legs,
@@ -167,9 +163,20 @@ def curate(t, day):
         "line_of_business": "Business Banking", "legal_entity": legal.str[0], "sub_legal_entity": legal.str[1],
         "id_type": "Commercial Registration", "segment": c["segment"], "sector": c["sector"],
         "business_sector": c["sector"], "industry": c["industry"], "sub_industry": c["industry"], "city": c["city"],
-        "status": c["status"], "last_annual_sales": c["last_annual_sales"],
-        "number_of_employees": c["number_of_employees"]})
-    return {"clients": clients, "transactions": entries, "scheduled_payments": scheduled}
+        "status": np.where(c["status"] == "ACTIVE", "ACTIVE", "INACTIVE")})
+    # retail customers (individuals), with a few postings: the forecast must leave them out
+    rng = np.random.default_rng(1)
+    retail = pd.DataFrame({
+        "client_no": [str(7851373 + i) for i in range(15)], "customer_type": "PARTNER", "line_of_business": "Retail",
+        "legal_entity": "Resident Saudi Individual", "sub_legal_entity": "Resident Male Saudi Individual (age 15 and older)",
+        "id_type": "Family Registration Book", "segment": "110900 RETAIL - BRANCH BANKING", "sector": "Other Individuals",
+        "business_sector": "Other Individuals", "industry": "Others", "sub_industry": "Others",
+        "city": rng.choice(["JEDDAH", "RIYADH", "DAMMAM", "ABHA"], 15), "status": "ACTIVE"})
+    theirs = entries.sample(min(len(entries), 150), random_state=1).assign(
+        client_no=lambda e: rng.choice(retail["client_no"], len(e)), entry_id=lambda e: "X" + e["entry_id"],
+        txn_ref=lambda e: "X" + e["txn_ref"])
+    return {"clients": pd.concat([clients, retail], ignore_index=True),
+            "transactions": pd.concat([entries, theirs], ignore_index=True)}
 
 
 def scheduled_payments(t, d, client_of):
@@ -218,31 +225,30 @@ def scheduled_payments(t, d, client_of):
     return pd.concat(parts, ignore_index=True).round({"amount": 2})
 
 
-def to_warehouse(df, table, load_id, loaded_at):
-    """A table in the warehouse's column names and codes (direction C / D), with the audit columns."""
-    out = pd.DataFrame({column: df[standard] for standard, column in COLUMNS[table].items()})
+def to_warehouse(df, table):
+    """A table in the warehouse's column names and codes (direction C / D); the optional columns, which the bank's
+    table does not have, are left out."""
+    out = pd.DataFrame({column: df[standard] for standard, column in COLUMNS[table].items() if column not in OPTIONAL})
     if "CRDT_DBT_FLG" in out:
         out["CRDT_DBT_FLG"] = out["CRDT_DBT_FLG"].map({"IN": "C", "OUT": "D"})
-    out["ETL_LOAD_ID"], out["ETL_LOAD_DTTS"] = load_id, loaded_at
     return out.reset_index(drop=True)
 
 
 def load_warehouse(tables, day, connection):
-    """Full load of the 3 tables as of `day`, then one row per table in the load record."""
-    load_id, loaded_at = f"L{pd.Timestamp.now():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:4]}", pd.Timestamp.now().floor("s")
-    curated = curate(as_of(tables, day), day)
+    """Writes the 2 tables as the warehouse has them at the end of `day`, and sets the project variable
+    cutoff_override to that month (the month before if `day` is not a month end). Returns the cut-off month."""
+    tables = curate(as_of(tables, day), day)
     existing = {d["name"] for d in project.list_datasets()}
-    record = []
-    for table, (warehouse_table, source) in TABLES.items():
-        rows = to_warehouse(curated[table], table, load_id, loaded_at)
+    for table, (warehouse_table, _) in TABLES.items():
+        rows = to_warehouse(tables[table], table)
         write_table(warehouse_table, rows, connection, existing)
-        record.append({"LOAD_ID": load_id, "LOAD_DTTS": loaded_at, "AS_OF_DT": pd.Timestamp(day),
-                       "SRC_TBL_NM": source, "TRGT_TBL_NM": warehouse_table, "ROW_CNT": len(rows),
-                       "LOAD_STA_CD": "SUCCESS"})
-        print(f"{warehouse_table:26s} {len(rows):>9,} rows")
-    previous = dataiku.Dataset(LOAD_RECORD).get_dataframe() if LOAD_RECORD in existing else None
-    write_table(LOAD_RECORD, pd.concat([previous, pd.DataFrame(record)], ignore_index=True), connection, existing)
-    return load_id
+        print(f"{warehouse_table:22s} {len(rows):>9,} rows")
+    d = pd.Timestamp(day)
+    cutoff = d.to_period("M") if d == d + pd.offsets.MonthEnd(0) else d.to_period("M") - 1
+    variables = project.get_variables()
+    variables["standard"]["cutoff_override"] = str(cutoff)
+    project.set_variables(variables)
+    return str(cutoff)
 
 
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",

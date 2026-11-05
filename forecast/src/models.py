@@ -7,12 +7,11 @@ A forecaster is a class with:
                     trains (default: catboost).
     params          its settings (a dict), recorded in Experiment Tracking
     inputs          the model-row columns it reads (cashflow.MODEL_ROW_COLUMNS, no dates). Each saved model version
-                    is given these columns, and category.
-    fit(rows)       learns from training rows. Column target is the amount to predict, in SAR: the amount of the
-                    predicted month minus the obligations already known at the cut-off (the forecast adds those back).
+                    is given these columns.
+    fit(rows)       learns from training rows. Column target is the amount to predict: the client's net cash flow
+                    (money in minus money out) of the predicted month, in SAR.
     predict(rows)   a DataFrame with the index of rows and the columns p10, ev, p90 (SAR). forecast() then applies
-                    P10 <= EV <= P90. The amounts can be below zero (scheduled payments not all made); the final
-                    forecast adds the scheduled payments back and floors the total at zero.
+                    P10 <= EV <= P90.
 The data scientist's own forecasters go in forecasters.py: the setup notebook creates that file once and never
 overwrites it. lab_try and lab_compare try forecasters against the production model without touching
 production (the Lab zone and the notebook forecast_lab).
@@ -20,28 +19,24 @@ production (the Lab zone and the notebook forecast_lab).
 import numpy as np
 import pandas as pd
 
-from cashflow import CATEGORIES, add_months, cutoff_month, finish, month_start
+from cashflow import add_months, cutoff_month, finish, month_start
 
 HOLDOUT_MONTHS = 6          # the last months kept aside to test the models
 OUTPUT = ["p10", "ev", "p90"]
 
-# the reference forecaster's inputs (series_share is computed from scale and series_scale)
-CAT_FEATURES = ["category", "direction", "segment", "sector", "city", "sole_proprietor"]
-SERIES_FEATURES = ["last_amount", "avg_3m", "same_month_last_year", "free_last", "free_avg_3m", "oblig_target_month"]
-CLIENT_FEATURES = ["client_in_avg_3m", "client_out_avg_3m", "oblig_in_next_3m", "oblig_out_next_3m"]
-OTHER_FEATURES = ["months_ahead", "target_month_of_year", "history_months", "log_scale", "series_share",
-                  "log_annual_sales", "employees"]
-FEATURES = CAT_FEATURES + SERIES_FEATURES + CLIENT_FEATURES + OTHER_FEATURES
+# the reference forecaster's inputs
+CAT_FEATURES = ["segment", "sector", "city", "sole_proprietor"]
+AMOUNT_FEATURES = ["last_amount", "avg_3m", "same_month_last_year", "client_in_avg_3m", "client_out_avg_3m"]
+OTHER_FEATURES = ["months_ahead", "target_month_of_year", "history_months", "log_scale", "log_annual_sales",
+                  "employees"]
+FEATURES = CAT_FEATURES + AMOUNT_FEATURES + OTHER_FEATURES
 
 
 def model_matrix(rows):
-    """The reference forecaster's inputs: series amounts divided by the series scale, client amounts by the client
-    scale, categories as text."""
-    rows = rows.assign(series_share=rows["series_scale"] / rows["scale"])
+    """The reference forecaster's inputs: amounts divided by the client's scale (its usual month), categorical inputs
+    as text."""
     X = rows[FEATURES].copy()
-    for c in SERIES_FEATURES:
-        X[c] = rows[c] / rows["series_scale"]
-    for c in CLIENT_FEATURES:
+    for c in AMOUNT_FEATURES:
         X[c] = rows[c] / rows["scale"]
     for c in CAT_FEATURES:
         X[c] = X[c].fillna("NA").astype(str).str.upper()       # TRUE / FALSE however a yes / no column is read
@@ -49,16 +44,16 @@ def model_matrix(rows):
 
 
 class CatBoostForecaster:
-    """The reference forecaster: one CatBoost model for the EV and one for P10 and P90 together, trained on amounts
-    divided by the series scale (the client's usual amount in that category)."""
+    """The reference forecaster: one CatBoost model for the EV and one for P10 and P90 together, trained on the net
+    cash flow divided by the client's scale (its usual month), so small and large clients look alike."""
     name = "catboost"
     params = {"iterations": 600, "depth": 6, "learning_rate": 0.08, "random_seed": 0, "verbose": 0}
     quantiles = (0.1, 0.9)
-    inputs = [f for f in FEATURES if f != "series_share"] + ["scale", "series_scale"]
+    inputs = FEATURES + ["scale"]
 
     def fit(self, rows):
         from catboost import CatBoostRegressor
-        X, y = model_matrix(rows), rows["target"] / rows["series_scale"]
+        X, y = model_matrix(rows), rows["target"] / rows["scale"]
         self.ev = CatBoostRegressor(loss_function="RMSE", **self.params)
         self.ev.fit(X, y, cat_features=CAT_FEATURES)
         alphas = ",".join(str(q) for q in self.quantiles)
@@ -68,7 +63,7 @@ class CatBoostForecaster:
 
     def predict(self, rows):
         X = model_matrix(rows)
-        scale = rows["series_scale"].values
+        scale = rows["scale"].values
         q = self.p10_p90.predict(X)
         return pd.DataFrame({"p10": q[:, 0] * scale, "ev": self.ev.predict(X) * scale, "p90": q[:, 1] * scale},
                             index=rows.index)
@@ -114,15 +109,15 @@ def forecast(forecaster, rows):
     empty = [c for c in OUTPUT if out[c].isna().any()]
     if empty:
         raise ValueError(f"Forecaster {name}: predict returned empty values in {', '.join(empty)}")
-    return finish(out["ev"], out["p10"], out["p90"], rows["category"], rows.index, floor=False)
+    return finish(out["ev"], out["p10"], out["p90"], rows.index)
 
 
 def holdout(rows):
     """The test rows: predicted month in the last 6 months before the cut-off, with the simple guess (baseline: the
-    average of the last 3 months, without the scheduled part)."""
+    average of the last 3 months)."""
     rows = rows.assign(target_month=month_start(rows["target_month"]))
     test = rows[rows["target_month"] >= add_months(cutoff_month(), -(HOLDOUT_MONTHS - 1))].copy()
-    test["baseline"] = np.where(test["category"] == "NET", test["free_avg_3m"], test["free_avg_3m"].clip(lower=0))
+    test["baseline"] = test["avg_3m"]
     return test
 
 
@@ -139,31 +134,25 @@ def scores(d):
 
 
 def test_results(tested):
-    """Test scores per category and months ahead, per category (months_ahead ALL), per months ahead (category ALL)
-    and overall. The ALL rows count the categories only, not the net cash flow. tested: the test rows with p10, ev,
+    """Test scores per months ahead (1, 2, 3) and overall (months_ahead ALL). tested: the test rows with p10, ev,
     p90."""
     scored = [c for c in ("target", "p10", "ev", "p90", "baseline") if c in tested]   # the columns scores reads
-    categories_only = tested[tested["category"] != "NET"]
     results = pd.concat([
-        tested.groupby(["category", "months_ahead"])[scored].apply(scores).reset_index(),
-        tested.groupby("category")[scored].apply(scores).reset_index().assign(months_ahead="ALL"),
-        categories_only.groupby("months_ahead")[scored].apply(scores).reset_index().assign(category="ALL"),
-        scores(categories_only).to_frame().T.assign(category="ALL", months_ahead="ALL")], ignore_index=True)
+        tested.groupby("months_ahead")[scored].apply(scores).reset_index(),
+        scores(tested).to_frame().T.assign(months_ahead="ALL")], ignore_index=True)
     results["months_ahead"] = results["months_ahead"].astype(str)
-    results["category_name"] = results["category"].map({c: v[0] for c, v in CATEGORIES.items()}).fillna(
-        "All categories")
     return results
 
 
 def run_metrics(results):
-    """The scores recorded in Experiment Tracking: overall (all categories and months ahead) and the EV error per
-    category. results: from test_results."""
-    overall = results[(results["category"] == "ALL") & (results["months_ahead"] == "ALL")].iloc[0]
+    """The scores recorded in Experiment Tracking: overall and the EV error per months ahead. results: from
+    test_results."""
+    overall = results[results["months_ahead"] == "ALL"].iloc[0]
     metrics = {k: overall[c] for k, c in (("wape", "wape_model"), ("wape_baseline", "wape_baseline"),
                                           ("coverage_p10_p90", "coverage_p10_p90"), ("below_p10", "below_p10"),
                                           ("above_p90", "above_p90"))}
-    for row in results[(results["months_ahead"] == "ALL") & (results["category"] != "ALL")].itertuples():
-        metrics[f"wape_{row.category}"] = row.wape_model
+    for row in results[results["months_ahead"] != "ALL"].itertuples():
+        metrics[f"wape_{row.months_ahead}m"] = row.wape_model
     return metrics
 
 
@@ -179,15 +168,9 @@ def _lab_test():
     return rows.drop(test.index), test, production_id, production
 
 
-def _by_category(tested):
-    """Test scores per category (and All categories), all months ahead together, indexed by category name."""
-    found = test_results(tested)
-    return found[found["months_ahead"] == "ALL"].set_index("category_name")
-
-
-def _overall(tested):
-    """The scores champion / challenger decides on: the categories (not the net cash flow), all months ahead."""
-    return scores(tested[tested["category"] != "NET"])
+def _by_months_ahead(tested):
+    """Test scores per months ahead and overall (ALL), indexed by months ahead."""
+    return test_results(tested).set_index("months_ahead")
 
 
 def _record_try(forecaster, train, test, tested, production_id):
@@ -205,21 +188,21 @@ def lab_try(forecaster, record=True):
     the notebook forecast_lab uses lab_compare). It is trained without the last 6 months and tested on them, the way
     champion / challenger tests a new model, and the try is recorded in Experiment Tracking (experiment cashflow_lab,
     never deployed).
-    Returns: per category (all months ahead together) the EV error of the simple guess, of the production model and of
-    the candidate, and their P10-P90 coverage; the decision champion / challenger would take and its reason; the lab
-    run ID (None if not recorded)."""
+    Returns: per months ahead (1, 2, 3, ALL) the EV error of the simple guess, of the production model and of the
+    candidate, and their P10-P90 coverage; the decision champion / challenger would take and its reason; the lab run
+    ID (None if not recorded)."""
     import tracking
     train, test, production_id, production = _lab_test()
     forecaster.fit(train)
     candidate = test.join(forecast(forecaster, test))
-    mine = _by_category(candidate)
+    mine = _by_months_ahead(candidate)
     table = pd.DataFrame({"simple_guess_error": mine["wape_baseline"], "production_error": np.nan,
                           "candidate_error": mine["wape_model"], "production_coverage": np.nan,
                           "candidate_coverage": mine["coverage_p10_p90"]})
     if production is not None:
-        theirs = _by_category(production)
+        theirs = _by_months_ahead(production)
         table["production_error"], table["production_coverage"] = theirs["wape_model"], theirs["coverage_p10_p90"]
-    decision, reason = tracking.decide(_overall(candidate), _overall(production) if production is not None else None)
+    decision, reason = tracking.decide(scores(candidate), scores(production) if production is not None else None)
     run_id = _record_try(forecaster, train, test, candidate, production_id) if record else None
     return table, decision, reason, run_id
 
@@ -229,11 +212,9 @@ def lab_compare(forecasters, record=True):
     challenger, without touching production. Each forecaster is trained without the last 6 months; each try is
     recorded in Experiment Tracking (experiment cashflow_lab) unless record is False. Returns a dict:
         board       one row per model (production first, simple guess last): EV error, P10-P90 coverage, share below
-                    P10 and above P90 (the categories, all months ahead), the decision champion / challenger would
-                    take and its reason, the lab run ID
-        errors      EV error per category: the simple guess, the production model and each forecaster
-        coverage    P10-P90 coverage per category: the production model and each forecaster
-        by_months_ahead  EV error per months ahead (the categories): the production model and each forecaster
+                    P10 and above P90, the decision champion / challenger would take and its reason, the lab run ID
+        errors      EV error per months ahead: the simple guess, the production model and each forecaster
+        coverage    P10-P90 coverage per months ahead: the production model and each forecaster
         tested      the test rows with each model's p10, ev, p90, by name, for your own analysis"""
     import tracking
     names = [f.name for f in forecasters]
@@ -245,25 +226,21 @@ def lab_compare(forecasters, record=True):
         forecaster.fit(train)
         tested[forecaster.name] = test.join(forecast(forecaster, test))
     run_ids = {f.name: _record_try(f, train, test, tested[f.name], production_id) for f in forecasters} if record else {}
-    reference = _overall(production) if production is not None else None
+    reference = scores(production) if production is not None else None
     board = []
     for name, rows in tested.items():
-        s = _overall(rows)
+        s = scores(rows)
         decision, reason = (("", f"the production model, {production_id}") if name == "production"
                             else tracking.decide(s, reference))
         board.append({"model": name, "ev_error": s["wape_model"], "coverage_p10_p90": s["coverage_p10_p90"],
                       "below_p10": s["below_p10"], "above_p90": s["above_p90"], "decision": decision,
                       "reason": reason, "lab_run_id": run_ids.get(name, "")})
-    board.append({"model": "simple_guess_baseline", "ev_error": _overall(next(iter(tested.values())))["wape_baseline"],
+    board.append({"model": "simple_guess_baseline", "ev_error": scores(next(iter(tested.values())))["wape_baseline"],
                   "decision": "", "reason": "average of the last 3 months: the bar to beat", "lab_run_id": ""})
     board = pd.DataFrame(board).set_index("model")
-    per_category = {name: _by_category(rows) for name, rows in tested.items()}
-    first = next(iter(per_category.values()))
+    per = {name: _by_months_ahead(rows) for name, rows in tested.items()}
+    first = next(iter(per.values()))
     errors = pd.DataFrame({"simple_guess_baseline": first["wape_baseline"],
-                           **{name: found["wape_model"] for name, found in per_category.items()}})
-    coverage = pd.DataFrame({name: found["coverage_p10_p90"] for name, found in per_category.items()})
-    by_months_ahead = pd.DataFrame({
-        name: test_results(rows).query("category == 'ALL' and months_ahead != 'ALL'").set_index("months_ahead")[
-            "wape_model"] for name, rows in tested.items()})
-    return {"board": board, "errors": errors, "coverage": coverage, "by_months_ahead": by_months_ahead,
-            "tested": tested}
+                           **{name: found["wape_model"] for name, found in per.items()}})
+    coverage = pd.DataFrame({name: found["coverage_p10_p90"] for name, found in per.items()})
+    return {"board": board, "errors": errors, "coverage": coverage, "tested": tested}

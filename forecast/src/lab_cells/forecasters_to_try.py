@@ -1,22 +1,16 @@
 class SimpleGuess:
-    """The simple guess as a forecaster: EV = average of the last 3 months (without the scheduled part); P10 and P90 =
-    EV plus the errors it made in training at 10% and 90%, per category, scaled by the series scale."""
+    """The simple guess as a forecaster: EV = average of the last 3 months; P10 and P90 = EV plus the errors it made
+    in training at 10% and 90%, scaled by the client's scale."""
     name = "simple_guess"
     params = {"quantiles": "0.1,0.9"}
-    inputs = ["category", "free_avg_3m", "series_scale"]
-
-    def _guess(self, rows):
-        return np.where(rows["category"] == "NET", rows["free_avg_3m"], rows["free_avg_3m"].clip(lower=0))
+    inputs = ["avg_3m", "scale"]
 
     def fit(self, rows):
-        error = (rows["target"] - self._guess(rows)) / rows["series_scale"]
-        self.bands = error.groupby(rows["category"]).quantile([0.1, 0.9]).unstack()
+        self.band = ((rows["target"] - rows["avg_3m"]) / rows["scale"]).quantile([0.1, 0.9]).values
 
     def predict(self, rows):
-        ev = self._guess(rows)
-        band = self.bands.reindex(rows["category"]).fillna(0.0).values
-        scale = rows["series_scale"].values
-        return pd.DataFrame({"p10": ev + band[:, 0] * scale, "ev": ev, "p90": ev + band[:, 1] * scale},
+        ev, scale = rows["avg_3m"].values, rows["scale"].values
+        return pd.DataFrame({"p10": ev + self.band[0] * scale, "ev": ev, "p90": ev + self.band[1] * scale},
                             index=rows.index)
 
 
@@ -28,7 +22,7 @@ class CatBoostDepth8(CatBoostForecaster):
 
 class SklearnBoosting:
     """scikit-learn gradient boosting (HistGradientBoostingRegressor): one model for the EV, one for P10 and one for
-    P90 (quantile loss), with the reference forecaster's inputs and scaling (amounts / series scale)."""
+    P90 (quantile loss), with the reference forecaster's inputs and scaling (amounts / the client's scale)."""
     name = "sklearn_boosting"
     params = {"max_iter": 400, "learning_rate": 0.05, "max_leaf_nodes": 31, "min_samples_leaf": 40, "random_state": 0}
     inputs = CatBoostForecaster.inputs
@@ -43,7 +37,7 @@ class SklearnBoosting:
         from sklearn.ensemble import HistGradientBoostingRegressor
         self.codes = {c: {v: i for i, v in enumerate(values.value_counts().index[:250])}   # at most 250 per column
                       for c, values in model_matrix(rows)[CAT_FEATURES].items()}
-        X, y = self._matrix(rows), rows["target"] / rows["series_scale"]
+        X, y = self._matrix(rows), rows["target"] / rows["scale"]
         is_category = [c in CAT_FEATURES for c in X.columns]
         losses = {"ev": {"loss": "squared_error"}, "p10": {"loss": "quantile", "quantile": 0.1},
                   "p90": {"loss": "quantile", "quantile": 0.9}}
@@ -51,5 +45,5 @@ class SklearnBoosting:
                        for k, loss in losses.items()}
 
     def predict(self, rows):
-        X, scale = self._matrix(rows), rows["series_scale"].values
+        X, scale = self._matrix(rows), rows["scale"].values
         return pd.DataFrame({k: m.predict(X) * scale for k, m in self.models.items()}, index=rows.index)

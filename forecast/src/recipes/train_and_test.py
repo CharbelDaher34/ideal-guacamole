@@ -22,7 +22,7 @@ model_id = new_model_id(cutoff)
 results = test_results(test.join(forecast(backtest, test)))
 results.insert(0, "model_id", model_id)
 metrics = run_metrics(results)
-inputs = list(final.inputs) + ([] if "category" in final.inputs else ["category"])
+inputs = list(final.inputs)
 params = {"forecaster": final.name, **getattr(final, "params", {}), "cutoff_month": f"{cutoff:%Y-%m}",
           "load_id": dataiku.get_custom_variables().get("load_id", ""), "training_rows": len(rows),
           "test_rows": len(test), "clients": rows["client_no"].nunique(), "inputs": ",".join(inputs)}
