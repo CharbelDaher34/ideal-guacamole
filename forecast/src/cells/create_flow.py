@@ -32,7 +32,6 @@ FLOW = {
     "archive_forecast": (["final_forecast"], ["forecast_archive", "inference_log"], "Inference"),
 }
 FOLDERS = ["experiments", "forecast_archive"]
-REPLACED = ["build_rows"]                           # recipes of earlier versions, deleted (their outputs are kept)
 APPENDED = ["promotion_log", "inference_log"]       # logs: each run adds a row
 BUILT_BY_NAME = ["experiments", "promotion_log"]    # never rebuilt by building what comes after them
 
@@ -55,38 +54,6 @@ for file_name, code in (("cashflow.py", LIBRARY_CODE), ("warehouse.py", WAREHOUS
 # what the project already has (read once, kept up to date below)
 datasets = {d["name"] for d in project.list_datasets()}
 recipes = {r["name"] for r in project.list_recipes()}
-for name in REPLACED:
-    if name in recipes:
-        project.get_recipe(name).delete()
-        recipes.discard(name)
-        print("deleted recipe", name, "(replaced)")
-
-# "Try the model" (an earlier version, removed): its recipe, data, folders, scenario, dashboard and zone are deleted
-if "try_the_model" in recipes:
-    project.get_recipe("try_the_model").delete()
-    recipes.discard("try_the_model")
-if "try_model_forecast" in datasets:
-    project.get_dataset("try_model_forecast").delete(drop_data=True)
-    datasets.discard("try_model_forecast")
-for f in project.list_managed_folders():
-    if f["name"] in ("try_model_uploads", "try_model_charts"):
-        old_folder = project.get_managed_folder(f["id"])
-        for item in old_folder.list_contents()["items"]:      # files first: DSS 14 leaves them otherwise
-            old_folder.delete_file(item["path"])
-        old_folder.delete()
-for s in project.list_scenarios():
-    if s["name"] == "Try the model":
-        project.get_scenario(s["id"]).delete()
-for d in project.list_dashboards():
-    if d.name == "Try the model":
-        project.get_dashboard(d.id).delete()
-for i in project.list_insights():
-    if i.name in ("Run Try the model", "Uploaded files", "Forecast chart (net cash flow)",
-                  "Forecast of the uploaded clients"):
-        project.get_insight(i.id).delete()
-for z in flow.list_zones():
-    if z.name == "Try the model":
-        z.delete()
 
 
 def new_dataset(name):
@@ -196,17 +163,8 @@ for name, (inputs, outputs, _) in FLOW.items():
     for item in inputs + outputs:      # inputs made by recipes created later (Score) get their dataset now
         if item not in folders:
             new_dataset(item)
-    if name in recipes:                # already there: its code and code env are updated, missing inputs / outputs added
+    if name in recipes:                # already there: only its code and code env are updated
         recipe = project.get_recipe(name)
-        settings = recipe.get_settings()
-        listed = lambda roles: {item["ref"] for role in roles.values() for item in role["items"]}
-        for i in inputs:
-            if ref(i) not in listed(settings.get_recipe_inputs()):
-                settings.add_input("main", ref(i))
-        for o in outputs:
-            if ref(o) not in listed(settings.get_recipe_outputs()):
-                settings.add_output("main", ref(o), append_mode=o in APPENDED)
-        settings.save()
     else:
         builder = project.new_recipe("python", name)
         for i in inputs:
