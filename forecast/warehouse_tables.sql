@@ -1,9 +1,8 @@
--- Digital Cash Management Forecast: the 3 tables the forecast reads, built from the bank's main data.
--- The warehouse team writes each one as a CSV file (one folder per table) in the landing folder, with the audit
--- columns ETL_LOAD_ID and ETL_LOAD_DTTS, then adds one row per table to CFF_LOAD_RECORD (LOAD_ID, LOAD_DTTS,
--- AS_OF_DT, SRC_TBL_NM, TRGT_TBL_NM, ROW_CNT, LOAD_STA_CD).
--- Placeholders in <angle brackets> depend on the bank: fill them in after the checks marked "check".
--- Month start is written TRUNC(date, 'MM') (Oracle); use your database's own function if it differs.
+-- Digital Cash Management Forecast: the warehouse tables the forecast reads, from the bank's main data.
+-- The warehouse team builds CFF_CLIENT and CFF_SCHEDULED_PYMT (tables or views, read through the database
+-- connection; or CSV files in the landing folder, with the audit columns ETL_LOAD_ID and ETL_LOAD_DTTS), then
+-- adds one row per table to CFF_LOAD_RECORD (LOAD_ID, LOAD_DTTS, AS_OF_DT, SRC_TBL_NM, TRGT_TBL_NM, ROW_CNT,
+-- LOAD_STA_CD). Oracle SQL. Placeholders in <angle brackets> depend on the bank: fill them in after the checks.
 
 
 -- 1. CFF_CLIENT: one row per business client, companies and businesses owned by one person (sole proprietors)
@@ -27,36 +26,19 @@ WHERE <current row only>                      -- check: DIM_CUSTOMER may keep ol
 -- check: SELECT COUNT(*), COUNT(DISTINCT CSTMR_CIF) ... must be equal
 
 
--- 2. CFF_CLIENT_MNTHLY_FLOW: money in and out per client, month, direction, T24 module and transaction type
-WITH entries AS (
-    SELECT s.*
-    FROM EDW.FCT_STATEMENT_ENTRY s
-    JOIN CFF_CLIENT c ON c.CSTMR_CIF = s.CSTMR_CIF          -- business clients only (no bank internal accounts)
-),
-reversed AS (                                               -- a reversed posting and its reversal cancel out
-    SELECT DISTINCT TRNS_RFR FROM entries WHERE RVRSL_MRKR IS NOT NULL      -- check: how reversals are marked
-),
-own_transfers AS (                                          -- money moved between the client's own accounts
-    SELECT TRNS_RFR, CSTMR_CIF
-    FROM entries
-    WHERE TRNS_RFR IS NOT NULL
-    GROUP BY TRNS_RFR, CSTMR_CIF
-    HAVING COUNT(DISTINCT CRDT_DBT_FLG) = 2 AND SUM(AMT_LCY) = 0             -- a debit and a credit that net to 0
-)
-SELECT e.CSTMR_CIF,
-       TRUNC(e.VAL_DT, 'MM')        AS MNTH,                -- the value date's month
-       e.CRDT_DBT_FLG,                                      -- C: money in, D: money out
-       e.SYS_ID,                                            -- T24 module: FT, TT, AA, CQ, STO, ...
-       COALESCE(e.TRNS_TYP, 'NONE') AS TRNS_TYP,
-       SUM(ABS(e.AMT_LCY))          AS AMT_LCY,             -- SAR, always positive
-       COUNT(*)                     AS PSTNG_CNT
-FROM entries e
-WHERE NOT EXISTS (SELECT 1 FROM reversed r WHERE r.TRNS_RFR = e.TRNS_RFR)
-  AND NOT EXISTS (SELECT 1 FROM own_transfers o WHERE o.TRNS_RFR = e.TRNS_RFR AND o.CSTMR_CIF = e.CSTMR_CIF)
-GROUP BY e.CSTMR_CIF, TRUNC(e.VAL_DT, 'MM'), e.CRDT_DBT_FLG, e.SYS_ID, COALESCE(e.TRNS_TYP, 'NONE');
--- check: the sign of AMT_LCY against CRDT_DBT_FLG; how often VAL_DT and TRNS_DT fall in different months;
--- one row per STMT_ENTRY_ID (not one per load); the distinct SYS_ID and TRNS_TYP values with their amounts,
--- which the forecast's category_mapping needs
+-- 2. The daily postings: nothing to build. The project reads EDW.FCT_STATEMENT_ENTRY itself through the read-only
+-- connection and sums it per client and month in Oracle (monthly_flows_sql in the project library, warehouse.py):
+-- business clients, the last 60 months, without reversed postings and transfers between the client's own accounts.
+-- Add one row per load for FCT_STATEMENT_ENTRY to CFF_LOAD_RECORD (status), like the other tables.
+-- check: the sign of AMT_LCY against CRDT_DBT_FLG (negative for money out); how reversals are marked (RVRSL_MRKR on
+-- the reversing posting, which carries the reversed posting's TRNS_RFR); how often VAL_DT and TRNS_DT fall in
+-- different months; one row per STMT_ENTRY_ID; the distinct SYS_ID and TRNS_TYP values with their amounts, which
+-- the forecast's category_mapping needs:
+SELECT SYS_ID, TRNS_TYP, CRDT_DBT_FLG, COUNT(*) AS POSTINGS, SUM(ABS(AMT_LCY)) AS AMOUNT
+FROM EDW.FCT_STATEMENT_ENTRY
+WHERE VAL_DT >= ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -12)
+GROUP BY SYS_ID, TRNS_TYP, CRDT_DBT_FLG
+ORDER BY AMOUNT DESC;
 
 
 -- 3. CFF_SCHEDULED_PYMT: every scheduled payment, past and future, with the date the bank first knew of it.

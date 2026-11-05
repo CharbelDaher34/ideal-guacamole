@@ -43,9 +43,9 @@ write("build_forecast_project.ipynb", [
 # Digital Cash Management Forecast: set up the project
 
 This notebook sets up the Digital Cash Management Forecast in this Dataiku project (it also gives the project
-that name), the way it runs in production. Everything is stored as CSV files. It reads the 3 tables the warehouse
-team builds from the bank's main data (`warehouse_tables.sql`): clients (`EDW.DIM_CUSTOMER`), money in and out per
-month (`EDW.FCT_STATEMENT_ENTRY`) and the scheduled payments, and the load record (in production: tables through a
+that name), the way it runs in production. Everything is stored as CSV files. It reads 3 warehouse tables: the
+clients (`EDW.DIM_CUSTOMER`), the daily postings (`EDW.FCT_STATEMENT_ENTRY`, summed per month by the staging recipe)
+and the scheduled payments, and the load record (in production: tables through a
 database connection, `WAREHOUSE_SQL_CONNECTION`, or CSV files in the landing folder): in the
 sandbox, the datasets the notebook `warehouse_simulator.ipynb` wrote in this project; in production, the warehouse
 team's CSV files in the landing folder, read-only through `EDW_LANDING` (names: `python/warehouse.py` in the
@@ -237,9 +237,8 @@ before `build_forecast_project.ipynb`.
 
 It generates sample data up to `SIM_END` (accounts, postings, loans, deposits, standing orders and so on) and
 publishes, as the warehouse would have them at the end of `AS_OF` (what had happened or was scheduled by then), the
-3 tables the forecast reads, built the way the warehouse team builds them from EDW (`warehouse_tables.sql`): the
-clients (`EDW.DIM_CUSTOMER`), the statement entries summed per month (`EDW.FCT_STATEMENT_ENTRY`) and the scheduled
-payments. They are written as CSV datasets of this project, in their EDW column names (`warehouse.py`). Each load
+3 tables the forecast reads, as the warehouse has them (`warehouse_tables.sql`): the clients (`EDW.DIM_CUSTOMER`),
+the daily postings (`EDW.FCT_STATEMENT_ENTRY`) and the scheduled payments. They are written as CSV datasets of this project, in their EDW column names (`warehouse.py`). Each load
 adds one row per table to `CFF_LOAD_RECORD`, which the forecast checks before it runs.
 
 To simulate the next load, move `AS_OF` to the next month's end, run all cells again, then run the scenario

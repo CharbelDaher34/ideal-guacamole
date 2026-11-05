@@ -34,7 +34,7 @@ CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', 
 #      the Lab (try_forecaster, and the notebook forecast_lab) compares one with the production model, untouched.
 #   3. the saved models' active version: training -> inference. Inference reads nothing else from training.
 FLOW = {
-    "stage_tables": (RAW, list(warehouse.TABLES), "Staging"),
+    "stage_tables": (RAW, warehouse.STAGED, "Staging"),
     "obligations": (["scheduled_with_category"], ["monthly_obligations"], "Data prep"),
     "build_training_rows": (["monthly_flows", "monthly_obligations", "clients"], ["training_rows"], "Training"),
     "train_and_test": (["training_rows"], ["experiments", "test_results", "model_reference"], "Training"),
@@ -118,7 +118,8 @@ for name in RAW + [warehouse.LOAD_RECORD]:
         continue
     datasets.add(name)
     if WAREHOUSE_SQL_CONNECTION:
-        project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name, WAREHOUSE_SQL_SCHEMA)
+        schema = warehouse.STATEMENT_SCHEMA if name == warehouse.TABLES["transactions"][0] else WAREHOUSE_SQL_SCHEMA
+        project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name, schema)
     else:
         dataset = project.create_dataset(name, "Filesystem", params={"connection": LANDING_CONNECTION,
                                                                      "path": "/" + name},
@@ -231,7 +232,7 @@ for short, name in cashflow.SAVED_MODELS.items():
     builder.create().rename(f"score_{short}")        # Dataiku names a Score recipe after its input
     print("score recipe", f"score_{short}", "->", f"scored_{short}")
 
-ZONES = {"Raw data": RAW + [warehouse.LOAD_RECORD], "Staging": list(warehouse.TABLES),
+ZONES = {"Raw data": RAW + [warehouse.LOAD_RECORD], "Staging": list(warehouse.STAGED),
          "Data prep": ["category_mapping", "flows_with_category", "monthly_flows", "scheduled_with_category"],
          "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"], "Lab": []}
 for _, outputs, zone_name in FLOW.values():

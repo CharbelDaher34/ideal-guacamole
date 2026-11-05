@@ -106,13 +106,13 @@ flowchart LR
 
 <section>
   <h2><span class="n">2</span>The data</h2>
-  <p>The forecast reads 3 tables that the warehouse team builds from the bank's main data (the SQL is in <code>warehouse_tables.sql</code>) and drops as CSV files in a landing folder, which the project reads read-only through the <code>EDW_LANDING</code> connection. Columns keep their EDW names. Until the files exist, a simulator plays the warehouse team with sample data, in the same names, month by month.</p>
+  <p>The forecast reads 3 warehouse tables, read-only: through the database connection to the warehouse (Oracle), or as CSV files in a landing folder. The SQL for the two tables the warehouse team builds is in <code>warehouse_tables.sql</code>; the daily postings are read as they are. Columns keep their EDW names. Until the real tables are connected, a simulator plays the warehouse team with sample data, in the same names, month by month.</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Table</th><th>Built from</th><th>One row per</th></tr></thead>
     <tbody>
       <tr><td><code>CFF_CLIENT</code></td><td><code>EDW.DIM_CUSTOMER</code>, current row, business clients only: companies and businesses owned by one person (the legal entity tells them apart)</td><td>Client</td></tr>
-      <tr><td><code>CFF_CLIENT_MNTHLY_FLOW</code></td><td><code>EDW.FCT_STATEMENT_ENTRY</code>, without reversed postings and transfers between the client's own accounts</td><td>Client, month (value date), in or out, T24 module (<code>SYS_ID</code>), transaction type (<code>TRNS_TYP</code>)</td></tr>
+      <tr><td><code>FCT_STATEMENT_ENTRY</code></td><td><code>EDW.FCT_STATEMENT_ENTRY</code> itself: the daily postings. The staging recipe sums them per client, month (value date), in or out, T24 module (<code>SYS_ID</code>) and transaction type (<code>TRNS_TYP</code>), without reversed postings and transfers between the client's own accounts: in the warehouse, as one Oracle query through the read-only connection, so only the monthly totals come into Dataiku</td><td>Posting</td></tr>
       <tr><td><code>CFF_SCHEDULED_PYMT</code></td><td>The payments already known for the coming months, the sources stacked: financing instalments, deposit maturities, standing orders (later: letters of credit, card statements, SADAD bills, post-dated cheques)</td><td>Scheduled payment, with its due date and the date the bank first knew of it</td></tr>
     </tbody>
   </table>
@@ -434,7 +434,7 @@ flowchart TB
         <li>Client total method: review once we see the test results.</li>
         <li>No past versions of schedules: in real data, obligation hints may show slightly more than was known at the time. Tell the tech lead.</li>
         <li>How real transactions are labelled as rent or supplier payments without descriptions (counterparty, transaction code).</li>
-        <li>The tech lead agrees to the warehouse building the monthly totals from the statement entries (the rules ask for no monthly totals).</li>
+        <li>The project sums the daily postings itself, in the warehouse through the read-only connection: confirm the query load with the warehouse team.</li>
         <li>Code env: the project needs a Python code env with <code>catboost 1.2.7</code>, <code>scikit-learn</code> and <code>mlflow 2.22.0</code> (Python 3.9) or <code>3.10.1</code> (Python 3.10 or later): the versions Dataiku tested. We cannot create one: a Dataiku admin creates it once.</li>
         <li>Warehouse table and column names are our proposal (<code>CFF_*</code>, EDW style); the warehouse team confirms them. If they differ, only the mapping file changes.</li>
       </ul>

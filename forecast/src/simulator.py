@@ -1,6 +1,6 @@
 # Plays the warehouse team (Informatica): publishes the sample data as it was known on a date (AS_OF), as the 3
 # tables the forecast reads, in their EDW names (warehouse.py), as CSV datasets of this project: the clients
-# (EDW.DIM_CUSTOMER), the statement entries summed per month (EDW.FCT_STATEMENT_ENTRY) and the scheduled payments.
+# (EDW.DIM_CUSTOMER), the daily statement entries (EDW.FCT_STATEMENT_ENTRY) and the scheduled payments.
 # Records each load in CFF_LOAD_RECORD. The generator's own 17 source tables stay inside the simulator.
 # The sample data is generated once up to SIM_END; publishing "as of" a date keeps what had happened or was
 # scheduled by then, and resets what was only known later (a bill paid after AS_OF is still unpaid, ...).
@@ -135,20 +135,29 @@ def curate(t, day):
     them from EDW (warehouse_tables.sql), with the standard column names."""
     d = pd.Timestamp(day)
     client_of = t["accounts"].set_index("account_no")["client_no"]
-    month = lambda s: pd.to_datetime(s).dt.to_period("M").dt.to_timestamp()
     scheduled = scheduled_payments(t, d, client_of)
     scheduled["origin_type"] = scheduled["origin_type"].map(SYS_ID)
 
-    # statement entries: no reversed postings (nor the postings they reverse), no transfers between own accounts
+    # the daily postings as T24 statement entries: amount negative for money out; a reversing posting is marked and
+    # carries the reference of the posting it reverses; a transfer between the client's own accounts has both legs,
+    # debit and credit, under one reference (the staging recipe leaves these out, as it would at the bank)
     tx = t["transactions"]
-    reversed_ids = set(tx.loc[tx["reversal_flag"].astype(bool), "original_ref"])
-    tx = tx[~tx["reversal_flag"].astype(bool) & ~tx["txn_id"].isin(reversed_ids) & ~tx["own_account_flag"].astype(bool)]
-    tx = tx.assign(client_no=tx["account_no"].map(client_of), month=month(tx["value_date"]),
-                   direction=np.where(tx["debit_credit"] == "C", "IN", "OUT"),
-                   origin_type=tx["origin_type"].replace("", np.nan).fillna("NONE").map(SYS_ID),
-                   txn_type_tag=tx["txn_type_tag"].replace("", np.nan).fillna("NONE"))
-    flows = (tx.groupby(["client_no", "month", "direction", "origin_type", "txn_type_tag"], as_index=False)
-             .agg(amount=("amount_sar", "sum"), postings=("txn_id", "count")).round(2))
+    ref = "FT" + tx["txn_id"].astype(str)
+    ref = ref.where(~tx["reversal_flag"].astype(bool), "FT" + tx["original_ref"].astype(str))
+    own = tx["own_account_flag"].astype(bool)
+    entries = pd.DataFrame({
+        "entry_id": tx["txn_id"], "client_no": tx["account_no"].map(client_of), "account_no": tx["account_no"],
+        "value_date": pd.to_datetime(tx["value_date"]),
+        "direction": np.where(tx["debit_credit"] == "C", "IN", "OUT"),
+        "amount": np.where(tx["debit_credit"] == "C", 1.0, -1.0) * tx["amount_sar"],
+        "origin_type": tx["origin_type"].replace("", np.nan).fillna("NONE").map(SYS_ID),
+        "txn_type_tag": tx["txn_type_tag"].replace("", np.nan).fillna("NONE"),
+        "txn_ref": ref.where(~own, "OWN" + tx["txn_id"].astype(str)),
+        "reversal": np.where(tx["reversal_flag"].astype(bool), "R", None)})
+    other_leg = entries[own.values].assign(
+        entry_id=lambda d: d["entry_id"] + "M", account_no=lambda d: "OWN-" + d["account_no"].astype(str),
+        direction=lambda d: np.where(d["direction"] == "IN", "OUT", "IN"), amount=lambda d: -d["amount"])
+    entries = pd.concat([entries, other_leg], ignore_index=True).round({"amount": 2})
 
     c = t["clients"]
     legal = c["legal_form"].map(LEGAL)
@@ -160,7 +169,7 @@ def curate(t, day):
         "business_sector": c["sector"], "industry": c["industry"], "sub_industry": c["industry"], "city": c["city"],
         "status": c["status"], "last_annual_sales": c["last_annual_sales"],
         "number_of_employees": c["number_of_employees"]})
-    return {"clients": clients, "monthly_flows_by_origin": flows, "scheduled_payments": scheduled}
+    return {"clients": clients, "transactions": entries, "scheduled_payments": scheduled}
 
 
 def scheduled_payments(t, d, client_of):

@@ -16,7 +16,7 @@ Three notebooks, all in the same project:
 
 1. In the project, import the notebooks (Notebooks → New notebook → Import).
 2. **Sandbox:** run `warehouse_simulator.ipynb` (Run All, about 1 minute). It writes `CFF_CLIENT`,
-   `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT` and `CFF_LOAD_RECORD` as of `AS_OF`,
+   `FCT_STATEMENT_ENTRY` (daily postings), `CFF_SCHEDULED_PYMT` and `CFF_LOAD_RECORD` as of `AS_OF`,
    for `N_CLIENTS` sample clients (40: a quick run; scores need more, for example 300).
 3. Run `build_forecast_project.ipynb` (check the settings in its first cell, Run All, a few minutes).
    It needs an existing Python code env (`CODE_ENV`) with `catboost==1.2.7`, `scikit-learn` and `mlflow`: 2.22.0
@@ -34,8 +34,9 @@ Three notebooks, all in the same project:
 
 1. **Ask a Dataiku admin once** for a read-only database connection to the warehouse (for example named `EDW`),
    usable by your group. Creating connections takes admin rights.
-2. **Ask the warehouse team** to build the 3 tables and the load record from
+2. **Ask the warehouse team** to build `CFF_CLIENT`, `CFF_SCHEDULED_PYMT` and the load record from
    [`warehouse_tables.sql`](warehouse_tables.sql), as tables or views in one schema, refreshed after each load.
+   The project reads `EDW.FCT_STATEMENT_ENTRY` itself (schema in `STATEMENT_SCHEMA`, `src/warehouse.py`).
 3. **In the setup notebook's first cell**, set `WAREHOUSE_SQL_CONNECTION = "EDW"` (the connection's name) and
    `WAREHOUSE_SQL_SCHEMA` (the schema of the tables). Do not run the simulator in that project.
 4. Run the setup notebook. It checks the connection first and stops with a clear message if the project cannot use
@@ -59,9 +60,14 @@ and codes the project expects are in `src/warehouse.py`, the only file to change
 | Table | Built from | One row per |
 |---|---|---|
 | `CFF_CLIENT` | `EDW.DIM_CUSTOMER`: current row, business clients only (companies and sole proprietors) | client |
-| `CFF_CLIENT_MNTHLY_FLOW` | `EDW.FCT_STATEMENT_ENTRY`, without reversed postings and transfers between the client's own accounts | client, month (value date), direction, `SYS_ID`, `TRNS_TYP` |
+| `FCT_STATEMENT_ENTRY` | `EDW.FCT_STATEMENT_ENTRY` itself, read as it is: the daily postings | posting |
 | `CFF_SCHEDULED_PYMT` | the payments already known for the coming months, stacked: financing instalments, deposit maturities, standing orders | scheduled payment, with `DUE_DT` and `KNOWN_DT` (when the bank first knew of it) |
 
+- **Daily postings, summed per month in the project.** The staging recipe sums `FCT_STATEMENT_ENTRY` per client,
+  month (value date), direction, `SYS_ID` and `TRNS_TYP`, for business clients and the last 60 months, without
+  reversed postings and transfers between the client's own accounts. Through the database connection (Oracle,
+  read-only) the sum runs in the warehouse as one query (`monthly_flows_sql` in `src/warehouse.py`): only the
+  monthly totals come into Dataiku. On CSV files (sandbox) it runs in Python with the same rules.
 - **Sole proprietors** (businesses owned by one person) are kept: the legal entity (`LGL_ENTY_DSC`,
   `PRTY_SUB_LGL_DSC`) tells them apart, and the model has a sole proprietor input.
 - **Annual sales and employees** are not in `DIM_CUSTOMER`: optional columns (`ANNL_SLS_AMT`, `NMBR_OF_EMP`);
@@ -73,7 +79,7 @@ and codes the project expects are in `src/warehouse.py`, the only file to change
 
 | Zone | Recipes | Outputs (CSV files unless noted) |
 |---|---|---|
-| Raw data (Dataiku's Default zone, renamed) | (simulator, or read-only landing files) | `CFF_CLIENT`, `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT`, `CFF_LOAD_RECORD` |
+| Raw data (Dataiku's Default zone, renamed) | (simulator, or read-only warehouse) | `CFF_CLIENT`, `FCT_STATEMENT_ENTRY`, `CFF_SCHEDULED_PYMT`, `CFF_LOAD_RECORD` |
 | Staging | `stage_tables` | `clients`, `monthly_flows_by_origin`, `scheduled_payments`: standard column names, flags Y / N → true / false |
 | Data prep | (CSV dataset) | `category_mapping`: T24 module (`SYS_ID`) + transaction type (`TRNS_TYP`) + direction → category, one row per combination |
 | Data prep (shared) | `join_flows_category` (Join), `group_monthly_flows` (Group), `join_scheduled_category` (Join), `obligations` | `flows_with_category`, `monthly_flows`, `scheduled_with_category`, `monthly_obligations` |
