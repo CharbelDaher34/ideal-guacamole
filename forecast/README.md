@@ -18,7 +18,8 @@ Two notebooks, both in the same project:
    `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT`, `CFF_CLIENT_MNTHLY_BAL` and `CFF_LOAD_RECORD` as of `AS_OF`,
    for `N_CLIENTS` sample clients (40: a quick run; scores need more, for example 300).
 3. Run `build_forecast_project.ipynb` (check the settings in its first cell, Run All, a few minutes).
-   It needs an existing Python code env (`CODE_ENV`) with `catboost>=1.2`, `scikit-learn` and `mlflow==3.16.0`:
+   It needs an existing Python 3.10 code env (`CODE_ENV`) with `catboost==1.2.7`, `scikit-learn` and
+   `mlflow==3.10.1` (the versions Dataiku 14 and 15 tested for MLflow models):
    it does not create one (that takes admin rights). It checks the env and, if something is missing, stops with
    the request to send a Dataiku admin.
    It uses the simulated tables if they are there, otherwise it links the warehouse team's landing files
@@ -52,12 +53,14 @@ batch. Running the setup again keeps it.
 - **Tracking:** every run of `train_and_test` is one model with a model ID like `CFF_202610_20261104T1329`
   (cut-off month, training time), recorded in **Experiment Tracking** (Lab → Experiment tracking): settings,
   cut-off, load, row counts, test scores on the last 6 months (EV error overall and per category, P10–P90
-  coverage), the backtest models, and three MLflow models (EV, P10, P90).
+  coverage), the backtest models, and three MLflow models (EV, P10, P90). The experiment is `cashflow_forecast`;
+  if that one points to a deleted `experiments` folder, training uses `cashflow_forecast_<folder id>` instead.
 - **Versions:** those three are deployed as a new version, named by the model ID, of the saved models
   `forecast_ev`, `forecast_p10` and `forecast_p90` (not activated yet).
 - **Promotion (automatic if better):** `champion_challenger` tests the new model and the production model on the
-  same last 6 months (each with its version trained without those months). With no production model yet, the new
-  model is promoted (the forecast needs one), with a warning in `promotion_log` if it fails the checks below.
+  same last 6 months (each with its version trained without those months). With no production model to compare
+  with (none yet, or its tracked files were deleted), the new model is promoted (the forecast needs one), with a
+  warning in `promotion_log` if it fails the checks below.
   Otherwise it is promoted if its EV error is lower (a tie keeps production), its P10–P90 coverage is between 70%
   and 90%, and it beats the simple guess. The step "Promote if better" activates its version in the three saved
   models.

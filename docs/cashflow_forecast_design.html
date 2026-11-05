@@ -437,7 +437,7 @@ flowchart TB
         <li>No past versions of schedules: in real data, obligation hints may show slightly more than was known at the time. Tell the tech lead.</li>
         <li>How real transactions are labelled as rent or supplier payments without descriptions (counterparty, transaction code).</li>
         <li>The tech lead agrees to curated monthly tables next to the detailed ones (the rules ask for no monthly totals).</li>
-        <li>Code env: the project needs a Python code env with <code>catboost</code>, <code>scikit-learn</code> and <code>mlflow 3.16</code>. We cannot create one: a Dataiku admin creates it once.</li>
+        <li>Code env: the project needs a Python code env with <code>catboost 1.2.7</code>, <code>scikit-learn</code> and <code>mlflow 3.10.1</code> (Python 3.10, the versions Dataiku tested). We cannot create one: a Dataiku admin creates it once.</li>
         <li>Warehouse table and column names are our proposal (<code>CFF_*</code>, EDW style); the warehouse team confirms them. If they differ, only the mapping file changes.</li>
       </ul>
     </div>

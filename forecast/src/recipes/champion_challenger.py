@@ -1,6 +1,7 @@
 # Champion / challenger: the latest trained model (candidate) against the production model, both tested on the
 # same last 6 months with their backtest models (trained without those months). If there is no production model
-# yet, the candidate is promoted (the forecast needs one); its checks are noted in the reason. Otherwise it is
+# to compare with (none yet, or its tracked files were deleted), the candidate is promoted (the forecast needs one);
+# its checks are noted in the reason. Otherwise it is
 # promoted if
 #   - its EV error is lower than the production model's (a tie keeps the production model),
 #   - its P10-P90 coverage is between 70% and 90%,
@@ -11,12 +12,15 @@ import dataiku
 import pandas as pd
 
 from cashflow import holdout, predict, read_dataset, scores
-from tracking import MAX_COVERAGE, MIN_COVERAGE, latest_model_id, load_models, production_model_id
+from tracking import MAX_COVERAGE, MIN_COVERAGE, latest_model_id, load_models, production_model_id, runs
 
 test = holdout(read_dataset("training_rows"))
 test = test[test["category"] != "NET"]
 candidate = latest_model_id()
 production = production_model_id()
+if production and production not in set(runs()["model_id"]):     # its tracked files were deleted: nothing to test
+    print(f"Production model {production} is not in Experiment Tracking: the candidate is judged on its own")
+    production = ""
 tested = {m: scores(test.join(predict(load_models(m, "backtest"), test)))
           for m in {candidate, production} if m}
 c = tested[candidate]
@@ -32,7 +36,7 @@ if production == candidate:
     decision, reason = "KEEP", "the candidate is already the production model"
 elif not production:
     decision = "PROMOTE"
-    reason = (f"no production model yet, EV error {c['wape_model']:.2%}, coverage {c['coverage_p10_p90']:.1%}"
+    reason = (f"no production model to compare with, EV error {c['wape_model']:.2%}, coverage {c['coverage_p10_p90']:.1%}"
               + (f" (warning: {'; '.join(checks)})" if checks else ""))
 elif not MIN_COVERAGE <= c["coverage_p10_p90"] <= MAX_COVERAGE:
     decision, reason = "KEEP", f"candidate coverage {c['coverage_p10_p90']:.1%} outside {MIN_COVERAGE:.0%}-{MAX_COVERAGE:.0%}"

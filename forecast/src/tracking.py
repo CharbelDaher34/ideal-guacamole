@@ -29,6 +29,18 @@ def _mlflow():
     return _project().setup_mlflow(managed_folder=dataiku.Folder(FOLDER))
 
 
+def _experiment_name(mlflow):
+    """EXPERIMENT, kept in the folder experiments. If an experiment of that name points to another folder (the
+    experiments folder was deleted and created again, for example when the flow was deleted by hand), its files are
+    gone: use EXPERIMENT_<folder id> instead."""
+    import dataiku
+    folder_id = dataiku.Folder(FOLDER).get_id()
+    found = mlflow.get_experiment_by_name(EXPERIMENT)
+    if found is None or f"//{folder_id}/" in (found.artifact_location or ""):
+        return EXPERIMENT
+    return f"{EXPERIMENT}_{folder_id}"
+
+
 def new_model_id(cutoff):
     """CFF_<cut-off month>_<training time>, for example CFF_202610_20261104T1215 (also the saved model version)."""
     return f"CFF_{cutoff:%Y%m}_{pd.Timestamp.now():%Y%m%dT%H%M}"
@@ -66,7 +78,7 @@ def log_model(model_id, params, metrics, backtest, final, reference_dataset):
     cloudpickle.register_pickle_by_value(cashflow)     # the MLflow models carry their own copy of the code
     cloudpickle.register_pickle_by_value(tracking)
     with _mlflow() as mlflow:
-        mlflow.set_experiment(EXPERIMENT)
+        mlflow.set_experiment(_experiment_name(mlflow))
         with mlflow.start_run(run_name=model_id) as run:
             mlflow.set_tag("model_id", model_id)
             mlflow.log_params({k: str(v)[:250] for k, v in params.items()})
@@ -94,7 +106,8 @@ def log_model(model_id, params, metrics, backtest, final, reference_dataset):
 def runs():
     """Every training run, newest first: model_id, run_id, trained_at, and its metrics."""
     with _mlflow() as mlflow:
-        found = mlflow.search_runs(experiment_names=[EXPERIMENT], order_by=["attributes.start_time DESC"])
+        found = mlflow.search_runs(experiment_names=[_experiment_name(mlflow)],
+                                   order_by=["attributes.start_time DESC"])
     if found.empty:
         return pd.DataFrame(columns=["model_id", "run_id", "trained_at"])
     return found.rename(columns={"tags.model_id": "model_id", "start_time": "trained_at"})

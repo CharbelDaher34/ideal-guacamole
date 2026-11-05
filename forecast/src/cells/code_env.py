@@ -2,13 +2,14 @@ import dataiku
 
 client = dataiku.api_client()
 project = client.get_project(dataiku.default_project_key())
-# catboost: the models; mlflow: Experiment Tracking and the saved models
-PACKAGES = ("catboost>=1.2", "scikit-learn", "mlflow==3.16.0")
+# catboost: the models; mlflow: Experiment Tracking and the saved models. The versions Dataiku tested for MLflow
+# models (DSS 14 and 15 docs, "MLflow models: limitations")
+PACKAGES = ("catboost==1.2.7", "scikit-learn", "mlflow==3.10.1")
 
 
 def check_code_env(name, packages=PACKAGES):
     """Check the code env exists and lists the packages. It is not created here: an admin creates it once."""
-    request = (f"Ask a Dataiku admin to create the Python code env {name} (Python 3.10 to 3.12) with these "
+    request = (f"Ask a Dataiku admin to create the Python code env {name} (Python 3.10) with these "
                f"packages: {', '.join(packages)}. Or set CODE_ENV to an existing env that has them.")
     if name not in [e["envName"] for e in client.list_code_envs()]:
         raise RuntimeError(f"Code env {name} not found. {request}")
