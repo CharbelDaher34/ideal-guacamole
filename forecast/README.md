@@ -18,8 +18,9 @@ Two notebooks, both in the same project:
    `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT`, `CFF_CLIENT_MNTHLY_BAL` and `CFF_LOAD_RECORD` as of `AS_OF`,
    for `N_CLIENTS` sample clients (40: a quick run; scores need more, for example 300).
 3. Run `build_forecast_project.ipynb` (check the settings in its first cell, Run All, a few minutes).
-   It needs an existing Python 3.10 code env (`CODE_ENV`) with `catboost==1.2.7`, `scikit-learn` and
-   `mlflow==3.10.1` (the versions Dataiku 14 and 15 tested for MLflow models):
+   It needs an existing Python code env (`CODE_ENV`) with `catboost==1.2.7`, `scikit-learn` and `mlflow`: 2.22.0
+   (Python 3.9 or later) or 3.10.1 (Python 3.10 or later), the versions Dataiku 14 and 15 tested for MLflow models.
+   Tested on DSS 14.2.0 with Python 3.9 and mlflow 2.22.0:
    it does not create one (that takes admin rights). It checks the env and, if something is missing, stops with
    the request to send a Dataiku admin.
    It uses the simulated tables if they are there, otherwise it links the warehouse team's landing files

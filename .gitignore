@@ -1,5 +1,6 @@
 # DSS and PostgreSQL runtime data (DSS config includes connection credentials)
 dss_data/
+dss_data_*/
 pg_data/
 
 # secrets

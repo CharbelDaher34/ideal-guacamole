@@ -7,6 +7,7 @@ Those three are deployed as a new version (version ID = model ID) of the saved m
 and forecast_p90. The production model is the active version; promoting a model activates it in all three, and
 the Score recipes always use the active version.
 """
+import inspect
 import os
 import pickle
 import tempfile
@@ -88,28 +89,36 @@ def log_model(model_id, params, metrics, backtest, final, reference_dataset):
                     with open(os.path.join(tmp, f"backtest_{kind}.pkl"), "wb") as f:
                         pickle.dump(model, f)
                 mlflow.log_artifacts(tmp, artifact_path="backtest")
+            where = "name" if int(mlflow.__version__.split(".")[0]) >= 3 else "artifact_path"   # MLflow 3 or 2
             for name, model, column in (("ev", final["ev"], None), ("p10", final["p10_p90"], 0),
                                         ("p90", final["p10_p90"], 1)):
-                mlflow.pyfunc.log_model(name=name, python_model=forecast_model(model, column))
+                mlflow.pyfunc.log_model(python_model=forecast_model(model, column), **{where: name})
             run_id = run.info.run_id
     extension = _project().get_mlflow_extension()
     code_env = _project().get_recipe("train_and_test").get_settings().get_recipe_params()["envSelection"]["envName"]
     extension.set_run_inference_info(run_id=run_id, prediction_type="REGRESSION", code_env_name=code_env,
                                      target="target")
+    # which model of the run: model_name in DSS 15 (MLflow 3 models), model_sub_folder in DSS 14 (the artifact path)
+    which = "model_name" if "model_name" in inspect.signature(extension.deploy_run_model).parameters else "model_sub_folder"
     for name, saved_model_name in SAVED_MODELS.items():
+        model = saved_model(saved_model_name)
+        before = (model.get_active_version() or {}).get("id")
         # evaluated on the reference sample: gives the version its input schema (the Score recipes need it)
-        extension.deploy_run_model(run_id, saved_model(saved_model_name).id, version_id=model_id, model_name=name,
+        extension.deploy_run_model(run_id, model.id, version_id=model_id,
                                    evaluation_dataset=reference_dataset, target_column_name="target",
-                                   activate=False, skip_expensive_reports=True)
+                                   activate=False, skip_expensive_reports=True, **{which: name})
+        if before and (model.get_active_version() or {}).get("id") != before:
+            model.set_active_version(before)       # DSS 14 activates every deployed version: only a promotion may
 
 
 def runs():
     """Every training run, newest first: model_id, run_id, trained_at, and its metrics."""
     with _mlflow() as mlflow:
-        found = mlflow.search_runs(experiment_names=[_experiment_name(mlflow)],
-                                   order_by=["attributes.start_time DESC"])
+        # sorted here: DSS 14 cannot sort runs by start time in the search
+        found = mlflow.search_runs(experiment_names=[_experiment_name(mlflow)])
     if found.empty:
         return pd.DataFrame(columns=["model_id", "run_id", "trained_at"])
+    found = found.sort_values("start_time", ascending=False).reset_index(drop=True)
     return found.rename(columns={"tags.model_id": "model_id", "start_time": "trained_at"})
 
 

@@ -1,6 +1,6 @@
 services:
   dss:
-    image: dataiku/dss:15.2.0
+    image: dataiku/dss:14.2.0
     container_name: dataiku-dss
     restart: unless-stopped
     ports:

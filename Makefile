@@ -1,4 +1,4 @@
-IMAGE := dataiku/dss:15.2.0
+IMAGE := dataiku/dss:14.2.0
 URL   := http://127.0.0.1:10000
 
 .PHONY: start stop

@@ -2,9 +2,10 @@
 
 The cash-flow forecast project (CSV files, no database) is built by a notebook: see [`forecast/`](forecast/README.md).
 
-Dataiku DSS 15.2.0 running in Docker (rootless) for testing development work.
+Dataiku DSS 14.2.0 running in Docker (rootless) for testing development work: the closest image to the bank's
+14.2.2 (there is no 14.2.2 image). The earlier 15.2.0 data folder is kept in `dss_data_15.2_backup/` (not in git).
 
-- Image: `dataiku/dss:15.2.0`
+- Image: `dataiku/dss:14.2.0` (Python 3.9 only)
 - URL (server-local only): http://127.0.0.1:10000
 - Data dir (projects, code envs, config, logs): `./dss_data` → `/home/dataiku/dss` in the container
 - Code env `cashflow_forecast` (CatBoost, MLflow): created by the forecast notebook if missing
@@ -59,7 +60,7 @@ Snowflake/BigQuery/Oracle/etc. connectors, partitioning. Use the 14-day Dataiku 
 
 ```bash
 docker compose down
-docker run --rm -u 0 -v "$PWD/dss_data:/d" -v "$PWD/pg_data:/p" --entrypoint sh dataiku/dss:15.2.0 -c 'rm -rf /d/* /d/.[!.]* /p/* /p/.[!.]*'
+docker run --rm -u 0 -v "$PWD/dss_data:/d" -v "$PWD/pg_data:/p" --entrypoint sh dataiku/dss:14.2.0 -c 'rm -rf /d/* /d/.[!.]* /p/* /p/.[!.]*'
 docker compose up -d
 ```
 
