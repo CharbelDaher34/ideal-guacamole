@@ -31,10 +31,6 @@ SCENARIOS = {
             ("Champion / challenger", ["promotion_log"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Promote if better", "apply_promotion"),
         ] + NIGHTLY[1:]),
-    "Try the model": (
-        "Forecast the clients in the CSV files of the folder try_model_uploads with the production model (into "
-        "try_model_forecast). Run by hand after uploading files; changes nothing else", None, [
-            ("Forecast the uploaded clients", ["try_model_forecast"], "NON_RECURSIVE_FORCED_BUILD")]),
 }
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}
 for name, (description, schedule, steps) in SCENARIOS.items():
@@ -48,9 +44,6 @@ for name, (description, schedule, steps) in SCENARIOS.items():
     scenario = project.create_scenario(name, "step_based", {
         "active": False, "description": description,
         "params": {"steps": [step(n, *s) for n, s in enumerate(steps)]}})
-    if schedule is None:                           # run by hand
-        print(f"Scenario ready: {name} (no trigger: run by hand)")
-        continue
     settings = scenario.get_settings()
     if schedule == "daily":
         settings.add_daily_trigger(hour=6, timezone="Asia/Riyadh")

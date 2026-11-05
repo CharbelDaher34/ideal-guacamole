@@ -14,8 +14,8 @@ RAW = [warehouse_table for warehouse_table, _ in lib["TABLES"].values()]
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
 
-# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file; experiments, forecast_archive and
-# try_model_uploads are folders. The visual recipes (Join, Group, Score) are created further down.
+# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file; experiments and forecast_archive are
+# folders. The visual recipes (Join, Group, Score) are created further down.
 # Training and inference share the data prep, then split: training_rows (Training zone) and scoring_rows (Inference
 # zone) are built by two recipes, so the nightly batch never touches the training data.
 FLOW = {
@@ -30,11 +30,8 @@ FLOW = {
     "final_forecast": (["scored_ev", "scored_p10", "scored_p90", "monthly_obligations", "promotion_log"],
                        ["final_forecast"], "Inference"),
     "archive_forecast": (["final_forecast"], ["forecast_archive", "inference_log"], "Inference"),
-    # upload CSV files of clients to the folder, build try_model_forecast: the production model's forecast for them
-    "try_the_model": (["try_model_uploads", "experiments"], ["try_model_forecast", "try_model_charts"],
-                      "Try the model"),
 }
-FOLDERS = ["experiments", "forecast_archive", "try_model_uploads", "try_model_charts"]
+FOLDERS = ["experiments", "forecast_archive"]
 REPLACED = ["build_rows"]                           # recipes of earlier versions, deleted (their outputs are kept)
 APPENDED = ["promotion_log", "inference_log"]       # logs: each run adds a row
 BUILT_BY_NAME = ["experiments", "promotion_log"]    # never rebuilt by building what comes after them
@@ -63,6 +60,33 @@ for name in REPLACED:
         project.get_recipe(name).delete()
         recipes.discard(name)
         print("deleted recipe", name, "(replaced)")
+
+# "Try the model" (an earlier version, removed): its recipe, data, folders, scenario, dashboard and zone are deleted
+if "try_the_model" in recipes:
+    project.get_recipe("try_the_model").delete()
+    recipes.discard("try_the_model")
+if "try_model_forecast" in datasets:
+    project.get_dataset("try_model_forecast").delete(drop_data=True)
+    datasets.discard("try_model_forecast")
+for f in project.list_managed_folders():
+    if f["name"] in ("try_model_uploads", "try_model_charts"):
+        old_folder = project.get_managed_folder(f["id"])
+        for item in old_folder.list_contents()["items"]:      # files first: DSS 14 leaves them otherwise
+            old_folder.delete_file(item["path"])
+        old_folder.delete()
+for s in project.list_scenarios():
+    if s["name"] == "Try the model":
+        project.get_scenario(s["id"]).delete()
+for d in project.list_dashboards():
+    if d.name == "Try the model":
+        project.get_dashboard(d.id).delete()
+for i in project.list_insights():
+    if i.name in ("Run Try the model", "Uploaded files", "Forecast chart (net cash flow)",
+                  "Forecast of the uploaded clients"):
+        project.get_insight(i.id).delete()
+for z in flow.list_zones():
+    if z.name == "Try the model":
+        z.delete()
 
 
 def new_dataset(name):
@@ -210,7 +234,7 @@ for short, name in lib["SAVED_MODELS"].items():
 
 ZONES = {"Raw data": RAW + [lib["LOAD_RECORD"]], "Staging": list(lib["TABLES"]),
          "Data prep": ["category_mapping", "flows_with_category", "monthly_flows", "scheduled_with_category"],
-         "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"], "Try the model": ["try_model_uploads"]}
+         "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"]}
 for _, outputs, zone_name in FLOW.values():
     ZONES[zone_name] += [o for o in outputs if o not in ZONES[zone_name]]
 # the raw data goes in Dataiku's Default zone, renamed (so there is no empty zone). It exists once another zone does.

@@ -6,7 +6,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 SRC = HERE / "src"
 RECIPES = ["stage_tables", "obligations", "build_training_rows", "train_and_test", "champion_challenger",
-           "build_scoring_rows", "final_forecast", "archive_forecast", "try_the_model"]
+           "build_scoring_rows", "final_forecast", "archive_forecast"]
 
 
 def code(text):
@@ -58,12 +58,8 @@ project library). It builds:
   forecast (every row says which model
   and which load produced it), the forecast archive, and the inference log (one row per run: when, which model,
   which load, how many clients).
-- **Try the model**: upload CSV files of clients (real or made up) to the folder `try_model_uploads` and get the
-  production model's forecast for them in `try_model_forecast`, with a chart in `try_model_charts`, all on the
-  dashboard **Try the model**. Changes nothing else.
-- Three scenarios: **Nightly batch** and **Retrain, test and promote** each start with the load check
+- Two scenarios: **Nightly batch** and **Retrain, test and promote**. Each starts with the load check
   (`check_latest_load`): it stops the scenario if the latest load is incomplete, and sets `cutoff_month`.
-  **Try the model** is run by hand after uploading files.
 
 It then trains, tests and promotes a first model, and runs the first nightly batch.
 
@@ -99,7 +95,7 @@ below becomes a Python recipe in the flow; the visual recipes are created in the
 
 Uses the simulated warehouse tables, or links the landing files (read-only), and creates the category
 mapping, the recipes (Python, Join, Group, Score) and their CSV datasets, the folders `experiments` (tracked
-models), `forecast_archive`, `try_model_uploads` and `try_model_charts`, and the three saved models, in 6 zones. Training (folder
+models) and `forecast_archive`, and the three saved models, in 5 zones. Training (folder
 `experiments`), the promotion log and the saved models are only rebuilt when asked by name, so the nightly batch
 never retrains by accident.
 """),
@@ -113,47 +109,19 @@ forecast, archive, log.
 """),
     code(read("cells/first_run.py")),
     md("""
-## 5. Try the model
-
-Upload CSV files to the folder `try_model_uploads` (Flow > Try the model > `try_model_uploads` > Upload), then run
-the scenario **Try the model** (the dashboard **Try the model** has a button for it, the chart and the table). One row per client, month and category, amounts in
-SAR (positive):
-
-| client_no | month | category | amount |
-|---|---|---|---|
-| TEST_1 | 2025-11 | RECEIPTS | 250000 |
-| TEST_1 | 2025-11 | PAYROLL | 90000 |
-
-Categories: PAYROLL, RENT, FINANCING, SADAD_GOV, SUPPLIERS, CORP_CARD, OTHER_OUT, RECEIPTS, CARD_SALES, CHEQUES_IN,
-DEPOSIT_MAT, OTHER_IN. Optional columns: segment, sector, region, last_annual_sales, number_of_employees,
-balance_end. A client needs 12 months up to the latest month in the files (the cut-off). Scheduled payments are not
-uploaded: every amount counts as not scheduled. The first time, this writes `example_clients.csv` (two clients of
-the data, renamed) to show the format; delete it when you upload your own.
-"""),
-    code(read("cells/try_model.py")),
-    md("""
-## 6. Scenarios
+## 5. Scenarios
 
 - **Nightly batch**: check the load, build the scoring rows, forecast with the production model, archive it and
   log the run. It does not touch the training data.
 - **Retrain, test and promote**: check the load, prepare the training data, train, test and deploy a new model,
   champion / challenger, activate it if better, then forecast with the production model.
-- **Try the model**: forecast the uploaded clients (no trigger, run by hand).
 
 Their triggers (daily at 06:00 and monthly on the 5th, Riyadh time) are created switched off; switch them on
 in production.
 """),
     code(read("cells/scenarios.py")),
     md("""
-## 7. Dashboard Try the model
-
-A dashboard (Dashboards menu) to test the model on your own clients: how to upload, the uploaded files, a button
-that runs the scenario **Try the model**, the chart (each client's net cash flow and its forecast) and the forecast
-table. Created once; when the setup runs again it is kept as it is.
-"""),
-    code(read("cells/dashboard.py")),
-    md("""
-## 8. Results
+## 6. Results
 
 To use another model (for example to roll back), activate its version in the three saved models
 (`forecast_ev`, `forecast_p10`, `forecast_p90`) and run the Nightly batch.
