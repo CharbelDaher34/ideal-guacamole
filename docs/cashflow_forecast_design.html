@@ -86,7 +86,7 @@ svg text { font-family: var(--body); }
   <div class="figure">
 <pre class="mermaid">
 flowchart LR
-  A[17 warehouse tables] --> B[Clean and label transactions by category]
+  A[Statement entries: EDW.FCT_STATEMENT_ENTRY] --> B[A category for each T24 module and transaction type]
   B --> C[Monthly totals per client, category, in or out]
   C --> D[Take out obligations]
   D --> E[Training rows: cut-off month + 3 months ahead]
@@ -95,7 +95,7 @@ flowchart LR
   F --> H[Add obligations back]
   G --> H
   H --> I[Final forecast + client total]
-  A --> O[Obligations per month]
+  S[Scheduled payments: financing, deposits, standing orders] --> O[Obligations per month]
   O --> D
   O -. shown to models as a hint .-> E
   O --> H
@@ -106,37 +106,21 @@ flowchart LR
 
 <section>
   <h2><span class="n">2</span>The data</h2>
-  <p>The 17 tables from the data requirements fall into four groups. The warehouse team builds them, and from them 4 curated tables that it drops as CSV files in a landing folder, which the project reads read-only through the <code>EDW_LANDING</code> connection: <code>CFF_CLIENT</code>, <code>CFF_CLIENT_MNTHLY_FLOW</code> (money in and out per client, month, origin type and transaction tag), <code>CFF_SCHEDULED_PYMT</code> (every scheduled payment and when it became known) and <code>CFF_CLIENT_MNTHLY_BAL</code>. The detailed tables stay in the warehouse for checks. Until they exist, a simulator plays the warehouse team with realistic sample data, in the same names, month by month.</p>
-  <div class="figure">
-<pre class="mermaid">
-mindmap
-  root((Forecast data))
-    Who the client is
-      Clients
-      Accounts
-      Group structure
-      Monthly client summary
-    Money that moved
-      Transactions
-      Daily balances
-      Payroll files
-      SADAD payments
-      Card sales
-      Cheques
-    Obligations, already scheduled
-      Financing schedules
-      Standing orders
-      Deposits
-      Trade finance
-      Corporate cards
-    Helpers
-      Code lists
-      Bills issued by clients
-</pre>
+  <p>The forecast reads 3 tables that the warehouse team builds from the bank's main data (the SQL is in <code>warehouse_tables.sql</code>) and drops as CSV files in a landing folder, which the project reads read-only through the <code>EDW_LANDING</code> connection. Columns keep their EDW names. Until the files exist, a simulator plays the warehouse team with sample data, in the same names, month by month.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Table</th><th>Built from</th><th>One row per</th></tr></thead>
+    <tbody>
+      <tr><td><code>CFF_CLIENT</code></td><td><code>EDW.DIM_CUSTOMER</code>, current row, business clients only: companies and businesses owned by one person (the legal entity tells them apart)</td><td>Client</td></tr>
+      <tr><td><code>CFF_CLIENT_MNTHLY_FLOW</code></td><td><code>EDW.FCT_STATEMENT_ENTRY</code>, without reversed postings and transfers between the client's own accounts</td><td>Client, month (value date), in or out, T24 module (<code>SYS_ID</code>), transaction type (<code>TRNS_TYP</code>)</td></tr>
+      <tr><td><code>CFF_SCHEDULED_PYMT</code></td><td>The payments already known for the coming months, the sources stacked: financing instalments, deposit maturities, standing orders (later: letters of credit, card statements, SADAD bills, post-dated cheques)</td><td>Scheduled payment, with its due date and the date the bank first knew of it</td></tr>
+    </tbody>
+  </table>
   </div>
   <ul>
-    <li>Clients and accounts tie everything together through the client number and account number.</li>
-    <li>Each transaction carries a reference to where it came from (payroll file, loan, standing order, SADAD bill, letter of credit). That is how we label it with a category.</li>
+    <li>The client number (<code>CSTMR_CIF</code>) ties the 3 tables together.</li>
+    <li>Each posting carries its T24 module and transaction type: that is how it gets a category (the editable dataset <code>category_mapping</code>). A scheduled payment carries the values its posting will have, so the same mapping applies.</li>
+    <li>Annual sales and number of employees are not in <code>DIM_CUSTOMER</code>: the warehouse sends them if it finds them, otherwise the model leaves those two inputs empty. There are no account balances.</li>
     <li>Sample clients have different history lengths: some 1 year, some 2, some 5.</li>
     <li>No past versions are kept. Obligations use today's schedule.</li>
   </ul>
@@ -149,7 +133,7 @@ mindmap
   <table>
     <thead><tr><th>Category</th><th>Direction</th><th>Where it comes from</th><th>Obligation part (added after)</th><th>Model?</th></tr></thead>
     <tbody>
-      <tr><td>Payroll</td><td><span class="chip out">Out</span></td><td>Payroll files linked to transactions</td><td>None</td><td><span class="chip md">Yes</span></td></tr>
+      <tr><td>Payroll</td><td><span class="chip out">Out</span></td><td>Salary payments in the statement entries</td><td>None</td><td><span class="chip md">Yes</span></td></tr>
       <tr><td>Rent</td><td><span class="chip out">Out</span></td><td>Transfers to landlords</td><td>Rent standing orders</td><td><span class="chip md">Yes</span></td></tr>
       <tr><td>Financing instalments</td><td><span class="chip out">Out</span></td><td>Financing schedules</td><td>All of it</td><td><span class="chip no">No</span></td></tr>
       <tr><td>SADAD and government bills</td><td><span class="chip out">Out</span></td><td>SADAD payments</td><td>Bills issued, not yet paid</td><td><span class="chip md">Yes</span></td></tr>
@@ -230,13 +214,13 @@ mindmap
     <tbody>
       <tr><td>What we ask</td><td>Category, direction (in or out), months ahead (1, 2 or 3), calendar month being predicted</td></tr>
       <tr><td>This category's past</td><td>Last month's amount, average of the last 3 months, same month last year, and the same for the unscheduled part only</td></tr>
-      <tr><td>The client's overall flow</td><td>Average total in and total out over the last 3 months, latest account balance</td></tr>
+      <tr><td>The client's overall flow</td><td>Average total in and total out over the last 3 months</td></tr>
       <tr><td>Obligations (hint)</td><td>Scheduled amounts in the predicted month and over the next 3 months, in and out</td></tr>
-      <tr><td>Client profile</td><td>Segment, sector, region, annual sales, number of employees, months with the bank</td></tr>
+      <tr><td>Client profile</td><td>Segment, sector, city, company or sole proprietor, annual sales and number of employees (if the warehouse has them), months with the bank</td></tr>
     </tbody>
   </table>
   </div>
-  <div class="formula">Answer to learn = actual amount of that category in the predicted month − obligations for that category in that month</div>
+  <div class="formula">Answer to learn = actual amount of that category in the predicted month − scheduled payments of that category due that month and already known at the cut-off</div>
   <p>Amounts are divided by a usual size, so a small client and a large one look alike to the model. A category's own amounts are divided by its average month over the last 12 months. The client's totals are divided by the client's average month. The model predicts in that unit, and we multiply back to SAR.</p>
   <p class="caption">The model never sees names, transaction descriptions, or anything dated after the cut-off.</p>
 </section>
@@ -357,11 +341,11 @@ flowchart LR
 <pre class="mermaid">
 flowchart TB
   subgraph Z1[Raw data: CSV, from the simulator or the warehouse landing files]
-    R[(4 curated warehouse tables)]
+    R[(3 curated warehouse tables)]
     LR[(CFF_LOAD_RECORD: read by the scenarios' load check)]
   end
   subgraph Z0[Staging]
-    ST[stage_tables: warehouse names to standard names] --> S17[(4 standard tables)]
+    ST[stage_tables: EDW names to standard names and values] --> S17[(3 standard tables)]
   end
   subgraph Z2[Data prep: shared]
     CR[(category_mapping: CSV, kept on re-runs)]
@@ -441,7 +425,7 @@ flowchart TB
         <li>At least 12 months of history to score a client. Otherwise flagged.</li>
         <li>Test on the last 6 months.</li>
         <li>One project (Digital Cash Management Forecast), with the warehouse simulator inside it in the sandbox. Production-shaped: the project only reads the warehouse's tables (read-only landing files in production), checks each load, takes its cut-off from the load record, and runs from two scenarios. Sample data comes from a separate warehouse simulator.</li>
-        <li>The warehouse does the heavy, mechanical prep (4 curated tables); Dataiku keeps the modelling logic. Categories come from an mapping dataset in Dataiku (visual Join and Group recipes), not from the warehouse, so they can be tuned without a warehouse change.</li>
+        <li>The warehouse does the heavy, mechanical prep (3 curated tables); Dataiku keeps the modelling logic. Categories come from an mapping dataset in Dataiku (visual Join and Group recipes), not from the warehouse, so they can be tuned without a warehouse change.</li>
       </ul>
     </div>
     <div class="card">
@@ -450,7 +434,7 @@ flowchart TB
         <li>Client total method: review once we see the test results.</li>
         <li>No past versions of schedules: in real data, obligation hints may show slightly more than was known at the time. Tell the tech lead.</li>
         <li>How real transactions are labelled as rent or supplier payments without descriptions (counterparty, transaction code).</li>
-        <li>The tech lead agrees to curated monthly tables next to the detailed ones (the rules ask for no monthly totals).</li>
+        <li>The tech lead agrees to the warehouse building the monthly totals from the statement entries (the rules ask for no monthly totals).</li>
         <li>Code env: the project needs a Python code env with <code>catboost 1.2.7</code>, <code>scikit-learn</code> and <code>mlflow 2.22.0</code> (Python 3.9) or <code>3.10.1</code> (Python 3.10 or later): the versions Dataiku tested. We cannot create one: a Dataiku admin creates it once.</li>
         <li>Warehouse table and column names are our proposal (<code>CFF_*</code>, EDW style); the warehouse team confirms them. If they differ, only the mapping file changes.</li>
       </ul>

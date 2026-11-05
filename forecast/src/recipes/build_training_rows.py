@@ -7,6 +7,6 @@ import dataiku
 from cashflow import cutoff_month, model_rows, read_dataset
 
 rows = model_rows(read_dataset("monthly_flows"), read_dataset("monthly_obligations"), read_dataset("clients"),
-                  read_dataset("monthly_balances"), cutoff_month())
+                  cutoff_month())
 training = rows[rows["enough_history"] & rows["active"] & rows["target"].notna()]
 dataiku.Dataset("training_rows").write_with_schema(training.round(4).reset_index(drop=True))

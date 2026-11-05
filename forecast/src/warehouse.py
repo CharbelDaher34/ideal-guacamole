@@ -1,151 +1,70 @@
 """Warehouse tables (project library: python/warehouse.py).
 
-In the landing folder read through the EDW_LANDING connection (CSV files, one folder per table), the warehouse
-team drops the 17 detailed tables of the data requirements (DETAIL_TABLES) and, built from them, 4 curated tables
-(TABLES) plus a load record. The project reads
-only the curated tables; the detailed ones stay in the warehouse for checks and drill-down.
-Table names are CFF_ + the source table's name where it is known; columns follow the EDW style seen in
-FCT_PAYROLL_MSTR (CSTMR_CIF, ACNT_NMBR, TOT_AMT, ..._DT, ..._FLG with Y / N). These names are our proposal until
-the warehouse team confirms them: if they differ, only this file changes.
-The project's staging recipe renames every column back to the standard names used by the recipes.
+The forecast reads 3 tables that the warehouse team builds from the bank's main data, plus a load record
+(CFF_LOAD_RECORD), read-only: as tables through a database connection to the warehouse, or as CSV files in the
+landing folder (EDW_LANDING); the setup notebook's settings choose. The sandbox's simulated tables are CSV:
+    CFF_CLIENT              EDW.DIM_CUSTOMER: one row per business client, companies and sole proprietors
+    CFF_CLIENT_MNTHLY_FLOW  EDW.FCT_STATEMENT_ENTRY summed per client, month, direction, T24 module (SYS_ID) and
+                            transaction type (TRNS_TYP)
+    CFF_SCHEDULED_PYMT      the payments already known for the coming months, the sources stacked in one table:
+                            financing instalments, deposit maturities, standing orders
+The SQL that builds them is in warehouse_tables.sql (forecast folder of the repository). Columns keep their EDW
+names; the staging recipe renames them to the standard names the recipes use and turns codes into the project's
+values (direction IN / OUT, status ACTIVE / CLOSED, sole proprietor true / false). If a name or a code differs at
+the bank, only this file changes.
 """
+import numpy as np
 import pandas as pd
 
-
-# curated tables the project reads. standard name: (warehouse table, what the warehouse team builds it from)
+# the tables the project reads. standard name: (warehouse table, what the warehouse team builds it from)
 TABLES = {
-    "clients": ("CFF_CLIENT", "detailed tables 1, 2, 16"),
-    "monthly_flows_by_origin": ("CFF_CLIENT_MNTHLY_FLOW", "detailed table 3, and CFF_SCHEDULED_PYMT"),
-    "scheduled_payments": ("CFF_SCHEDULED_PYMT", "detailed tables 5, 7, 8, 9, 11, 13, 17"),
-    "monthly_balances": ("CFF_CLIENT_MNTHLY_BAL", "detailed tables 2, 4"),
+    "clients": ("CFF_CLIENT", "EDW.DIM_CUSTOMER"),
+    "monthly_flows_by_origin": ("CFF_CLIENT_MNTHLY_FLOW", "EDW.FCT_STATEMENT_ENTRY"),
+    "scheduled_payments": ("CFF_SCHEDULED_PYMT", "financing schedules, deposits, standing orders"),
 }
+# their columns. standard name: warehouse (EDW) name
 COLUMNS = {
-    "clients": ["client_no", "party_type", "segment", "sub_segment", "sector", "industry", "region", "city",
-                "joining_date", "legal_form", "sole_proprietor_flag", "last_annual_sales", "number_of_employees",
-                "parent_client_no", "status", "closure_date", "current_accounts", "restricted_accounts"],
-    # one row per client, month, direction, origin type and transaction type tag (NONE when the posting has no
-    # origin or tag). Leaves out transfers between the client's own accounts and reversed postings. known_1..3: the part of the amount that came from scheduled
-    # payments known 1, 2 or 3 months before the month
-    "monthly_flows_by_origin": ["client_no", "month", "direction", "origin_type", "txn_type_tag", "amount", "postings",
-                                "known_1", "known_2", "known_3"],
-    # one row per scheduled payment, past and future; known_date: when the schedule existed
-    "scheduled_payments": ["origin_type", "origin_ref", "client_no", "direction", "txn_type_tag", "due_date", "amount",
-                           "known_date"],
-    "monthly_balances": ["client_no", "month", "balance_end", "overdraft_limit"],
+    # the current row of each business client
+    "clients": {"client_no": "CSTMR_CIF", "customer_type": "CSTMR_TYP", "line_of_business": "LOB_DSC",
+                "legal_entity": "LGL_ENTY_DSC", "sub_legal_entity": "PRTY_SUB_LGL_DSC", "id_type": "PRTY_ID_TYP_DSC",
+                "segment": "RM_SGMNT_NM", "sector": "SCTR_DSC", "business_sector": "BUS_SCTR_EN_NM",
+                "industry": "INDST_EN_NM", "sub_industry": "SUB_INDST_EN_NM", "city": "CITY", "status": "STS_FLG",
+                "last_annual_sales": "ANNL_SLS_AMT", "number_of_employees": "NMBR_OF_EMP"},
+    # one row per client, month (of the value date), direction, T24 module and transaction type. Leaves out reversed
+    # postings and transfers between the client's own accounts
+    "monthly_flows_by_origin": {"client_no": "CSTMR_CIF", "month": "MNTH", "direction": "CRDT_DBT_FLG",
+                                "origin_type": "SYS_ID", "txn_type_tag": "TRNS_TYP", "amount": "AMT_LCY",
+                                "postings": "PSTNG_CNT"},
+    # one row per scheduled payment, past and future. SYS_ID and TRNS_TYP: what its statement entry carries when it is
+    # paid. KNOWN_DT: when the bank first knew of it
+    "scheduled_payments": {"client_no": "CSTMR_CIF", "origin_type": "SYS_ID", "origin_ref": "ORGN_RFR",
+                           "direction": "CRDT_DBT_FLG", "txn_type_tag": "TRNS_TYP", "due_date": "DUE_DT",
+                           "amount": "AMT_LCY", "known_date": "KNOWN_DT"},
 }
-
-# the 17 detailed tables. standard name: (warehouse table, where the warehouse team takes it from)
-DETAIL_TABLES = {
-    "clients": ("CFF_CBG_CUSTOMER", "EDW_DM.DM_CBG_CUSTOMER"),
-    "accounts": ("CFF_ACNT", "to find"),
-    "transactions": ("CFF_STATEMENT_ENTRY", "EDW.FCT_STATEMENT_ENTRY"),
-    "daily_balances": ("CFF_ACNT_DAILY_BAL", "to find"),
-    "standing_orders": ("CFF_STANDING_ORDER", "to find"),
-    "payroll_files": ("CFF_PAYROLL_MSTR", "EDW.FCT_PAYROLL_MSTR"),
-    "financing_schedules": ("CFF_LOAN_FUTURE_BALANCE", "EDW.FCT_LOAN_FUTURE_BALANCE + EDW.DIM_LOAN"),
-    "deposits": ("CFF_DPST", "to find"),
-    "sadad_payments": ("CFF_SADAD_TRNS", "EDW.FCT_SADAD_TRNS"),
-    "code_lists": ("CFF_CODE_LIST", "various"),
-    "trade_finance": ("CFF_TRADE_FINANCE", "to find"),
-    "card_sales": ("CFF_MRCHNT_STLMNT", "to find"),
-    "corporate_cards": ("CFF_CORP_CARD", "to find"),
-    "bills_issued": ("CFF_BILL_PAYMENT", "EDW.DIM_BUS_BL_ACNT + EDW.FCT_BILL_PAYMENT"),
-    "client_monthly_summary": ("CFF_CBG_CUSTOMER_MNTHLY", "EDW_DM.DM_CBG_CUSTOMER"),
-    "group_structure": ("CFF_CSTMR_GROUP", "to find"),
-    "cheques": ("CFF_CHQ", "to find"),
-}
-# one row per table per load: LOAD_ID, LOAD_DTTS, AS_OF_DT, SRC_TBL_NM, TRGT_TBL_NM, ROW_CNT, LOAD_STA_CD
-LOAD_RECORD = "CFF_LOAD_RECORD"
+OPTIONAL = {"ANNL_SLS_AMT", "NMBR_OF_EMP"}    # not in EDW.DIM_CUSTOMER: sent if the warehouse has them, else empty
+ACTIVE_STATUS = ("ACTIVE", "A")               # STS_FLG values of an active client (to confirm with the warehouse team)
+SOLE_PROPRIETOR = ("SOLE", "ESTABLISHMENT")   # words of LGL_ENTY_DSC or PRTY_SUB_LGL_DSC for a business owned by 1 person
+LOAD_RECORD = "CFF_LOAD_RECORD"               # one row per table per load: LOAD_ID, LOAD_DTTS, AS_OF_DT, SRC_TBL_NM,
+                                              # TRGT_TBL_NM, ROW_CNT, LOAD_STA_CD
 AUDIT_COLUMNS = ["ETL_LOAD_ID", "ETL_LOAD_DTTS"]      # added by the warehouse team to every table
-
-DETAIL_COLUMNS = {
-    "clients": ["client_no", "party_type", "segment", "sub_segment", "sector", "industry", "region", "city",
-                "joining_date", "legal_form", "sole_proprietor_flag", "last_annual_sales", "number_of_employees",
-                "parent_client_no", "status", "closure_date"],
-    "accounts": ["account_no", "client_no", "product_type", "product_code", "currency", "open_date", "close_date",
-                 "status", "restricted_flag", "payroll_account_flag"],
-    "transactions": ["txn_id", "account_no", "posting_date", "value_date", "amount_sar", "amount_orig", "currency",
-                     "exchange_rate", "debit_credit", "txn_code", "channel", "txn_type_tag", "counterparty_iban_code",
-                     "counterparty_bank", "counterparty_name", "own_account_flag", "origin_type", "origin_ref",
-                     "reversal_flag", "original_ref"],
-    "daily_balances": ["account_no", "balance_date", "ledger_balance", "available_balance", "blocked_amount",
-                       "hold_amount", "overdraft_limit"],
-    "standing_orders": ["instruction_id", "account_no", "beneficiary_type", "beneficiary_iban_code", "amount",
-                        "currency", "frequency", "start_date", "end_date", "next_payment_date", "status",
-                        "created_date", "changed_date"],
-    "payroll_files": ["FILE_ID", "DBT_CSTMR_CIF", "PAYROLL_ACNT_NMBR", "CRT_DTTS", "SLRY_TRNS_DT", "FND_DT", "TOT_AMT",
-                      "NMBR_OF_EMP", "FILE_TYP_EN_NM", "FILE_SUB_TYP_EN_NM", "STA_CD", "DLT_FLG"],
-    "financing_schedules": ["loan_no", "client_no", "product", "account_debited", "contract_start_date",
-                            "maturity_date", "instalment_no", "due_date", "principal", "profit", "instalment_amount",
-                            "paid_date", "paid_amount", "status", "early_settlement_flag", "credit_limit_total",
-                            "credit_limit_used", "credit_limit_available"],
-    "deposits": ["deposit_id", "client_no", "account_no", "product", "amount", "start_date", "maturity_date",
-                 "expected_profit", "rollover_instruction", "status"],
-    "sadad_payments": ["payment_id", "account_no", "client_no", "biller_id", "biller_name", "biller_category",
-                       "bill_number", "bill_issue_date", "amount", "due_date", "paid_date", "channel"],
-    "code_lists": ["code_type", "code", "meaning"],
-    "trade_finance": ["instrument_id", "client_no", "instrument_type", "subtype", "amount", "currency", "issue_date",
-                      "expiry_date", "payment_date", "cash_margin_account", "cash_margin_amount", "claim_amount",
-                      "claim_date", "status"],
-    "card_sales": ["merchant_id", "client_no", "sales_date", "settlement_date", "sales_amount", "fees", "chargebacks",
-                   "net_amount_paid"],
-    "corporate_cards": ["record_id", "record_type", "client_no", "statement_date", "amount_due", "due_date",
-                        "paid_date", "paid_amount", "topup_date", "topup_amount"],
-    "bills_issued": ["invoice_id", "client_no", "customer_iban_code", "issue_date", "due_date", "amount", "paid_date",
-                     "paid_amount"],
-    "client_monthly_summary": ["client_no", "month", "txn_count_in", "txn_amount_in", "txn_count_out",
-                               "txn_amount_out", "online_amount", "cheque_count", "avg_balance", "payroll_salary",
-                               "payroll_bonus"],
-    "group_structure": ["parent_client_no", "child_client_no", "relationship_type", "start_date"],
-    "cheques": ["cheque_id", "account_no", "direction", "status", "received_date", "cheque_date", "cleared_date",
-                "amount", "post_dated_flag"],
-}
-
-ABBREVIATIONS = {
-    "client": "CSTMR", "customer": "CSTMR", "account": "ACNT", "no": "NMBR", "number": "NMBR", "date": "DT",
-    "amount": "AMT", "txn": "TRNS", "code": "CD", "flag": "FLG", "type": "TYP", "name": "NM", "status": "STA_CD",
-    "currency": "CCY", "balance": "BAL", "count": "CNT", "instruction": "INSTR", "beneficiary": "BNFCRY",
-    "frequency": "FREQ", "created": "CRT", "changed": "CHG", "start": "STRT", "next": "NXT", "payment": "PYMT",
-    "maturity": "MTRTY", "profit": "PRFT", "principal": "PRNCPL", "instalment": "INSTL", "expected": "EXPCTD",
-    "rollover": "RLOVR", "deposit": "DPST", "product": "PROD", "issue": "ISSU", "expiry": "EXPRY",
-    "settlement": "STLMNT", "sales": "SLS", "fees": "FEE", "chargebacks": "CHRGBCK", "statement": "STMT",
-    "record": "REC", "merchant": "MRCHNT", "invoice": "INV", "bank": "BNK", "counterparty": "CNTRPRTY",
-    "origin": "ORGN", "ref": "REF", "reversal": "RVRSL", "original": "ORGNL", "channel": "CHNL", "value": "VAL",
-    "posting": "PSTNG", "exchange": "EXCH", "rate": "RT", "debit": "DBT", "credit": "CRDT", "ledger": "LDGR",
-    "available": "AVLBL", "blocked": "BLCKD", "hold": "HLD", "overdraft": "OVRDFT", "limit": "LMT",
-    "segment": "SGMNT", "sector": "SCTR", "industry": "INDSTRY", "region": "RGN", "joining": "JOIN", "legal": "LGL",
-    "proprietor": "PRPRTR", "last": "LST", "annual": "ANNL", "employees": "EMP", "closure": "CLSR", "close": "CLS",
-    "open": "OPN", "restricted": "RSTRCTD", "biller": "BLLR", "category": "CTGRY", "bill": "BL", "cheque": "CHQ",
-    "direction": "DRCTN", "received": "RCVD", "cleared": "CLRD", "dated": "DTD", "instrument": "INSTRMNT",
-    "subtype": "SUB_TYP", "cash": "CSH", "margin": "MRGN", "claim": "CLM", "contract": "CNTRCT", "debited": "DBTD",
-    "early": "ERLY", "total": "TOT", "relationship": "RLTNSHP", "month": "MNTH", "avg": "AVG", "online": "ONLN",
-    "meaning": "MNNG", "parent": "PRNT", "child": "CHLD", "party": "PRTY", "sub": "SUB", "party_type": "PRTY_TYP",
-    "topup": "TOPUP", "due": "DUE", "paid": "PAID", "used": "USED", "own": "OWN", "tag": "TAG", "orig": "ORIG",
-    "salary": "SLRY", "bonus": "BONUS", "loan": "LOAN", "net": "NET", "current": "CRNT", "accounts": "ACNTS",
-    "postings": "PSTNG_CNT", "known": "KNWN",
-}
-
-
-def warehouse_column(column):
-    """EDW-style name of a standard column: client_no -> CSTMR_CIF, value_date -> VAL_DT, own_account_flag -> OWN_ACNT_FLG."""
-    if column.isupper():                        # already a warehouse name (payroll files)
-        return column
-    words = column.replace("client_no", "cstmr cif").replace("_", " ").split()
-    return "_".join(w.upper() if w in ("cstmr", "cif") else ABBREVIATIONS.get(w, w.upper()) for w in words)
-
-
-def is_flag(column):
-    """Yes / no columns: true / false in the project, Y / N in the warehouse."""
-    return column.endswith("_flag")
 
 
 def to_standard(df, table):
-    """A curated warehouse table with the standard column names; flags Y / N become true / false."""
-    out = {}
-    for column in COLUMNS[table]:
-        values = df[warehouse_column(column)]
-        out[column] = values.astype(str).str.upper().eq("Y") if is_flag(column) else values
-    return pd.DataFrame(out)
+    """A warehouse table with the standard column names and the project's values: direction IN / OUT; for clients,
+    status ACTIVE / CLOSED and sole_proprietor true / false. An optional column the warehouse does not send stays
+    empty; a missing required column stops here with its name."""
+    missing = [c for c in COLUMNS[table].values() if c not in df and c not in OPTIONAL]
+    if missing:
+        raise ValueError(f"{TABLES[table][0]} has no column {', '.join(missing)}: check the warehouse file")
+    out = pd.DataFrame({standard: df[column] if column in df else np.nan for standard, column in COLUMNS[table].items()})
+    if "direction" in out:
+        out["direction"] = out["direction"].astype(str).str.strip().str.upper().str[0].map({"C": "IN", "D": "OUT"})
+    if table == "clients":
+        active = out["status"].astype(str).str.strip().str.upper().isin(ACTIVE_STATUS)
+        out["status"] = np.where(active, "ACTIVE", "CLOSED")
+        legal = (out["legal_entity"].fillna("").astype(str) + " " + out["sub_legal_entity"].fillna("").astype(str))
+        out["sole_proprietor"] = legal.str.upper().str.contains("|".join(SOLE_PROPRIETOR))
+    return out
 
 
 def check_latest_load():
@@ -167,7 +86,7 @@ def check_latest_load():
         row = load.loc[warehouse_table]
         if row["LOAD_STA_CD"] != "SUCCESS":
             problems.append(f"{warehouse_table}: load status {row['LOAD_STA_CD']}")
-        first_column = warehouse_column(COLUMNS[next(t for t, v in TABLES.items() if v[0] == warehouse_table)][0])
+        first_column = next(iter(COLUMNS[next(t for t, v in TABLES.items() if v[0] == warehouse_table)].values()))
         count = len(dataiku.Dataset(warehouse_table).get_dataframe(columns=[first_column]))
         if count != row["ROW_CNT"]:
             problems.append(f"{warehouse_table}: {count:,} rows, the load record says {row['ROW_CNT']:,}")
@@ -185,6 +104,6 @@ def check_latest_load():
     return str(cutoff)
 
 
-for _table, _columns in list(COLUMNS.items()) + list(DETAIL_COLUMNS.items()):   # names unique within a table
-    _names = [warehouse_column(c) for c in _columns]
-    assert len(set(_names)) == len(_names), (_table, _names)
+
+for _table, _columns in COLUMNS.items():          # warehouse names unique within a table
+    assert len(set(_columns.values())) == len(_columns), _table

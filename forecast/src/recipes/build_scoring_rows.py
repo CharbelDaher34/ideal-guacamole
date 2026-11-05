@@ -7,6 +7,6 @@ from cashflow import ANSWER, cutoff_month, model_rows, read_dataset
 
 last_month = cutoff_month()
 rows = model_rows(read_dataset("monthly_flows"), read_dataset("monthly_obligations"), read_dataset("clients"),
-                  read_dataset("monthly_balances"), last_month)
+                  last_month)
 scoring = rows[rows["cutoff_month"] == last_month].drop(columns=ANSWER)
 dataiku.Dataset("scoring_rows").write_with_schema(scoring.round(4).reset_index(drop=True))

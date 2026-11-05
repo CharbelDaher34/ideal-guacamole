@@ -36,12 +36,10 @@ CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', 
 FLOW = {
     "stage_tables": (RAW, list(warehouse.TABLES), "Staging"),
     "obligations": (["scheduled_with_category"], ["monthly_obligations"], "Data prep"),
-    "build_training_rows": (["monthly_flows", "monthly_obligations", "clients", "monthly_balances"],
-                            ["training_rows"], "Training"),
+    "build_training_rows": (["monthly_flows", "monthly_obligations", "clients"], ["training_rows"], "Training"),
     "train_and_test": (["training_rows"], ["experiments", "test_results", "model_reference"], "Training"),
     "champion_challenger": (["training_rows", "experiments"], ["promotion_log"], "Training"),
-    "build_scoring_rows": (["monthly_flows", "monthly_obligations", "clients", "monthly_balances"],
-                           ["scoring_rows"], "Inference"),
+    "build_scoring_rows": (["monthly_flows", "monthly_obligations", "clients"], ["scoring_rows"], "Inference"),
     "final_forecast": (["scored_ev", "scored_p10", "scored_p90", "monthly_obligations"], ["final_forecast"],
                        "Inference"),
     "archive_forecast": (["final_forecast"], ["forecast_archive", "inference_log"], "Inference"),
@@ -103,18 +101,30 @@ def new_dataset(name):
     return name
 
 
-# the curated warehouse tables and the load record: already here if the warehouse simulator wrote them (sandbox),
-# otherwise CSV files in the warehouse team's landing folder, read-only (production)
+# the warehouse tables and the load record: already here if the warehouse simulator wrote them (sandbox, CSV),
+# otherwise read-only from the warehouse (production): tables of WAREHOUSE_SQL_SCHEMA through the database
+# connection WAREHOUSE_SQL_CONNECTION, or CSV files in the landing folder (LANDING_CONNECTION)
 simulated = [name for name in RAW + [warehouse.LOAD_RECORD] if name in datasets]
+source = WAREHOUSE_SQL_CONNECTION or LANDING_CONNECTION
+if WAREHOUSE_SQL_CONNECTION and len(simulated) < len(RAW) + 1:
+    try:
+        database = client.get_connection(WAREHOUSE_SQL_CONNECTION).get_info().get_type()   # Oracle, Teradata, ...
+    except Exception as e:
+        raise RuntimeError(f"Cannot use the connection {WAREHOUSE_SQL_CONNECTION!r} ({e}). Ask a Dataiku admin for a "
+                           "read-only database connection to the warehouse, usable by your group, or check its "
+                           "name in WAREHOUSE_SQL_CONNECTION.") from None
 for name in RAW + [warehouse.LOAD_RECORD]:
-    if name not in datasets:
-        datasets.add(name)
+    if name in datasets:
+        continue
+    datasets.add(name)
+    if WAREHOUSE_SQL_CONNECTION:
+        project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name, WAREHOUSE_SQL_SCHEMA)
+    else:
         dataset = project.create_dataset(name, "Filesystem", params={"connection": LANDING_CONNECTION,
                                                                      "path": "/" + name},
                                           formatType="csv", formatParams=CSV)
         dataset.autodetect_settings().save()
-print(f"{len(simulated)} warehouse tables already in the project, {len(RAW) + 1 - len(simulated)} linked from "
-      f"{LANDING_CONNECTION}")
+print(f"{len(simulated)} warehouse tables already in the project, {len(RAW) + 1 - len(simulated)} read from {source}")
 
 # category mapping: a CSV dataset with the default mapping, written only when it is created (a mapping already
 # here, maybe edited, is kept). To change it: a notebook reads it, changes rows and writes it back.
@@ -181,7 +191,7 @@ else:
     builder.with_existing_output(new_dataset("monthly_flows"))
     group = builder.create().get_settings()
     recipes.add("group_monthly_flows")
-summed = ("amount", "known_1", "known_2", "known_3", "postings")
+summed = ("amount", "postings")
 group.set_payload(json.dumps({
     "keys": [{"column": k} for k in ("client_no", "month", "category", "direction")],
     "values": [{"column": c, "sum": True} for c in summed], "globalCount": False,

@@ -41,7 +41,7 @@ class SklearnBoosting:
 
     def fit(self, rows):
         from sklearn.ensemble import HistGradientBoostingRegressor
-        self.codes = {c: {v: i for i, v in enumerate(sorted(values.unique()))}
+        self.codes = {c: {v: i for i, v in enumerate(values.value_counts().index[:250])}   # at most 250 per column
                       for c, values in model_matrix(rows)[CAT_FEATURES].items()}
         X, y = self._matrix(rows), rows["target"] / rows["series_scale"]
         is_category = [c in CAT_FEATURES for c in X.columns]

@@ -11,7 +11,8 @@ A forecaster is a class with:
     fit(rows)       learns from training rows. Column target is the amount to predict, in SAR: the amount of the
                     predicted month minus the obligations already known at the cut-off (the forecast adds those back).
     predict(rows)   a DataFrame with the index of rows and the columns p10, ev, p90 (SAR). forecast() then applies
-                    P10 <= EV <= P90 and no negative amounts except the net cash flow.
+                    P10 <= EV <= P90. The amounts can be below zero (scheduled payments not all made); the final
+                    forecast adds the scheduled payments back and floors the total at zero.
 The data scientist's own forecasters go in forecasters.py: the setup notebook creates that file once and never
 overwrites it. lab_try and lab_compare try forecasters against the production model without touching
 production (the Lab zone and the notebook forecast_lab).
@@ -25,9 +26,9 @@ HOLDOUT_MONTHS = 6          # the last months kept aside to test the models
 OUTPUT = ["p10", "ev", "p90"]
 
 # the reference forecaster's inputs (series_share is computed from scale and series_scale)
-CAT_FEATURES = ["category", "direction", "segment", "sector", "region"]
+CAT_FEATURES = ["category", "direction", "segment", "sector", "city", "sole_proprietor"]
 SERIES_FEATURES = ["last_amount", "avg_3m", "same_month_last_year", "free_last", "free_avg_3m", "oblig_target_month"]
-CLIENT_FEATURES = ["client_in_avg_3m", "client_out_avg_3m", "balance_end", "oblig_in_next_3m", "oblig_out_next_3m"]
+CLIENT_FEATURES = ["client_in_avg_3m", "client_out_avg_3m", "oblig_in_next_3m", "oblig_out_next_3m"]
 OTHER_FEATURES = ["months_ahead", "target_month_of_year", "history_months", "log_scale", "series_share",
                   "log_annual_sales", "employees"]
 FEATURES = CAT_FEATURES + SERIES_FEATURES + CLIENT_FEATURES + OTHER_FEATURES
@@ -43,7 +44,7 @@ def model_matrix(rows):
     for c in CLIENT_FEATURES:
         X[c] = rows[c] / rows["scale"]
     for c in CAT_FEATURES:
-        X[c] = X[c].fillna("NA").astype(str)
+        X[c] = X[c].fillna("NA").astype(str).str.upper()       # TRUE / FALSE however a yes / no column is read
     return X
 
 
@@ -102,9 +103,8 @@ def new_forecaster(name=None):
 
 
 def forecast(forecaster, rows):
-    """P10, EV and P90 of a trained forecaster for model rows (SAR), checked, with P10 <= EV <= P90 and no negative
-    amounts except the net cash flow. Everything that predicts goes through here: the test, champion / challenger, the
-    lab and the saved models."""
+    """P10, EV and P90 of a trained forecaster for model rows (SAR), checked, with P10 <= EV <= P90. Everything that
+    predicts goes through here: the test, champion / challenger, the lab and the saved models."""
     out = forecaster.predict(rows)
     name = getattr(forecaster, "name", type(forecaster).__name__)
     if not isinstance(out, pd.DataFrame) or not set(OUTPUT) <= set(out.columns):
@@ -114,7 +114,7 @@ def forecast(forecaster, rows):
     empty = [c for c in OUTPUT if out[c].isna().any()]
     if empty:
         raise ValueError(f"Forecaster {name}: predict returned empty values in {', '.join(empty)}")
-    return finish(out["ev"], out["p10"], out["p90"], rows["category"], rows.index)
+    return finish(out["ev"], out["p10"], out["p90"], rows["category"], rows.index, floor=False)
 
 
 def holdout(rows):

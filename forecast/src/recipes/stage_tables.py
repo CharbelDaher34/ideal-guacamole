@@ -1,4 +1,4 @@
-# Staging: the 4 curated warehouse tables (CSV files in the landing folder) with the standard column names.
+# Staging: the 3 curated warehouse tables (CSV files in the landing folder) with the standard column names.
 import dataiku
 
 from warehouse import TABLES, to_standard

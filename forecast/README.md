@@ -8,7 +8,7 @@ Three notebooks, all in the same project:
 
 | Notebook | Role |
 |---|---|
-| [`warehouse_simulator.ipynb`](warehouse_simulator.ipynb) | **Sandbox only.** Plays the warehouse team: writes the 4 curated warehouse tables (sample data) and the load record as CSV datasets of the project. Replaced by Informatica in the bank. |
+| [`warehouse_simulator.ipynb`](warehouse_simulator.ipynb) | **Sandbox only.** Plays the warehouse team: writes the 3 curated warehouse tables (sample data) and the load record as CSV datasets of the project. Replaced by Informatica in the bank. |
 | [`build_forecast_project.ipynb`](build_forecast_project.ipynb) | Sets up the project once (and names it Digital Cash Management Forecast): flow, first model, scenarios, first nightly batch. |
 | [`forecast_lab.ipynb`](forecast_lab.ipynb) | **The data scientist's lab.** EDA of the training rows, then several forecasters side by side against the production model on the same test; each try is recorded in Experiment Tracking; never touches production. Opens in the code env's kernel. |
 
@@ -16,7 +16,7 @@ Three notebooks, all in the same project:
 
 1. In the project, import the notebooks (Notebooks → New notebook → Import).
 2. **Sandbox:** run `warehouse_simulator.ipynb` (Run All, about 1 minute). It writes `CFF_CLIENT`,
-   `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT`, `CFF_CLIENT_MNTHLY_BAL` and `CFF_LOAD_RECORD` as of `AS_OF`,
+   `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT` and `CFF_LOAD_RECORD` as of `AS_OF`,
    for `N_CLIENTS` sample clients (40: a quick run; scores need more, for example 300).
 3. Run `build_forecast_project.ipynb` (check the settings in its first cell, Run All, a few minutes).
    It needs an existing Python code env (`CODE_ENV`) with `catboost==1.2.7`, `scikit-learn` and `mlflow`: 2.22.0
@@ -24,22 +24,58 @@ Three notebooks, all in the same project:
    Tested on DSS 14.2.0 with Python 3.9 and mlflow 2.22.0:
    it does not create one (that takes admin rights). It checks the env and, if something is missing, stops with
    the request to send a Dataiku admin.
-   It uses the simulated tables if they are there, otherwise it links the warehouse team's landing files
-   (`LANDING_CONNECTION`, read-only). It needs no admin right on the project (without one, it cannot rename the
+   It uses the simulated tables if they are there, otherwise it reads the warehouse (see below). It needs no admin
+   right on the project (without one, it cannot rename the
    project and says so). It can be run again in the same project: what exists is kept (data, the category
    mapping, saved model versions, zones, scenario history) and the recipes' code is updated.
 4. **Every night after a load:** Scenarios → **Nightly batch** → Run. To retrain: **Retrain, test and promote**.
 
+### In production: connect to the warehouse
+
+1. **Ask a Dataiku admin once** for a read-only database connection to the warehouse (for example named `EDW`),
+   usable by your group. Creating connections takes admin rights.
+2. **Ask the warehouse team** to build the 3 tables and the load record from
+   [`warehouse_tables.sql`](warehouse_tables.sql), as tables or views in one schema, refreshed after each load.
+3. **In the setup notebook's first cell**, set `WAREHOUSE_SQL_CONNECTION = "EDW"` (the connection's name) and
+   `WAREHOUSE_SQL_SCHEMA` (the schema of the tables). Do not run the simulator in that project.
+4. Run the setup notebook. It checks the connection first and stops with a clear message if the project cannot use
+   it. The tables show in the Raw data zone, read-only.
+
+Without a database connection, leave `WAREHOUSE_SQL_CONNECTION` empty: the project then reads the same 4 tables as
+CSV files from the landing folder (`LANDING_CONNECTION`).
+
 To simulate the next load: set `AS_OF` in the simulator to the next month's end (for example `2026-11-30`), Run
 All, then run **Nightly batch**: the cut-off moves to the new month.
+
+## Input data
+
+The forecast reads 3 tables that the warehouse team builds from the bank's main data, plus the load record
+`CFF_LOAD_RECORD`, read-only: as tables through a database connection to the warehouse (setting
+`WAREHOUSE_SQL_CONNECTION`, schema `WAREHOUSE_SQL_SCHEMA`), or as CSV files in the landing folder (`EDW_LANDING`)
+when that setting is empty. The sandbox's simulated tables are always CSV datasets of the project. The SQL that builds them, with the
+checks to run first, is in [`warehouse_tables.sql`](warehouse_tables.sql). Columns keep their EDW names; the names
+and codes the project expects are in `src/warehouse.py`, the only file to change if they differ at the bank.
+
+| Table | Built from | One row per |
+|---|---|---|
+| `CFF_CLIENT` | `EDW.DIM_CUSTOMER`: current row, business clients only (companies and sole proprietors) | client |
+| `CFF_CLIENT_MNTHLY_FLOW` | `EDW.FCT_STATEMENT_ENTRY`, without reversed postings and transfers between the client's own accounts | client, month (value date), direction, `SYS_ID`, `TRNS_TYP` |
+| `CFF_SCHEDULED_PYMT` | the payments already known for the coming months, stacked: financing instalments, deposit maturities, standing orders | scheduled payment, with `DUE_DT` and `KNOWN_DT` (when the bank first knew of it) |
+
+- **Sole proprietors** (businesses owned by one person) are kept: the legal entity (`LGL_ENTY_DSC`,
+  `PRTY_SUB_LGL_DSC`) tells them apart, and the model has a sole proprietor input.
+- **Annual sales and employees** are not in `DIM_CUSTOMER`: optional columns (`ANNL_SLS_AMT`, `NMBR_OF_EMP`);
+  without them the model leaves those two inputs empty. There are no account balances.
+- **The known part** of each month comes only from `CFF_SCHEDULED_PYMT`: the models learn the amount minus the
+  scheduled payments due that month and known at the cut-off, and the forecast adds the same back.
 
 ## What the project builds
 
 | Zone | Recipes | Outputs (CSV files unless noted) |
 |---|---|---|
-| Raw data (Dataiku's Default zone, renamed) | (simulator, or read-only landing files) | `CFF_CLIENT`, `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT`, `CFF_CLIENT_MNTHLY_BAL`, `CFF_LOAD_RECORD` |
-| Staging | `stage_tables` | `clients`, `monthly_flows_by_origin`, `scheduled_payments`, `monthly_balances`: standard column names, flags Y / N → true / false |
-| Data prep | (CSV dataset) | `category_mapping`: origin type + transaction type tag + direction → category, one row per combination |
+| Raw data (Dataiku's Default zone, renamed) | (simulator, or read-only landing files) | `CFF_CLIENT`, `CFF_CLIENT_MNTHLY_FLOW`, `CFF_SCHEDULED_PYMT`, `CFF_LOAD_RECORD` |
+| Staging | `stage_tables` | `clients`, `monthly_flows_by_origin`, `scheduled_payments`: standard column names, flags Y / N → true / false |
+| Data prep | (CSV dataset) | `category_mapping`: T24 module (`SYS_ID`) + transaction type (`TRNS_TYP`) + direction → category, one row per combination |
 | Data prep (shared) | `join_flows_category` (Join), `group_monthly_flows` (Group), `join_scheduled_category` (Join), `obligations` | `flows_with_category`, `monthly_flows`, `scheduled_with_category`, `monthly_obligations` |
 | Training (data scientist) | `build_training_rows`, `train_and_test`, `champion_challenger` | `training_rows`, folder `experiments` (Experiment Tracking), `test_results`, `model_reference` (a sample of the forecaster's inputs, gives each version its input columns), `promotion_log` (appended, with each model's forecaster) |
 | Inference (inference owner) | `build_scoring_rows`, `score_ev`, `score_p10`, `score_p90` (Score), `final_forecast`, `archive_forecast` | `scoring_rows` (the latest month), saved models `forecast_ev`, `forecast_p10`, `forecast_p90` (one version per model ID, next to the Score recipes that use them), `scored_*`, `final_forecast` (with `model_id`, `load_id`), folder `forecast_archive`, `inference_log` (appended) |

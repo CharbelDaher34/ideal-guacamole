@@ -43,14 +43,16 @@ write("build_forecast_project.ipynb", [
 # Digital Cash Management Forecast: set up the project
 
 This notebook sets up the Digital Cash Management Forecast in this Dataiku project (it also gives the project
-that name), the way it runs in production. Everything is stored as CSV files. It reads the 4 curated warehouse
-tables (client, monthly flows by origin, scheduled payments, monthly balances) and the load record: in the
+that name), the way it runs in production. Everything is stored as CSV files. It reads the 3 tables the warehouse
+team builds from the bank's main data (`warehouse_tables.sql`): clients (`EDW.DIM_CUSTOMER`), money in and out per
+month (`EDW.FCT_STATEMENT_ENTRY`) and the scheduled payments, and the load record (in production: tables through a
+database connection, `WAREHOUSE_SQL_CONNECTION`, or CSV files in the landing folder): in the
 sandbox, the datasets the notebook `warehouse_simulator.ipynb` wrote in this project; in production, the warehouse
 team's CSV files in the landing folder, read-only through `EDW_LANDING` (names: `python/warehouse.py` in the
 project library). It builds 6 flow zones, each with an owner:
 
-- **Raw data** and **Staging** (shared): the 4 curated tables and the load record, read-only, then the same tables
-  with the standard column names.
+- **Raw data** and **Staging** (shared): the 3 tables and the load record, read-only, then the same tables with the
+  standard column names and the project's values (direction, client status, sole proprietor).
 - **Data prep** (shared by training and inference): the category mapping (a CSV dataset) applied by visual Join
   and Group recipes, the obligations.
 - **Training** (data scientist): the training rows, then each training run is one model with its own **model ID**,
@@ -233,12 +235,12 @@ write("warehouse_simulator.ipynb", [
 Plays the warehouse team (Informatica) until the real files exist. Run it in the same project as the forecast,
 before `build_forecast_project.ipynb`.
 
-It generates sample data for the 17 detailed tables of the data requirements, up to `SIM_END`, and publishes them
-as the warehouse would have them at the end of `AS_OF` (what had happened or was scheduled by then), then builds
-the 4 curated tables from them, as the warehouse team would: client, monthly flows by origin, scheduled payments,
-monthly balances. They are written as CSV datasets of this project, in the warehouse's table and column names
-(`warehouse.py`). Each load adds one row per table to `CFF_LOAD_RECORD`, which the forecast checks before it runs.
-Set `WRITE_DETAILED_TABLES = True` to also write the 17 detailed tables (the forecast does not read them).
+It generates sample data up to `SIM_END` (accounts, postings, loans, deposits, standing orders and so on) and
+publishes, as the warehouse would have them at the end of `AS_OF` (what had happened or was scheduled by then), the
+3 tables the forecast reads, built the way the warehouse team builds them from EDW (`warehouse_tables.sql`): the
+clients (`EDW.DIM_CUSTOMER`), the statement entries summed per month (`EDW.FCT_STATEMENT_ENTRY`) and the scheduled
+payments. They are written as CSV datasets of this project, in their EDW column names (`warehouse.py`). Each load
+adds one row per table to `CFF_LOAD_RECORD`, which the forecast checks before it runs.
 
 To simulate the next load, move `AS_OF` to the next month's end, run all cells again, then run the scenario
 **Nightly batch**.
@@ -248,8 +250,7 @@ To simulate the next load, move `AS_OF` to the next month's end, run all cells a
     md("""
 ## Sample data, warehouse names, publishing
 
-The sample data generator, the warehouse table and column names, the publishing as of a date, and the curated
-tables.
+The sample data generator, the warehouse table and column names, the publishing as of a date, and the 3 tables.
 """),
     code(read("generate_data.py")),
     code(read("warehouse.py")),

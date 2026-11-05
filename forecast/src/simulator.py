@@ -1,6 +1,7 @@
-# Plays the warehouse team (Informatica): publishes the sample data as it was known on a date (AS_OF), in the
-# warehouse's table and column names: the 4 curated tables the forecast reads (built from the 17 detailed tables,
-# which can be written too), as CSV datasets of this project. Records each load in CFF_LOAD_RECORD.
+# Plays the warehouse team (Informatica): publishes the sample data as it was known on a date (AS_OF), as the 3
+# tables the forecast reads, in their EDW names (warehouse.py), as CSV datasets of this project: the clients
+# (EDW.DIM_CUSTOMER), the statement entries summed per month (EDW.FCT_STATEMENT_ENTRY) and the scheduled payments.
+# Records each load in CFF_LOAD_RECORD. The generator's own 17 source tables stay inside the simulator.
 # The sample data is generated once up to SIM_END; publishing "as of" a date keeps what had happened or was
 # scheduled by then, and resets what was only known later (a bill paid after AS_OF is still unpaid, ...).
 import uuid
@@ -8,15 +9,64 @@ import uuid
 import numpy as np
 import pandas as pd
 
+GENERATED_COLUMNS = {   # the generator's 17 source tables (sandbox only)
+    "clients": ["client_no", "party_type", "segment", "sub_segment", "sector", "industry", "region", "city",
+                "joining_date", "legal_form", "sole_proprietor_flag", "last_annual_sales", "number_of_employees",
+                "parent_client_no", "status", "closure_date"],
+    "accounts": ["account_no", "client_no", "product_type", "product_code", "currency", "open_date", "close_date",
+                 "status", "restricted_flag", "payroll_account_flag"],
+    "transactions": ["txn_id", "account_no", "posting_date", "value_date", "amount_sar", "amount_orig", "currency",
+                     "exchange_rate", "debit_credit", "txn_code", "channel", "txn_type_tag", "counterparty_iban_code",
+                     "counterparty_bank", "counterparty_name", "own_account_flag", "origin_type", "origin_ref",
+                     "reversal_flag", "original_ref"],
+    "daily_balances": ["account_no", "balance_date", "ledger_balance", "available_balance", "blocked_amount",
+                       "hold_amount", "overdraft_limit"],
+    "standing_orders": ["instruction_id", "account_no", "beneficiary_type", "beneficiary_iban_code", "amount",
+                        "currency", "frequency", "start_date", "end_date", "next_payment_date", "status",
+                        "created_date", "changed_date"],
+    "payroll_files": ["FILE_ID", "DBT_CSTMR_CIF", "PAYROLL_ACNT_NMBR", "CRT_DTTS", "SLRY_TRNS_DT", "FND_DT", "TOT_AMT",
+                      "NMBR_OF_EMP", "FILE_TYP_EN_NM", "FILE_SUB_TYP_EN_NM", "STA_CD", "DLT_FLG"],
+    "financing_schedules": ["loan_no", "client_no", "product", "account_debited", "contract_start_date",
+                            "maturity_date", "instalment_no", "due_date", "principal", "profit", "instalment_amount",
+                            "paid_date", "paid_amount", "status", "early_settlement_flag", "credit_limit_total",
+                            "credit_limit_used", "credit_limit_available"],
+    "deposits": ["deposit_id", "client_no", "account_no", "product", "amount", "start_date", "maturity_date",
+                 "expected_profit", "rollover_instruction", "status"],
+    "sadad_payments": ["payment_id", "account_no", "client_no", "biller_id", "biller_name", "biller_category",
+                       "bill_number", "bill_issue_date", "amount", "due_date", "paid_date", "channel"],
+    "code_lists": ["code_type", "code", "meaning"],
+    "trade_finance": ["instrument_id", "client_no", "instrument_type", "subtype", "amount", "currency", "issue_date",
+                      "expiry_date", "payment_date", "cash_margin_account", "cash_margin_amount", "claim_amount",
+                      "claim_date", "status"],
+    "card_sales": ["merchant_id", "client_no", "sales_date", "settlement_date", "sales_amount", "fees", "chargebacks",
+                   "net_amount_paid"],
+    "corporate_cards": ["record_id", "record_type", "client_no", "statement_date", "amount_due", "due_date",
+                        "paid_date", "paid_amount", "topup_date", "topup_amount"],
+    "bills_issued": ["invoice_id", "client_no", "customer_iban_code", "issue_date", "due_date", "amount", "paid_date",
+                     "paid_amount"],
+    "client_monthly_summary": ["client_no", "month", "txn_count_in", "txn_amount_in", "txn_count_out",
+                               "txn_amount_out", "online_amount", "cheque_count", "avg_balance", "payroll_salary",
+                               "payroll_bonus"],
+    "group_structure": ["parent_client_no", "child_client_no", "relationship_type", "start_date"],
+    "cheques": ["cheque_id", "account_no", "direction", "status", "received_date", "cheque_date", "cleared_date",
+                "amount", "post_dated_flag"],
+}
+
+# T24 module (SYS_ID) a posting or a scheduled payment carries, by the generator's origin type
+SYS_ID = {"NONE": "FT", "INVOICE": "FT", "CARD_SETTLEMENT": "FT", "CORP_CARD": "FT", "PAYROLL": "FT", "SADAD": "FT",
+          "CHEQUE": "CQ", "LOAN": "AA", "DEPOSIT": "AA", "LC": "LC", "STANDING_ORDER": "STO"}
+LEGAL = {"LLC": ("Limited Liability Company", "Company"), "JSC": ("Joint Stock Company", "Company"),
+         "PARTNERSHIP": ("Partnership", "Company"), "SOLE_ESTABLISHMENT": ("Sole Proprietorship", "Establishment")}
+
 
 def as_of(tables, day):
     """The tables as the warehouse would have them at the end of `day`."""
     d = pd.Timestamp(day)
     t = {name: df.copy() for name, df in tables.items()}
     for name, df in t.items():          # a table with no rows (few sample clients) still gets its columns
-        if df.empty and name in DETAIL_COLUMNS:
+        if df.empty and name in GENERATED_COLUMNS:
             t[name] = pd.DataFrame({c: pd.Series(dtype="datetime64[ns]" if c.endswith("_date") else "object")
-                                    for c in DETAIL_COLUMNS[name]})
+                                    for c in GENERATED_COLUMNS[name]})
     later = lambda s: pd.to_datetime(s) > d
 
     c = t["clients"][t["clients"]["joining_date"] <= d].copy()
@@ -81,41 +131,36 @@ def as_of(tables, day):
 
 
 def curate(t, day):
-    """The 4 curated tables, built from the detailed tables as of `day`."""
+    """The 3 tables the forecast reads, built from the source tables as of `day` the way the warehouse team builds
+    them from EDW (warehouse_tables.sql), with the standard column names."""
     d = pd.Timestamp(day)
     client_of = t["accounts"].set_index("account_no")["client_no"]
     month = lambda s: pd.to_datetime(s).dt.to_period("M").dt.to_timestamp()
     scheduled = scheduled_payments(t, d, client_of)
+    scheduled["origin_type"] = scheduled["origin_type"].map(SYS_ID)
 
+    # statement entries: no reversed postings (nor the postings they reverse), no transfers between own accounts
     tx = t["transactions"]
     reversed_ids = set(tx.loc[tx["reversal_flag"].astype(bool), "original_ref"])
     tx = tx[~tx["reversal_flag"].astype(bool) & ~tx["txn_id"].isin(reversed_ids) & ~tx["own_account_flag"].astype(bool)]
     tx = tx.assign(client_no=tx["account_no"].map(client_of), month=month(tx["value_date"]),
                    direction=np.where(tx["debit_credit"] == "C", "IN", "OUT"),
-                   origin_type=tx["origin_type"].replace("", np.nan).fillna("NONE"),
+                   origin_type=tx["origin_type"].replace("", np.nan).fillna("NONE").map(SYS_ID),
                    txn_type_tag=tx["txn_type_tag"].replace("", np.nan).fillna("NONE"))
-    known = (scheduled.assign(known_month=month(scheduled["known_date"]))
-             .groupby(["origin_type", "origin_ref"], as_index=False)["known_month"].min())
-    tx = tx.merge(known, on=["origin_type", "origin_ref"], how="left")
-    lead = (tx["month"].dt.year - tx["known_month"].dt.year) * 12 + tx["month"].dt.month - tx["known_month"].dt.month
-    for h in (1, 2, 3):
-        tx[f"known_{h}"] = np.where(tx["known_month"].notna() & (lead >= h), tx["amount_sar"], 0.0)
     flows = (tx.groupby(["client_no", "month", "direction", "origin_type", "txn_type_tag"], as_index=False)
-             .agg(amount=("amount_sar", "sum"), postings=("txn_id", "count"), known_1=("known_1", "sum"),
-                  known_2=("known_2", "sum"), known_3=("known_3", "sum")).round(2))
+             .agg(amount=("amount_sar", "sum"), postings=("txn_id", "count")).round(2))
 
-    b = t["daily_balances"].assign(month=lambda x: month(x["balance_date"]))
-    b = b.sort_values("balance_date").groupby(["account_no", "month"]).tail(1)
-    balances = (b.assign(client_no=b["account_no"].map(client_of))
-                .groupby(["client_no", "month"], as_index=False)[["ledger_balance", "overdraft_limit"]].sum()
-                .rename(columns={"ledger_balance": "balance_end"}).round(2))
-
-    acc = t["accounts"]
-    counts = acc.assign(current=acc["product_type"] == "CURRENT", restricted=acc["restricted_flag"].astype(bool)) \
-        .groupby("client_no").agg(current_accounts=("current", "sum"), restricted_accounts=("restricted", "sum"))
-    clients = t["clients"].merge(counts.reset_index(), on="client_no", how="left")
-    return {"clients": clients, "monthly_flows_by_origin": flows, "scheduled_payments": scheduled,
-            "monthly_balances": balances}
+    c = t["clients"]
+    legal = c["legal_form"].map(LEGAL)
+    sole = c["legal_form"] == "SOLE_ESTABLISHMENT"
+    clients = pd.DataFrame({
+        "client_no": c["client_no"], "customer_type": np.where(sole, "Individual", "Corporate"),
+        "line_of_business": "Business Banking", "legal_entity": legal.str[0], "sub_legal_entity": legal.str[1],
+        "id_type": "Commercial Registration", "segment": c["segment"], "sector": c["sector"],
+        "business_sector": c["sector"], "industry": c["industry"], "sub_industry": c["industry"], "city": c["city"],
+        "status": c["status"], "last_annual_sales": c["last_annual_sales"],
+        "number_of_employees": c["number_of_employees"]})
+    return {"clients": clients, "monthly_flows_by_origin": flows, "scheduled_payments": scheduled}
 
 
 def scheduled_payments(t, d, client_of):
@@ -164,34 +209,28 @@ def scheduled_payments(t, d, client_of):
     return pd.concat(parts, ignore_index=True).round({"amount": 2})
 
 
-def to_warehouse(df, columns, load_id, loaded_at):
-    """Standard columns -> warehouse columns (flags as Y / N) plus the audit columns."""
-    out = pd.DataFrame(index=df.index)
-    for column in columns:
-        values = df[column]
-        out[warehouse_column(column)] = np.where(values.astype(bool), "Y", "N") if is_flag(column) else values
-    out["ETL_LOAD_ID"] = load_id
-    out["ETL_LOAD_DTTS"] = loaded_at
+def to_warehouse(df, table, load_id, loaded_at):
+    """A table in the warehouse's column names and codes (direction C / D), with the audit columns."""
+    out = pd.DataFrame({column: df[standard] for standard, column in COLUMNS[table].items()})
+    if "CRDT_DBT_FLG" in out:
+        out["CRDT_DBT_FLG"] = out["CRDT_DBT_FLG"].map({"IN": "C", "OUT": "D"})
+    out["ETL_LOAD_ID"], out["ETL_LOAD_DTTS"] = load_id, loaded_at
     return out.reset_index(drop=True)
 
 
-def load_warehouse(tables, day, connection, detailed=False):
-    """Full load of the warehouse tables as of `day` (the curated ones, and the detailed ones if asked), then one
-    row per table in the load record."""
+def load_warehouse(tables, day, connection):
+    """Full load of the 3 tables as of `day`, then one row per table in the load record."""
     load_id, loaded_at = f"L{pd.Timestamp.now():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:4]}", pd.Timestamp.now().floor("s")
-    published = as_of(tables, day)
-    curated = curate(published, day)
+    curated = curate(as_of(tables, day), day)
     existing = {d["name"] for d in project.list_datasets()}
     record = []
-    loads = [(curated, TABLES, COLUMNS)] + ([(published, DETAIL_TABLES, DETAIL_COLUMNS)] if detailed else [])
-    for data, names, columns in loads:
-        for table, (warehouse_table, source) in names.items():
-            rows = to_warehouse(data[table], columns[table], load_id, loaded_at)
-            write_table(warehouse_table, rows, connection, existing)
-            record.append({"LOAD_ID": load_id, "LOAD_DTTS": loaded_at, "AS_OF_DT": pd.Timestamp(day),
-                           "SRC_TBL_NM": source, "TRGT_TBL_NM": warehouse_table, "ROW_CNT": len(rows),
-                           "LOAD_STA_CD": "SUCCESS"})
-            print(f"{warehouse_table:26s} {len(rows):>9,} rows")
+    for table, (warehouse_table, source) in TABLES.items():
+        rows = to_warehouse(curated[table], table, load_id, loaded_at)
+        write_table(warehouse_table, rows, connection, existing)
+        record.append({"LOAD_ID": load_id, "LOAD_DTTS": loaded_at, "AS_OF_DT": pd.Timestamp(day),
+                       "SRC_TBL_NM": source, "TRGT_TBL_NM": warehouse_table, "ROW_CNT": len(rows),
+                       "LOAD_STA_CD": "SUCCESS"})
+        print(f"{warehouse_table:26s} {len(rows):>9,} rows")
     previous = dataiku.Dataset(LOAD_RECORD).get_dataframe() if LOAD_RECORD in existing else None
     write_table(LOAD_RECORD, pd.concat([previous, pd.DataFrame(record)], ignore_index=True), connection, existing)
     return load_id

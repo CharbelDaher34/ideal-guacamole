@@ -28,13 +28,14 @@ def active_model_id():
 
 def forecast_table(pred, obligations, last_month):
     """The forecast: one row per client, category and month ahead. pred: the model rows of the cut-off with the
-    model's ev, p10, p90 (SAR); the obligations due that month and known at the cut-off are added to P10, EV and P90
-    (already scheduled, so the same amount). Financing instalments and deposit maturities are obligations only. NET
-    is the client total (money in minus money out). A client with less than 12 months of history gets no forecast
-    (status NOT_ENOUGH_HISTORY)."""
+    model's ev, p10, p90 (SAR); the scheduled payments due that month and known at the cut-off are added to P10, EV
+    and P90 (already scheduled, so the same amount). Financing instalments and deposit maturities are scheduled only.
+    NET is the client total (money in minus money out); no other amount goes below zero. A client with less than 12
+    months of history gets no forecast (status NOT_ENOUGH_HISTORY)."""
     keys = ["client_no", "category", "months_ahead"]
     pred = pred.copy()
-    pred[["p10", "ev", "p90"]] = finish(pred["ev"], pred["p10"], pred["p90"], pred["category"], pred.index)
+    pred[["p10", "ev", "p90"]] = finish(pred["ev"], pred["p10"], pred["p90"], pred["category"], pred.index,
+                                        floor=False)
     ok = pred["enough_history"].astype(bool) & pred["active"].astype(bool)
     pred.loc[~ok, ["p10", "ev", "p90"]] = np.nan
     pred.loc[pred["enough_history"].astype(bool) & ~pred["active"].astype(bool), ["p10", "ev", "p90"]] = 0.0
@@ -67,6 +68,7 @@ def forecast_table(pred, obligations, last_month):
         # no model value: a category fully scheduled, or one the client did not use in the last 12 months
         frame.loc[enough & frame[f"model_{q}"].isna(), f"model_{q}"] = 0.0
         frame[q] = frame[f"model_{q}"] + frame["obligations"]
+    frame[["p10", "ev", "p90"]] = finish(frame["ev"], frame["p10"], frame["p90"], frame["category"], frame.index)
     frame.loc[~enough, ["p10", "ev", "p90", "model_p10", "model_ev", "model_p90"]] = np.nan
     frame["status"] = np.where(enough, "OK", "NOT_ENOUGH_HISTORY")
     order = {c: i for i, c in enumerate(CATEGORIES)}
