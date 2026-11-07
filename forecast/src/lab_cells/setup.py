@@ -28,7 +28,7 @@ for module in (cashflow, models, tracking, forecasters):     # pick up changes t
     importlib.reload(module)
 from cashflow import FORECAST_COLUMNS, HORIZONS, TOTAL, cutoff_month, monthly_matrix, monthly_series, read_dataset
 from forecasters import RecentAverage6
-from models import RecentAverage, lab_compare
+from models import QuantileBoosting, RecentAverage, lab_compare
 
 pd.set_option("display.max_columns", 30)
 cutoff = cutoff_month()

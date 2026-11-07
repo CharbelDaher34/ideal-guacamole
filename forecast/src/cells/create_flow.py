@@ -71,7 +71,7 @@ if not python_folder.get_file("forecasters.py"):
 # project variables, kept if they are already set: forecaster (the one Retrain trains), lab_forecaster (the one the
 # recipe try_forecaster tries), inference_clients_per_chunk (how many clients final_forecast forecasts at a time)
 variables = project.get_variables()
-defaults = {"forecaster": "recent_average", "lab_forecaster": "recent_average_6m",
+defaults = {"forecaster": "quantile_boosting", "lab_forecaster": "recent_average_6m",
             "inference_clients_per_chunk": 5000, **tracking.PROMOTION_RULES}
 missing = {k: v for k, v in defaults.items() if variables["standard"].get(k) in (None, "")}
 if missing:

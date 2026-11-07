@@ -71,7 +71,7 @@ money out) of each of the next 3 months, as P10, EV and P90. It builds 5 flow zo
 The zones only meet through three interfaces: **1. the data** (`daily_flows` and `clients`: staging → training, lab
 and inference), **2. the forecaster** (`models.py`: lab → training), **3. the active version of the saved model**
 (training → inference). Until the data scientist's models are ready, the forecaster is a placeholder,
-`recent_average` (the average of the last 3 months, no machine learning). Two independent scenarios run it:
+`quantile_boosting`: 3 small models (EV, P10, P90), each shared by every category, with the category as an input. Two independent scenarios run it:
 **Nightly batch** (inference) and **Retrain, test and promote** (training). Each starts by setting the cut-off month
 (`set_cutoff`: the month before today, or the project variable `cutoff_override`); the staging recipe stops if the
 postings do not reach it.
@@ -99,7 +99,7 @@ The project library gets these files, by owner:
 
 - shared: `warehouse.py` (the warehouse tables and columns read, codes, categories, daily sums, cut-off month) and
   `cashflow.py` (dates, the data interface, days to months, the saved model name)
-- training and lab: `models.py` (the forecaster interface, the placeholder forecaster, the test and its scores) and
+- training and lab: `models.py` (the forecaster interface, the placeholder forecasters, the test and its scores) and
   `tracking.py` (model IDs, Experiment Tracking, saved model versions, promotion rules, champion / challenger)
 - inference: `forecast.py` (the production model, the final forecast table)
 - `forecasters.py`: the data scientist's own forecasters. Written only when it is created: running this notebook
@@ -120,7 +120,7 @@ Each recipe below becomes a Python recipe in the flow.
 
 Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the Python recipes and their
 CSV datasets, the folders `experiments` (tracked models), `forecast_archive` and `lab_experiments` (lab tries), the
-saved model `cash_forecast`, and the project variables `forecaster` (`recent_average`), `lab_forecaster`
+saved model `cash_forecast`, and the project variables `forecaster` (`quantile_boosting`), `lab_forecaster`
 (`recent_average_6m`), `inference_clients_per_chunk` (5000) and the promotion rules (`promotion_*`) if they are not
 set yet, in 5 zones. Training (folder
 `experiments`), the promotion log and the lab are only rebuilt when asked by name, so the nightly batch never
@@ -208,9 +208,13 @@ A forecaster is a class with `name`, `params` (its settings), `fit(daily, client
 `ev` and `p90` in SAR (details in `models.py`, project library). `cashflow.monthly_matrix(daily, cutoff)` turns the
 days into months. Compared here:
 
-- `recent_average`: the placeholder in production (the average of the last 3 months, no machine learning)
-- `recent_average_6m`: the same over 6 months (an example in `forecasters.py`)
-- `lag_boosting`: an example of a small model that learns: scikit-learn gradient boosting on the last 12 months
+- `quantile_boosting`: the placeholder in production. 3 small models (scikit-learn gradient boosting on the last 12
+  months): one for the EV, one for P10, one for P90. Each is shared by every category and TOTAL, with the category as
+  an input.
+- `quantile_boosting_by_category`: the other way to split it, defined below: a separate set of 3 models for each
+  category and TOTAL, each trained only on its own category.
+- `recent_average`: no machine learning (the average of the last 3 months), and `recent_average_6m` (over 6 months,
+  an example in `forecasters.py`)
 
 Change them or add your own, then run the comparison. scikit-learn, pandas and matplotlib are in the code env; other
 packages need the admin.
@@ -228,7 +232,7 @@ packages need the admin.
 3. Run the scenario **Retrain, test and promote**. Champion / challenger promotes it only if it passes the
    promotion rules (project variables `promotion_*`) against the production model on the same 6 months; the next
    Nightly batch forecasts with it.
-4. To stop training it, set `forecaster` back to `recent_average`. To use an earlier model now, activate its
+4. To stop training it, set `forecaster` back to `quantile_boosting`. To use an earlier model now, activate its
    version in the saved model `cash_forecast`.
 """),
 ], kernel={"display_name": "Python (env cashflow_forecast)", "language": "python",    # the code env's own kernel

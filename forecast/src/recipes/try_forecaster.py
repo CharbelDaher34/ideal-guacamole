@@ -10,7 +10,7 @@ import pandas as pd
 from cashflow import cutoff_month
 from models import lab_try, new_forecaster
 
-forecaster = new_forecaster(dataiku.get_custom_variables().get("lab_forecaster") or "recent_average")
+forecaster = new_forecaster(dataiku.get_custom_variables().get("lab_forecaster") or "recent_average_6m")
 table, decision, reason, run_id = lab_try(forecaster)
 print(f"{forecaster.name}: champion / challenger would decide {decision} ({reason})")
 

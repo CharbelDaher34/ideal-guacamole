@@ -6,9 +6,9 @@ build lab_results (Lab zone). To put one in production:
     1. add its class here and to FORECASTERS below,
     2. set the project variable forecaster to its name,
     3. run the scenario Retrain, test and promote: champion / challenger promotes it only if it passes the promotion
-       rules (project variables promotion_*) on the same last 6 months. To go back, set forecaster to recent_average.
+       rules (project variables promotion_*) on the same last 6 months. To go back, set forecaster to quantile_boosting.
 
-A forecaster is a class with (details in models.py, and RecentAverage there):
+A forecaster is a class with (details in models.py, and the examples QuantileBoosting and RecentAverage there):
     name            the value of the project variable forecaster that selects it
     params          its settings (a dict), recorded in Experiment Tracking
     fit(daily, clients, cutoff)
@@ -23,7 +23,7 @@ from models import RecentAverage
 
 
 class RecentAverage6(RecentAverage):
-    """Example: the placeholder with the average of the last 6 months instead of 3."""
+    """Example: recent_average (models.py) with the average of the last 6 months instead of 3."""
     name = "recent_average_6m"
     params = {**RecentAverage.params, "months": 6}
 

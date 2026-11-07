@@ -1,5 +1,5 @@
 # Train and test one model, with its own model ID, tracked in Experiment Tracking with its forecaster, settings and
-# scores. The forecaster is the one the project variable forecaster names (default recent_average, in models.py; the
+# scores. The forecaster is the one the project variable forecaster names (default quantile_boosting, in models.py; the
 # data scientist's own are in forecasters.py). It learns from the daily flows and the clients (interface 1).
 #   backtest: trained without the last 6 months, then tested on them (models.backtest, test_results)
 #   final: trained on everything up to the cut-off, deployed as version <model ID> of the saved model cash_forecast

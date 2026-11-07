@@ -29,10 +29,11 @@ decided and what is left.
 4. **`inference_load_test.ipynb`** (sandbox only): fake data for 420k clients, times the forecast, puts the real data
    back. Result on the local Docker Dataiku (48 cores, but the recipe uses one):
 
-   | Clients | Daily rows read | Forecast rows | Chunks | Reading | Forecasting | Total | Peak memory |
-   |---|---|---|---|---|---|---|---|
-   | 20,000 | 6.5M | 0.66M | 4 | 17 s | 19 s | 36 s | 807 MB |
-   | 420,000 | 137M | 13.9M | 84 | 5.2 min | 6.3 min | 11.5 min | 961 MB |
+   | Model | Clients | Daily rows read | Forecast rows | Chunks | Reading | Forecasting | Total | Peak memory |
+   |---|---|---|---|---|---|---|---|---|
+   | recent_average | 20,000 | 6.5M | 0.66M | 4 | 17 s | 19 s | 36 s | 807 MB |
+   | recent_average | 420,000 | 137M | 13.9M | 84 | 5.2 min | 6.3 min | 11.5 min | 961 MB |
+   | quantile_boosting (3 models) | 420,000 | 137M | 13.9M | 84 | 5.4 min | 7.3 min | 12.7 min | 977 MB |
 
    Memory barely moves with 21 times more clients; the time grows in line with the data.
 

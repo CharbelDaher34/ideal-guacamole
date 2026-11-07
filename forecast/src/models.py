@@ -1,10 +1,10 @@
-"""Models (project library: python/models.py): interface 2, the forecaster, the placeholder forecaster and the test
+"""Models (project library: python/models.py): interface 2, the forecaster, the placeholder forecasters and the test
 every model goes through. Training (train_and_test, champion_challenger) and the lab use it; inference only calls the
 production model's predict.
 
 A forecaster is a class with:
     name            its name. The project variable forecaster says which one the scenario Retrain, test and promote
-                    trains (default: recent_average).
+                    trains (default: quantile_boosting).
     params          its settings (a dict), recorded in Experiment Tracking
     fit(daily, clients, cutoff)
                     learns from the data known at the end of the cut-off month (interface 1, cashflow.py):
@@ -22,14 +22,15 @@ overwrites it. lab_try and lab_compare try forecasters against the production mo
 import numpy as np
 import pandas as pd
 
-from cashflow import FORECAST_COLUMNS, HORIZONS, add_months, cutoff_month, finish, monthly_matrix, monthly_series, until
+from cashflow import (FORECAST_COLUMNS, HORIZONS, TOTAL, add_months, cutoff_month, finish, monthly_matrix,
+                      monthly_series, until)
 
 HOLDOUT_MONTHS = 6          # the last months kept aside to test the models
 OUTPUT = ["p10", "ev", "p90"]
 
 
 class RecentAverage:
-    """The placeholder forecaster, until the data scientist's models replace it: no machine learning. Per client and
+    """A simple forecaster with no machine learning, to compare others with (and fall back on). Per client and
     category, EV = the average net cash flow of the last 3 months (the same for the 3 months ahead). P10 and P90 =
     EV -/+ width x the series' standard deviation over the last 12 months, where fit sets width so that, over the
     12 months before the cut-off, 80% of the actual months fell inside."""
@@ -59,10 +60,79 @@ class RecentAverage:
         return pd.concat([one.assign(months_ahead=h) for h in HORIZONS], ignore_index=True)[FORECAST_COLUMNS]
 
 
+class QuantileBoosting:
+    """The production placeholder, until the data scientist's models replace it: 3 small models, one for the EV, one
+    for P10 and one for P90 (scikit-learn gradient boosting; P10 and P90 with the quantile loss, the EV with the median,
+    which is far less thrown off by a few huge months than the mean). Each of the 3 is ONE model for every category
+    and TOTAL: the category is one of its inputs, so a category with little data learns from the others.
+    Inputs per client and category at a cut-off: the last 12 months' net cash flow divided by the series' scale (so
+    small and large clients look alike), the category, how many months are known, the months ahead and the calendar
+    month forecast (seasonality). Trained on the cut-offs of the last 24 months, on at most max_rows rows (a random
+    sample beyond that, the same every run). Each row is forecast from its own client's history only."""
+    name = "quantile_boosting"
+    params = {"lags": 12, "cutoffs": 24, "max_iter": 200, "learning_rate": 0.05, "max_rows": 1_000_000}
+    QUANTILES = {"ev": 0.5, "p10": 0.1, "p90": 0.9}
+
+    def _rows(self, wide, p, h):
+        """Inputs at month position p (the cut-off) for months ahead h, and each series' scale."""
+        last = wide.iloc[:, max(0, p - self.params["lags"] + 1):p + 1]
+        scale = last.abs().mean(axis=1).fillna(0).clip(lower=100.0)
+        X = last.div(scale, axis=0).fillna(0.0)
+        X.columns = [f"lag_{len(X.columns) - i}" for i in range(len(X.columns))]
+        X = X.reindex(columns=[f"lag_{k}" for k in range(self.params["lags"], 0, -1)], fill_value=0.0)
+        category = pd.Categorical(wide.index.get_level_values("category"), categories=self.categories)
+        X["category"] = np.where(category.codes >= 0, category.codes, np.nan)      # a new category: unknown
+        X["months_known"] = last.notna().sum(axis=1).values
+        X["months_ahead"] = h
+        X["calendar_month"] = add_months(wide.columns[p], h).month
+        return X, scale
+
+    def fit(self, daily, clients, cutoff):
+        return self.fit_months(monthly_matrix(daily, cutoff))
+
+    def predict(self, daily, clients, cutoff):
+        return self.predict_months(monthly_matrix(daily, cutoff))
+
+    def fit_months(self, wide):
+        """fit, from the monthly net cash flow (cashflow.monthly_matrix)."""
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        self.categories = sorted(set(wide.index.get_level_values("category")))
+        n = wide.shape[1]
+        blocks = [(p, h) for p in range(max(0, n - 1 - self.params["cutoffs"]), n - 1) for h in HORIZONS if p + h < n]
+        keep = min(1.0, self.params["max_rows"] / max(1, len(wide) * len(blocks)))
+        rng, Xs, ys = np.random.default_rng(0), [], []
+        for p, h in blocks:
+            X, scale = self._rows(wide, p, h)
+            y = wide.iloc[:, p + h] / scale
+            ok = (y.notna() & wide.iloc[:, p].notna()).values & (rng.random(len(y)) < keep)
+            Xs.append(X[ok])
+            ys.append(y[ok])
+        X, y = pd.concat(Xs), pd.concat(ys)
+        settings = {"max_iter": self.params["max_iter"], "learning_rate": self.params["learning_rate"],
+                    "categorical_features": ["category"], "random_state": 0}
+        self.models = {column: HistGradientBoostingRegressor(loss="quantile", quantile=q, **settings).fit(X, y)
+                       for column, q in self.QUANTILES.items()}
+        return self
+
+    def predict_months(self, wide):
+        """predict, from the monthly net cash flow (cashflow.monthly_matrix)."""
+        if wide.empty:
+            return pd.DataFrame(columns=FORECAST_COLUMNS)
+        out = []
+        for h in HORIZONS:
+            X, scale = self._rows(wide, wide.shape[1] - 1, h)
+            rows = wide.index.to_frame(index=False).assign(months_ahead=h)
+            for column, model in self.models.items():
+                rows[column] = model.predict(X) * scale.values
+            out.append(rows)
+        return pd.concat(out, ignore_index=True)[FORECAST_COLUMNS]
+
+
 def known_forecasters():
-    """The forecasters Retrain can train, by name: the placeholder and those listed in FORECASTERS in forecasters.py.
-    Also returns the problem reading forecasters.py, if any (the placeholder still works)."""
-    found, problem = {RecentAverage.name: RecentAverage}, None
+    """The forecasters Retrain can train, by name: the placeholders (quantile_boosting, recent_average) and those
+    listed in FORECASTERS in forecasters.py. Also returns the problem reading forecasters.py, if any (the placeholders
+    still work)."""
+    found, problem = {QuantileBoosting.name: QuantileBoosting, RecentAverage.name: RecentAverage}, None
     try:
         import forecasters
         for forecaster in forecasters.FORECASTERS:
@@ -73,9 +143,9 @@ def known_forecasters():
 
 
 def new_forecaster(name=None):
-    """A new, untrained forecaster: the one named by the project variable forecaster (default recent_average)."""
+    """A new, untrained forecaster: the one named by the project variable forecaster (default quantile_boosting)."""
     import dataiku
-    name = name or dataiku.get_custom_variables().get("forecaster") or RecentAverage.name
+    name = name or dataiku.get_custom_variables().get("forecaster") or QuantileBoosting.name
     found, problem = known_forecasters()
     if name not in found:
         raise ValueError(f"No forecaster named {name!r} (project variable forecaster). Known: {', '.join(found)}. "

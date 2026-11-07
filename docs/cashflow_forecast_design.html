@@ -152,8 +152,8 @@ flowchart LR
     </tbody>
   </table>
   </div>
-  <p><strong>The placeholder, <code>recent_average</code></strong> (no machine learning): EV = the average of the last 3 months of each client and category; P10 and P90 = EV ∓ a width × how much that series moved over the last 12 months, the width set so that 80% of past months fell inside. It is the same for the 3 months ahead. Its only job is to let the whole pipeline run end to end.</p>
-  <p class="caption">The lab shows an example of a small model that learns (scikit-learn gradient boosting on the last 12 months) on the same plug.</p>
+  <p><strong>The placeholder, <code>quantile_boosting</code></strong>: 3 small models (scikit-learn gradient boosting), one for the EV, one for P10, one for P90, all on the last 12 months of each client and category. Each of the 3 serves every category and TOTAL, with the category as an input, rather than one set of models per category: a category with little data learns from the others, and there are 3 models to track and promote instead of 3 per category. The 3 are saved and promoted together, in one version of the saved model. Its job is to let the whole pipeline run end to end with real models; the data scientist replaces it.</p>
+  <p class="caption">The lab compares it with one set of 3 models per category (<code>quantile_boosting_by_category</code>) and with <code>recent_average</code> (no machine learning: the average of the last 3 months).</p>
 </section>
 
 <section>
@@ -304,7 +304,7 @@ flowchart TB
       <ul>
         <li>Input: the daily flows per client, day and category, over each client's whole history. No monthly table in between.</li>
         <li>Output: per client, category and TOTAL, one value per month for each of the next 3 months, as P10, EV and P90.</li>
-        <li>Small models only, no deep learning. A placeholder (<code>recent_average</code>) until the data scientist's models are ready.</li>
+        <li>Small models only, no deep learning. A placeholder (<code>quantile_boosting</code>: 3 models for EV, P10 and P90, shared by all categories) until the data scientist's models are ready.</li>
         <li>Each training run is tracked with a model ID and deployed as a version of <code>cash_forecast</code>; it is activated only if it passes the promotion rules (project variables); the nightly batch uses the active version.</li>
         <li>The warehouse is only read, never written to: Dataiku does all the prep and the modelling. Everything the project writes is a CSV file.</li>
         <li>At least 12 months of history to forecast a client; otherwise flagged. Test on the last 6 months.</li>

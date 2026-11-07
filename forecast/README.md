@@ -9,7 +9,7 @@ it works, see [`../docs/cashflow_forecast_design.html`](../docs/cashflow_forecas
 **Who owns what:**
 - **This project** covers everything around the model: getting the data into a format the data scientist can work
   with, the inference pipeline, and the promotion pipeline with its rules.
-- **The model is a placeholder**, `recent_average` (no machine learning), until the data scientist's models replace
+- **The model is a placeholder**, `quantile_boosting` (3 small models: EV, P10, P90), until the data scientist's models replace
   it through the forecaster interface.
 
 There are four notebooks:
@@ -142,19 +142,26 @@ The zones only meet through three interfaces:
   by default). Memory holds one chunk, whatever the number of clients. A bigger chunk is faster but needs more
   memory; `inference_load_test.ipynb` measures both.
 - **Rule for the data scientist:** `predict` must give the same answer for a client whether it gets one chunk of
-  clients or all of them (the placeholder does: each client is forecast from its own history).
+  clients or all of them (the placeholders do: each client is forecast from its own history).
 - **Archive and log:** the same run writes the forecast, compressed, to the folder `forecast_archive`
   (`forecast_<cut-off>_<model ID>.csv.gz`) and adds one row to `inference_log`: the model and load, the clients and
   rows, the chunks, the seconds spent reading and forecasting, and the most memory used (`peak_memory_mb`).
 
 ## Models: tracking, versions, promotion
 
-**Placeholder model**
-- `recent_average`, in `models.py`:
-  - EV is the average of the last 3 months.
-  - P10 and P90 are EV ∓ width × the series' spread over the last 12 months.
-  - `fit` sets the width so that 80% of past months fell inside.
-- It's the same for the 3 months ahead.
+**Placeholder model: `quantile_boosting`, in `models.py`**
+- **3 models:** one for the EV, one for P10, one for P90 (scikit-learn gradient boosting; P10 and P90 with the
+  quantile loss, the EV with the median, which few huge months throw off far less than the mean).
+- **Not split by category:** each of the 3 models serves every category and TOTAL, with the category as one of its
+  inputs. So a category with little data learns from the others, and there are 3 models to track and promote, not 3
+  per category. The lab compares this with one set of 3 models per category (`quantile_boosting_by_category`).
+- **Inputs** per client and category: the last 12 months' net cash flow divided by the series' scale (so small and
+  large clients look alike), the category, how many months are known, the months ahead and the calendar month.
+- **Training:** the cut-offs of the last 24 months, at most 1,000,000 rows (`max_rows`: a fixed random sample
+  beyond that, so training stays bounded with 420k clients).
+- The 3 models are saved together in one version of `cash_forecast`, so they are always promoted together.
+- `recent_average` (no machine learning: the average of the last 3 months, P10 and P90 from the series' spread) is
+  kept to compare with and to fall back on.
 
 **Tracking**
 - Every run of `train_and_test` is one model, with a model ID like `CFF_202610_20261107T1000` (cut-off month,
@@ -197,10 +204,10 @@ challenger tests a model, next to the production model and the simple guess.
   - seasonality;
   - one client day by day.
 - **Models to try** (with `lab_compare`):
-  - `recent_average`, the production placeholder. Trained again here, it matches the production model's scores,
+  - `quantile_boosting`, the production placeholder. Trained again here, it matches the production model's scores,
     which checks that the test is the same.
-  - `recent_average_6m`;
-  - `lag_boosting`: an example of a small scikit-learn model that learns from the last 12 months.
+  - `quantile_boosting_by_category`: one set of 3 models per category instead of one shared set.
+  - `recent_average` and `recent_average_6m`: no machine learning.
 
 **Without a notebook:** set the project variable `lab_forecaster` and build `lab_results`.
 
@@ -225,7 +232,7 @@ The notebooks are assembled from `src/`. Edit those files, then run `python make
   cut-off month
 - `src/library_cashflow.py`: the project library `cashflow.py`, shared by all zones (the data interface, days to
   months, the saved model name)
-- `src/models.py`: the forecaster interface, the placeholder, the test and its scores, `lab_try` and `lab_compare`
+- `src/models.py`: the forecaster interface, the placeholders, the test and its scores, `lab_try` and `lab_compare`
 - `src/tracking.py`: model IDs, Experiment Tracking, saved model versions, **the promotion rules**, champion /
   challenger
 - `src/forecast.py`: inference (the production model and the final forecast table)
