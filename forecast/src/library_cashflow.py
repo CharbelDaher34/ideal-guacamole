@@ -42,6 +42,23 @@ def iter_dataset(name, rows=1_000_000, columns=None, **kwargs):
         yield _plain(chunk)
 
 
+def append_row(name, columns, row):
+    """Add one row to a log dataset (an appended output of the recipe) with fixed column types, so that rows of
+    failed runs (with empty values) never change how the earlier rows are read. columns: {name: Dataiku type}, one of
+    string, bigint, double, boolean."""
+    import dataiku
+    kinds = {"string": "string", "bigint": "Int64", "double": "float64", "boolean": "boolean"}
+    frame = pd.DataFrame([{c: row.get(c) for c in columns}])
+    for c, kind in columns.items():
+        frame[c] = (frame[c].fillna("").astype(str) if kind == "string"
+                    else pd.to_numeric(frame[c]).astype(kinds[kind]) if kind != "boolean"
+                    else frame[c].astype("boolean"))
+    dataset = dataiku.Dataset(name)
+    dataset.write_schema([{"name": c, "type": kind} for c, kind in columns.items()])
+    with dataset.get_writer() as writer:
+        writer.write_dataframe(frame)
+
+
 class Spread:
     """Rows spread over n files on local disk by the hash of a column, then read back one file at a time: all the
     rows with the same value of that column end up in the same file, and memory holds one file, not the whole table.

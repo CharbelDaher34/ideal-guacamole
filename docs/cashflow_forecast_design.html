@@ -193,18 +193,18 @@ flowchart LR
 
 <section>
   <h2><span class="n">6</span>The final forecast</h2>
-  <p>One row per active client, category (and TOTAL) and month ahead. P10 ≤ EV ≤ P90 always holds; the net cash flow can be negative. A client with less than 12 months of history gets no values and is flagged <code>NOT_ENOUGH_HISTORY</code>.</p>
+  <p><strong>One row per active client.</strong> Each value is a column named category, month ahead and P10 / EV / P90: <code>TOTAL_m1_p10</code>, <code>TOTAL_m1_ev</code>, … <code>UTILITIES_m3_p90</code> (TOTAL and each category of the list, for months 1 to 3). P10 ≤ EV ≤ P90 always holds; the net cash flow can be negative. A category the client does not have stays empty.</p>
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Client</th><th>Category</th><th>Month</th><th>Ahead</th><th>P10</th><th>EV</th><th>P90</th></tr></thead>
+    <thead><tr><th>client_no</th><th>status</th><th>m1_month</th><th>TOTAL_m1_p10</th><th>TOTAL_m1_ev</th><th>TOTAL_m1_p90</th><th>…</th><th>SALARIES_m1_ev</th><th>…</th></tr></thead>
     <tbody>
-      <tr><td class="mono">1043</td><td>CUSTOMER_RECEIPTS</td><td class="mono">2026-11</td><td>1</td><td class="mono">1,450,000</td><td class="mono">1,855,000</td><td class="mono">2,450,000</td></tr>
-      <tr><td class="mono">1043</td><td>SALARIES</td><td class="mono">2026-11</td><td>1</td><td class="mono">−420,000</td><td class="mono">−400,000</td><td class="mono">−380,000</td></tr>
-      <tr><td class="mono">1043</td><td>TOTAL</td><td class="mono">2026-11</td><td>1</td><td class="mono">−120,000</td><td class="mono">60,000</td><td class="mono">230,000</td></tr>
+      <tr><td class="mono">1043</td><td>OK</td><td class="mono">2026-11</td><td class="mono">−120,000</td><td class="mono">60,000</td><td class="mono">230,000</td><td>…</td><td class="mono">−400,000</td><td>…</td></tr>
+      <tr><td class="mono">1077</td><td>NOT_ENOUGH_HISTORY</td><td class="mono">2026-11</td><td></td><td></td><td></td><td>…</td><td></td><td>…</td></tr>
+      <tr><td class="mono">1102</td><td>NO_POSTINGS</td><td class="mono">2026-11</td><td></td><td></td><td></td><td>…</td><td></td><td>…</td></tr>
     </tbody>
   </table>
   </div>
-  <p class="caption">Example output rows, in SAR. The numbers are illustrative. Every row also carries the model ID and the warehouse load it came from.</p>
+  <p class="caption">Example rows, in SAR; the numbers are illustrative. <code>status</code>: <code>OK</code>, <code>NOT_ENOUGH_HISTORY</code> (less than 12 months of history, no values) or <code>NO_POSTINGS</code> (an active client with no posting at all, no values). Every row also carries the model (<code>model_id</code>, <code>forecaster</code>) and the warehouse load (<code>load_id</code>). The models themselves still return one row per client, category and month ahead; only the saved table is one row per client.</p>
 </section>
 
 <section>
@@ -278,22 +278,23 @@ flowchart TB
 
 <section>
   <h2><span class="n">9</span>Inference log</h2>
-  <p>The recipe <code>final_forecast</code> is built for the bank's ~420,000 clients: it forecasts a chunk of clients at a time (project variable <code>inference_clients_per_chunk</code>, 5,000 by default), so memory holds one chunk whatever the number of clients. Every run adds one row to <code>inference_log</code> (in the Inference zone) and keeps the forecast as it was made, compressed, in the folder <code>forecast_archive</code>.</p>
+  <p>The recipe <code>final_forecast</code> is built for the bank's ~420,000 clients: it forecasts a chunk of clients at a time (project variable <code>inference_clients_per_chunk</code>, 5,000 by default), so memory holds one chunk whatever the number of clients. Every run adds one row to <code>inference_log</code> (in the Inference zone), <strong>also when it fails</strong>, and keeps the forecast as it was made, compressed, in the folder <code>forecast_archive</code>. <code>final_forecast</code> is only written once every chunk has worked, so a failed run leaves the previous forecast as it was. <code>staging_log</code> gets one row per staging run the same way.</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Column</th><th>What it says</th></tr></thead>
     <tbody>
       <tr><td><code>run_at</code></td><td>When the run happened</td></tr>
       <tr><td><code>load_id</code>, <code>as_of_date</code>, <code>cutoff_month</code></td><td>Which warehouse load it used, and the last full month</td></tr>
-      <tr><td><code>model_id</code></td><td>Which model made the forecast: the active version (when it was promoted is in <code>promotion_log</code>)</td></tr>
-      <tr><td><code>clients</code>, <code>clients_not_enough_history</code>, <code>forecast_rows</code></td><td>What it produced</td></tr>
+      <tr><td><code>status</code>, <code>error</code></td><td><code>SUCCESS</code>, or <code>FAILED</code> and the error message</td></tr>
+      <tr><td><code>model_id</code>, <code>forecaster</code></td><td>Which model made the forecast: the active version, and its kind (for example <code>quantile_boosting</code>). When it was promoted is in <code>promotion_log</code></td></tr>
+      <tr><td><code>active_clients</code> = <code>clients_ok</code> + <code>clients_not_enough_history</code> + <code>clients_no_postings</code></td><td>Every active client, and what it got: a forecast, or no values and why</td></tr>
       <tr><td><code>daily_rows_read</code>, <code>chunks</code></td><td>How much it read, in how many chunks of clients</td></tr>
-      <tr><td><code>seconds_reading</code>, <code>seconds_forecasting</code>, <code>seconds_total</code>, <code>peak_memory_mb</code></td><td>How long each step took, and the most memory the run used</td></tr>
+      <tr><td><code>seconds_reading</code>, <code>seconds_forecasting</code>, <code>seconds_total</code>, <code>peak_memory_mb</code></td><td>How long each step took (forecasting includes writing), and the most memory the run used</td></tr>
       <tr><td><code>archive_file</code></td><td>The run's file in <code>forecast_archive</code></td></tr>
     </tbody>
   </table>
   </div>
-  <p class="caption">Scenario run history shows every run and its failures; in production, add a reporter (email, Slack) to the scenarios. Model monitoring (drift, accuracy against actuals) is left out for now.</p>
+  <p class="caption">Alerts (email or Teams when a run fails) are planned, not built: <code>forecast/alerts_plan.md</code>. Model monitoring (drift, accuracy against actuals) is the data scientist's side.</p>
 </section>
 
 <section>

@@ -90,8 +90,10 @@ are all in `src/warehouse.py`, the only file to change if they differ at the ban
   cut-off month, and **adds** them to `daily_flows`. Through the database connection the warehouse does the filter
   (`WHERE VAL_DT >= …`), so only the new rows travel. From CSV files (sandbox, landing folder) the whole file is read
   and filtered in Dataiku.
-- `staging_log` gets one row per run: `FULL`, `NEW_DAYS` or `NOTHING_NEW`, the days read, the rows read and added,
-  and the last day now in `daily_flows`.
+- `staging_log` gets one row per run, also when it fails (`status` `FAILED` and the `error`, for example a late
+  load): `FULL`, `NEW_DAYS` or `NOTHING_NEW`, the days read, the rows read and added, and the last day now in
+  `daily_flows`. A failed run adds nothing, so the next run reads the same days again. If a run ever fails while
+  adding to `daily_flows` (`partial_write`), staging stops until the Full rebuild is run.
 - **Full rebuild of the daily flows** (a scenario run by hand) empties `daily_flows` and `staging_log`, then reads
   the whole history again. Use it when old days must be rebuilt: for example after a reversal cancels a posting from
   a day already staged (the nightly read only looks at new days, so it can't take that posting out), or after the
@@ -131,12 +133,19 @@ The zones only meet through three interfaces:
 
 ## The forecast (`final_forecast`)
 
-- **One row per** active client, category (and `TOTAL`) and months ahead, with these columns:
-  - `client_no`, `category`, `cutoff_month`, `months_ahead`, `target_month`;
-  - `p10`, `ev`, `p90`;
-  - `history_months`, `status`, `model_id`, `load_id`.
-- **Not enough history:** a client with less than 12 months of history (`MIN_HISTORY_MONTHS`) gets no values, and
-  its status is `NOT_ENOUGH_HISTORY`.
+- **One row per active client**, with these columns:
+  - `client_no`, `cutoff_month`, `m1_month`, `m2_month`, `m3_month` (the 3 months forecast);
+  - `status`, `history_months`;
+  - the values: one column per category, month ahead and value, `TOTAL_m1_p10`, `TOTAL_m1_ev`, `TOTAL_m1_p90`,
+    `TOTAL_m2_p10`, … `UTILITIES_m3_p90` (TOTAL and every category of `warehouse.py`). A category the client doesn't
+    have stays empty;
+  - `model_id`, `forecaster` (the kind of model, for example `quantile_boosting`), `load_id`.
+- **Status:**
+  - `OK`;
+  - `NOT_ENOUGH_HISTORY`: less than 12 months of history (`MIN_HISTORY_MONTHS`), no values;
+  - `NO_POSTINGS`: an active client with no posting at all, no values. So every active client has its row.
+- The models still return one row per client, category and month ahead; `forecast.one_row_per_client` turns that
+  into the saved table.
 - **In chunks of clients:** the recipe reads `daily_flows` in chunks, spreads it over files on the server's disk by
   client, then forecasts one file at a time: about `inference_clients_per_chunk` clients (project variable, 5,000
   by default). Memory holds one chunk, whatever the number of clients. A bigger chunk is faster but needs more
@@ -144,8 +153,13 @@ The zones only meet through three interfaces:
 - **Rule for the data scientist:** `predict` must give the same answer for a client whether it gets one chunk of
   clients or all of them (the placeholders do: each client is forecast from its own history).
 - **Archive and log:** the same run writes the forecast, compressed, to the folder `forecast_archive`
-  (`forecast_<cut-off>_<model ID>.csv.gz`) and adds one row to `inference_log`: the model and load, the clients and
-  rows, the chunks, the seconds spent reading and forecasting, and the most memory used (`peak_memory_mb`).
+  (`forecast_<cut-off>_<model ID>.csv.gz`) and adds one row to `inference_log`:
+  - `status` (`SUCCESS` or `FAILED`) and the `error`: a failed run is logged too;
+  - the model (`model_id`, `forecaster`) and the load;
+  - `active_clients` = `clients_ok` + `clients_not_enough_history` + `clients_no_postings`;
+  - the rows read, the chunks, the seconds reading and forecasting (with writing), the most memory used.
+- **A failed run changes nothing:** every chunk is forecast first and kept on the server's disk; `final_forecast`
+  and the archive are only written once all of them worked.
 
 ## Models: tracking, versions, promotion
 
@@ -223,6 +237,8 @@ challenger tests a model, next to the production model and the simple guess.
 | Nightly batch | set the cut-off month → add the new days to the daily flows → forecast with the production model, archive it and log the run. It never trains. | daily, 06:00 Riyadh |
 | Retrain, test and promote | set the cut-off month → add the new days to the daily flows → train, test and deploy a new model → champion / challenger → promote if better. It doesn't forecast. | monthly, on the 5th at 07:00 Riyadh |
 | Full rebuild of the daily flows | set the cut-off month → empty `daily_flows` and `staging_log` → read the whole history again. It doesn't forecast: run the Nightly batch after it. | none: run by hand |
+
+**Alerts** (an email or a Teams message when a run fails) are planned, not built: [`alerts_plan.md`](alerts_plan.md).
 
 ## Change the code
 
