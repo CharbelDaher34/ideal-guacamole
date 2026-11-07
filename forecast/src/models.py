@@ -1,78 +1,68 @@
-"""Models (project library: python/models.py): interface 2, the forecaster, the reference forecaster (CatBoost) and the
-test every model goes through. Training (train_and_test, champion_challenger) and the lab notebook use it; inference
-never imports it.
+"""Models (project library: python/models.py): interface 2, the forecaster, the placeholder forecaster and the test
+every model goes through. Training (train_and_test, champion_challenger) and the lab use it; inference only calls the
+production model's predict.
 
 A forecaster is a class with:
     name            its name. The project variable forecaster says which one the scenario Retrain, test and promote
-                    trains (default: catboost).
+                    trains (default: recent_average).
     params          its settings (a dict), recorded in Experiment Tracking
-    inputs          the model-row columns it reads (cashflow.MODEL_ROW_COLUMNS, no dates). Each saved model version
-                    is given these columns.
-    fit(rows)       learns from training rows. Column target is the amount to predict: the client's net cash flow
-                    (money in minus money out) of the predicted month, in SAR.
-    predict(rows)   a DataFrame with the index of rows and the columns p10, ev, p90 (SAR). forecast() then applies
-                    P10 <= EV <= P90.
+    fit(daily, clients, cutoff)
+                    learns from the data known at the end of the cut-off month (interface 1, cashflow.py):
+                    daily: daily_flows (client_no, day, category, money_in, money_out, postings), every day up to
+                    the end of the cut-off month; clients: the clients dataset; cutoff: the cut-off month (a
+                    Timestamp, first day of the month). cashflow.monthly_matrix turns the days into months.
+    predict(daily, clients, cutoff)
+                    the same inputs, for the clients to forecast. Returns a DataFrame with one row per client,
+                    category (each category the client has in daily, and TOTAL: all its categories together) and
+                    months ahead (1, 2, 3): the columns client_no, category, months_ahead, p10, ev, p90 (the net cash
+                    flow of that month, SAR). forecast() checks it and applies P10 <= EV <= P90.
 The data scientist's own forecasters go in forecasters.py: the setup notebook creates that file once and never
-overwrites it. lab_try and lab_compare try forecasters against the production model without touching
-production (the Lab zone and the notebook forecast_lab).
+overwrites it. lab_try and lab_compare try forecasters against the production model without touching production.
 """
 import numpy as np
 import pandas as pd
 
-from cashflow import add_months, cutoff_month, finish, month_start
+from cashflow import FORECAST_COLUMNS, HORIZONS, add_months, cutoff_month, finish, monthly_matrix, monthly_series, until
 
 HOLDOUT_MONTHS = 6          # the last months kept aside to test the models
 OUTPUT = ["p10", "ev", "p90"]
 
-# the reference forecaster's inputs
-CAT_FEATURES = ["segment", "sector", "city", "sole_proprietor"]
-AMOUNT_FEATURES = ["last_amount", "avg_3m", "same_month_last_year", "client_in_avg_3m", "client_out_avg_3m"]
-OTHER_FEATURES = ["months_ahead", "target_month_of_year", "history_months", "log_scale", "log_annual_sales",
-                  "employees"]
-FEATURES = CAT_FEATURES + AMOUNT_FEATURES + OTHER_FEATURES
 
+class RecentAverage:
+    """The placeholder forecaster, until the data scientist's models replace it: no machine learning. Per client and
+    category, EV = the average net cash flow of the last 3 months (the same for the 3 months ahead). P10 and P90 =
+    EV -/+ width x the series' standard deviation over the last 12 months, where fit sets width so that, over the
+    12 months before the cut-off, 80% of the actual months fell inside."""
+    name = "recent_average"
+    params = {"months": 3, "spread_months": 12, "coverage": 0.8}
 
-def model_matrix(rows):
-    """The reference forecaster's inputs: amounts divided by the client's scale (its usual month), categorical inputs
-    as text."""
-    X = rows[FEATURES].copy()
-    for c in AMOUNT_FEATURES:
-        X[c] = rows[c] / rows["scale"]
-    for c in CAT_FEATURES:
-        X[c] = X[c].fillna("NA").astype(str).str.upper()       # TRUE / FALSE however a yes / no column is read
-    return X
-
-
-class CatBoostForecaster:
-    """The reference forecaster: one CatBoost model for the EV and one for P10 and P90 together, trained on the net
-    cash flow divided by the client's scale (its usual month), so small and large clients look alike."""
-    name = "catboost"
-    params = {"iterations": 600, "depth": 6, "learning_rate": 0.08, "random_seed": 0, "verbose": 0}
-    quantiles = (0.1, 0.9)
-    inputs = FEATURES + ["scale"]
-
-    def fit(self, rows):
-        from catboost import CatBoostRegressor
-        X, y = model_matrix(rows), rows["target"] / rows["scale"]
-        self.ev = CatBoostRegressor(loss_function="RMSE", **self.params)
-        self.ev.fit(X, y, cat_features=CAT_FEATURES)
-        alphas = ",".join(str(q) for q in self.quantiles)
-        self.p10_p90 = CatBoostRegressor(loss_function=f"MultiQuantile:alpha={alphas}", **self.params)
-        self.p10_p90.fit(X, y, cat_features=CAT_FEATURES)
+    def fit(self, daily, clients, cutoff):
+        wide = monthly_matrix(daily, cutoff)
+        n, s = self.params["months"], self.params["spread_months"]
+        z = []
+        for k in range(1, min(12, wide.shape[1] - 1) + 1):         # each of the last 12 months, from the months before
+            past, actual = wide.iloc[:, :-k], wide.iloc[:, -k]
+            ev, sd = past.iloc[:, -n:].mean(axis=1), past.iloc[:, -s:].std(axis=1)
+            ok = actual.notna() & ev.notna() & (sd > 0)
+            z.append(((actual - ev).abs() / sd)[ok])
+        z = pd.concat(z) if z else pd.Series(dtype=float)
+        self.width = float(z.quantile(self.params["coverage"])) if len(z) else 1.28
         return self
 
-    def predict(self, rows):
-        X = model_matrix(rows)
-        scale = rows["scale"].values
-        q = self.p10_p90.predict(X)
-        return pd.DataFrame({"p10": q[:, 0] * scale, "ev": self.ev.predict(X) * scale, "p90": q[:, 1] * scale},
-                            index=rows.index)
+    def predict(self, daily, clients, cutoff):
+        wide = monthly_matrix(daily, cutoff)
+        if wide.empty:
+            return pd.DataFrame(columns=FORECAST_COLUMNS)
+        ev = wide.iloc[:, -self.params["months"]:].mean(axis=1).fillna(0.0)
+        sd = wide.iloc[:, -self.params["spread_months"]:].std(axis=1).fillna(ev.abs())
+        one = pd.DataFrame({"p10": ev - self.width * sd, "ev": ev, "p90": ev + self.width * sd}).reset_index()
+        return pd.concat([one.assign(months_ahead=h) for h in HORIZONS], ignore_index=True)[FORECAST_COLUMNS]
 
 
 def known_forecasters():
-    """The forecasters Retrain can train, by name: the reference one and those listed in FORECASTERS in
-    forecasters.py. Also returns the problem reading forecasters.py, if any (the reference one still works)."""
-    found, problem = {CatBoostForecaster.name: CatBoostForecaster}, None
+    """The forecasters Retrain can train, by name: the placeholder and those listed in FORECASTERS in forecasters.py.
+    Also returns the problem reading forecasters.py, if any (the placeholder still works)."""
+    found, problem = {RecentAverage.name: RecentAverage}, None
     try:
         import forecasters
         for forecaster in forecasters.FORECASTERS:
@@ -83,42 +73,74 @@ def known_forecasters():
 
 
 def new_forecaster(name=None):
-    """A new, untrained forecaster: the one named by the project variable forecaster (default catboost)."""
+    """A new, untrained forecaster: the one named by the project variable forecaster (default recent_average)."""
     import dataiku
-    name = name or dataiku.get_custom_variables().get("forecaster") or CatBoostForecaster.name
+    name = name or dataiku.get_custom_variables().get("forecaster") or RecentAverage.name
     found, problem = known_forecasters()
     if name not in found:
         raise ValueError(f"No forecaster named {name!r} (project variable forecaster). Known: {', '.join(found)}. "
                          + (problem if problem else "Add yours to FORECASTERS in forecasters.py."))
     forecaster = found[name]()
-    missing = [a for a in ("name", "inputs", "fit", "predict") if not hasattr(forecaster, a)]
+    missing = [a for a in ("name", "fit", "predict") if not hasattr(forecaster, a)]
     if missing:
         raise ValueError(f"Forecaster {name} has no {', '.join(missing)} (see models.py)")
     return forecaster
 
 
-def forecast(forecaster, rows):
-    """P10, EV and P90 of a trained forecaster for model rows (SAR), checked, with P10 <= EV <= P90. Everything that
-    predicts goes through here: the test, champion / challenger, the lab and the saved models."""
-    out = forecaster.predict(rows)
+def forecast(forecaster, daily, clients, cutoff):
+    """P10, EV and P90 of a trained forecaster (SAR), checked, with P10 <= EV <= P90: one row per client, category and
+    months ahead. Everything that predicts goes through here: the test, champion / challenger, the lab and the
+    nightly forecast."""
+    out = forecaster.predict(daily, clients, cutoff)
     name = getattr(forecaster, "name", type(forecaster).__name__)
-    if not isinstance(out, pd.DataFrame) or not set(OUTPUT) <= set(out.columns):
-        raise ValueError(f"Forecaster {name}: predict must return a DataFrame with the columns p10, ev, p90")
-    if len(out) != len(rows) or not out.index.equals(rows.index):
-        raise ValueError(f"Forecaster {name}: predict must return one row per input row, with the same index")
+    if not isinstance(out, pd.DataFrame) or not set(FORECAST_COLUMNS) <= set(out.columns):
+        raise ValueError(f"Forecaster {name}: predict must return a DataFrame with the columns "
+                         f"{', '.join(FORECAST_COLUMNS)}")
     empty = [c for c in OUTPUT if out[c].isna().any()]
     if empty:
         raise ValueError(f"Forecaster {name}: predict returned empty values in {', '.join(empty)}")
-    return finish(out["ev"], out["p10"], out["p90"], rows.index)
+    out = out[FORECAST_COLUMNS].reset_index(drop=True)
+    out["client_no"] = out["client_no"].astype(str)
+    out["months_ahead"] = out["months_ahead"].astype(int)
+    out[OUTPUT] = finish(out["ev"], out["p10"], out["p90"], out.index)
+    return out.sort_values(["client_no", "category", "months_ahead"]).reset_index(drop=True)
 
 
-def holdout(rows):
-    """The test rows: predicted month in the last 6 months before the cut-off, with the simple guess (baseline: the
-    average of the last 3 months)."""
-    rows = rows.assign(target_month=month_start(rows["target_month"]))
-    test = rows[rows["target_month"] >= add_months(cutoff_month(), -(HOLDOUT_MONTHS - 1))].copy()
-    test["baseline"] = test["avg_3m"]
-    return test
+def active(daily, clients):
+    """The active clients and their daily flows: the clients the test and the forecast are made for."""
+    clients = clients[clients["status"] == "ACTIVE"]
+    return daily[daily["client_no"].isin(set(clients["client_no"]))], clients
+
+
+def test_forecasts(fitted, daily, clients, cutoff):
+    """The test, the same for every model: a forecaster trained without the last 6 months forecasts each of those
+    months from the data known the month before (cut-offs: the 6 months before the cut-off), for the active clients.
+    Returns one row per client, category, test cut-off and months ahead whose predicted month is known: target (the
+    actual net cash flow), p10, ev, p90 and baseline (the simple guess: the same as the month before the forecast)."""
+    daily, clients = active(daily, clients)
+    known = monthly_series(daily, cutoff)
+    actual = known.rename(columns={"month": "target_month", "net": "target"})
+    last = known.rename(columns={"month": "cutoff_month", "net": "baseline"})
+    parts = []
+    for k in range(HOLDOUT_MONTHS):
+        t = add_months(cutoff, k - HOLDOUT_MONTHS)
+        f = forecast(fitted, until(daily, t), clients, t).assign(cutoff_month=t)
+        f["target_month"] = f["months_ahead"].map({h: add_months(t, h) for h in HORIZONS})
+        parts.append(f[f["target_month"] <= cutoff])
+    keys = ["client_no", "category"]
+    tested = (pd.concat(parts, ignore_index=True)
+              .merge(actual, on=keys + ["target_month"], how="left")
+              .merge(last, on=keys + ["cutoff_month"], how="left"))
+    tested[["target", "baseline"]] = tested[["target", "baseline"]].fillna(0.0)
+    return tested
+
+
+def backtest(forecaster, daily, clients, cutoff):
+    """Train the forecaster without the last 6 months (the data known at the end of the first test cut-off), then
+    test it on them (test_forecasts). Returns the test rows; the forecaster is now the backtest forecaster."""
+    first = add_months(cutoff, -HOLDOUT_MONTHS)
+    forecaster.fit(until(daily, first), clients, first)
+    return test_forecasts(forecaster, daily, clients, cutoff)
 
 
 def scores(d):
@@ -134,67 +156,71 @@ def scores(d):
 
 
 def test_results(tested):
-    """Test scores per months ahead (1, 2, 3) and overall (months_ahead ALL). tested: the test rows with p10, ev,
-    p90."""
-    scored = [c for c in ("target", "p10", "ev", "p90", "baseline") if c in tested]   # the columns scores reads
+    """Test scores per months ahead (1, 2, 3) and overall (months_ahead ALL), for the TOTAL rows (level TOTAL) and the
+    category rows (level CATEGORIES). The overall scores, which promotion uses, are on all rows."""
+    scored = ["target", "p10", "ev", "p90", "baseline"]
+    level = np.where(tested["category"] == "TOTAL", "TOTAL", "CATEGORIES")
     results = pd.concat([
-        tested.groupby("months_ahead")[scored].apply(scores).reset_index(),
-        scores(tested).to_frame().T.assign(months_ahead="ALL")], ignore_index=True)
+        tested.assign(level=level).groupby(["level", "months_ahead"])[scored].apply(scores).reset_index(),
+        tested.assign(level=level).groupby("level")[scored].apply(scores).reset_index().assign(months_ahead="ALL"),
+        scores(tested).to_frame().T.assign(level="ALL", months_ahead="ALL")], ignore_index=True)
     results["months_ahead"] = results["months_ahead"].astype(str)
-    return results
+    return results[["level", "months_ahead"] + [c for c in results if c not in ("level", "months_ahead")]]
 
 
 def run_metrics(results):
-    """The scores recorded in Experiment Tracking: overall and the EV error per months ahead. results: from
-    test_results."""
-    overall = results[results["months_ahead"] == "ALL"].iloc[0]
+    """The scores recorded in Experiment Tracking: overall, and the EV error of the TOTAL rows per months ahead.
+    results: from test_results."""
+    overall = results[(results["level"] == "ALL")].iloc[0]
     metrics = {k: overall[c] for k, c in (("wape", "wape_model"), ("wape_baseline", "wape_baseline"),
                                           ("coverage_p10_p90", "coverage_p10_p90"), ("below_p10", "below_p10"),
                                           ("above_p90", "above_p90"))}
-    for row in results[results["months_ahead"] != "ALL"].itertuples():
-        metrics[f"wape_{row.months_ahead}m"] = row.wape_model
+    for row in results[(results["level"] == "TOTAL") & (results["months_ahead"] != "ALL")].itertuples():
+        metrics[f"wape_total_{row.months_ahead}m"] = row.wape_model
     return metrics
 
 
 def _lab_test():
-    """The lab's test, the same as champion / challenger's: the training rows without the last 6 months (train), those
-    months (test), the production model's ID and its backtest forecast on the test (None without a production model)."""
+    """The lab's data and the production model's test, the same as champion / challenger's: daily flows, clients,
+    the production model's ID and its backtest forecaster's test rows (None without a production model)."""
     import tracking
     from cashflow import read_dataset
-    rows = read_dataset("training_rows")
-    test = holdout(rows)
+    daily, clients = read_dataset("daily_flows"), read_dataset("clients")
     production_id = tracking.production_model_id()
-    production = test.join(forecast(tracking.load_backtest(production_id), test)) if production_id else None
-    return rows.drop(test.index), test, production_id, production
+    production = (test_forecasts(tracking.load_backtest(production_id), daily, clients, cutoff_month())
+                  if production_id else None)
+    return daily, clients, production_id, production
 
 
 def _by_months_ahead(tested):
-    """Test scores per months ahead and overall (ALL), indexed by months ahead."""
-    return test_results(tested).set_index("months_ahead")
+    """Overall test scores per months ahead (all rows), indexed by months ahead (1, 2, 3, ALL)."""
+    scored = ["target", "p10", "ev", "p90", "baseline"]
+    per = tested.groupby("months_ahead")[scored].apply(scores)
+    per.index = per.index.astype(str)
+    per.loc["ALL"] = scores(tested)
+    return per
 
 
-def _record_try(forecaster, train, test, tested, production_id):
+def _record_try(forecaster, tested, production_id):
     """Record a lab try in Experiment Tracking (experiment cashflow_lab). Returns the run ID."""
     import tracking
     params = {"forecaster": forecaster.name, **getattr(forecaster, "params", {}),
-              "cutoff_month": f"{cutoff_month():%Y-%m}", "training_rows": len(train), "test_rows": len(test),
-              "compared_with": production_id or "none", "inputs": ",".join(forecaster.inputs)}
+              "cutoff_month": f"{cutoff_month():%Y-%m}", "test_rows": len(tested),
+              "compared_with": production_id or "none"}
     run_name = f"{forecaster.name}_{pd.Timestamp.now():%Y%m%dT%H%M}"
     return tracking.log_lab_run(run_name, params, run_metrics(test_results(tested)), forecaster)
 
 
 def lab_try(forecaster, record=True):
-    """Try a forecaster against the production model without touching production (the lab: recipe try_forecaster;
-    the notebook forecast_lab uses lab_compare). It is trained without the last 6 months and tested on them, the way
-    champion / challenger tests a new model, and the try is recorded in Experiment Tracking (experiment cashflow_lab,
-    never deployed).
+    """Try a forecaster against the production model without touching production (the lab: recipe try_forecaster).
+    It is trained without the last 6 months and tested on them, the way champion / challenger tests a new model, and
+    the try is recorded in Experiment Tracking (experiment cashflow_lab, never deployed).
     Returns: per months ahead (1, 2, 3, ALL) the EV error of the simple guess, of the production model and of the
     candidate, and their P10-P90 coverage; the decision champion / challenger would take and its reason; the lab run
     ID (None if not recorded)."""
     import tracking
-    train, test, production_id, production = _lab_test()
-    forecaster.fit(train)
-    candidate = test.join(forecast(forecaster, test))
+    daily, clients, production_id, production = _lab_test()
+    candidate = backtest(forecaster, daily, clients, cutoff_month())
     mine = _by_months_ahead(candidate)
     table = pd.DataFrame({"simple_guess_error": mine["wape_baseline"], "production_error": np.nan,
                           "candidate_error": mine["wape_model"], "production_coverage": np.nan,
@@ -203,8 +229,8 @@ def lab_try(forecaster, record=True):
         theirs = _by_months_ahead(production)
         table["production_error"], table["production_coverage"] = theirs["wape_model"], theirs["coverage_p10_p90"]
     decision, reason = tracking.decide(scores(candidate), scores(production) if production is not None else None)
-    run_id = _record_try(forecaster, train, test, candidate, production_id) if record else None
-    return table, decision, reason, run_id
+    run_id = _record_try(forecaster, candidate, production_id) if record else None
+    return table.rename_axis("months_ahead"), decision, reason, run_id
 
 
 def lab_compare(forecasters, record=True):
@@ -220,12 +246,11 @@ def lab_compare(forecasters, record=True):
     names = [f.name for f in forecasters]
     if len(set(names)) != len(names) or {"production", "simple_guess_baseline"} & set(names):
         raise ValueError(f"Give each forecaster its own name: {names}")
-    train, test, production_id, production = _lab_test()
+    daily, clients, production_id, production = _lab_test()
     tested = {} if production is None else {"production": production}
     for forecaster in forecasters:
-        forecaster.fit(train)
-        tested[forecaster.name] = test.join(forecast(forecaster, test))
-    run_ids = {f.name: _record_try(f, train, test, tested[f.name], production_id) for f in forecasters} if record else {}
+        tested[forecaster.name] = backtest(forecaster, daily, clients, cutoff_month())
+    run_ids = {f.name: _record_try(f, tested[f.name], production_id) for f in forecasters} if record else {}
     reference = scores(production) if production is not None else None
     board = []
     for name, rows in tested.items():
@@ -236,7 +261,7 @@ def lab_compare(forecasters, record=True):
                       "below_p10": s["below_p10"], "above_p90": s["above_p90"], "decision": decision,
                       "reason": reason, "lab_run_id": run_ids.get(name, "")})
     board.append({"model": "simple_guess_baseline", "ev_error": scores(next(iter(tested.values())))["wape_baseline"],
-                  "decision": "", "reason": "average of the last 3 months: the bar to beat", "lab_run_id": ""})
+                  "decision": "", "reason": "the same as the month before: the bar to beat", "lab_run_id": ""})
     board = pd.DataFrame(board).set_index("model")
     per = {name: _by_months_ahead(rows) for name, rows in tested.items()}
     first = next(iter(per.values()))

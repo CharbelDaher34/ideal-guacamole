@@ -5,8 +5,9 @@ import types
 
 import pandas as pd
 
-# Safe to run again in the same project: what already exists is kept (datasets and their data, folders, saved models and their versions, zones, the project variables forecaster and lab_forecaster,
-# forecasters.py), and the code of the Python recipes and of the rest of the library is updated.
+# Safe to run again in the same project: what already exists is kept (datasets and their data, folders, the saved
+# model and its versions, zones, the project variables, forecasters.py), and the code of the Python recipes and of the
+# rest of the library is updated.
 flow = project.get_flow()
 
 
@@ -26,22 +27,20 @@ CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', 
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
 
 # Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file; experiments, forecast_archive and
-# lab_experiments are folders. The visual recipes (Join, Group, Score) are created further down.
+# lab_experiments are folders; cash_forecast is the saved model.
 # Each zone has an owner, and the zones only meet through three interfaces:
-#   1. the model rows (cashflow.model_rows): staging -> training_rows (Training) and scoring_rows (Inference)
+#   1. the data: daily_flows and clients (Staging) -> Training, Lab and Inference
 #   2. the forecaster (models.py): lab -> training. The project variable forecaster names the one Retrain trains;
 #      the Lab (try_forecaster, and the notebook forecast_lab) compares one with the production model, untouched.
-#   3. the saved models' active version: training -> inference. Inference reads nothing else from training.
+#   3. the saved model's active version: training -> inference. Inference reads nothing else from training.
+DATA = ["daily_flows", "clients"]
 FLOW = {
     "stage_tables": (RAW, warehouse.STAGED, "Staging"),
-    "build_training_rows": (["monthly_flows", "clients"], ["training_rows"], "Training"),
-    "train_and_test": (["training_rows"], ["experiments", "test_results", "model_reference"], "Training"),
-    "champion_challenger": (["training_rows", "experiments"], ["promotion_log"], "Training"),
-    "build_scoring_rows": (["monthly_flows", "clients"], ["scoring_rows"], "Inference"),
-    "final_forecast": (["scored_ev", "scored_p10", "scored_p90"], ["final_forecast"],
-                       "Inference"),
+    "train_and_test": (DATA, ["experiments", "test_results"], "Training"),
+    "champion_challenger": (DATA + ["experiments"], ["promotion_log"], "Training"),
+    "final_forecast": (DATA + [cashflow.SAVED_MODEL], ["final_forecast"], "Inference"),
     "archive_forecast": (["final_forecast"], ["forecast_archive", "inference_log"], "Inference"),
-    "try_forecaster": (["training_rows", "experiments"], ["lab_experiments", "lab_results"], "Lab"),
+    "try_forecaster": (DATA + ["experiments"], ["lab_experiments", "lab_results"], "Lab"),
 }
 FOLDERS = ["experiments", "forecast_archive", "lab_experiments"]
 APPENDED = ["promotion_log", "inference_log", "lab_results"]      # logs: each run adds rows
@@ -70,17 +69,19 @@ if not python_folder.get_file("forecasters.py"):
 # project variables, kept if they are already set: forecaster (the one Retrain trains), lab_forecaster (the one the
 # recipe try_forecaster tries)
 variables = project.get_variables()
-defaults = {"forecaster": "catboost", "lab_forecaster": "catboost_deeper"}
-missing = {k: v for k, v in defaults.items() if not variables["standard"].get(k)}
+defaults = {"forecaster": "recent_average", "lab_forecaster": "recent_average_6m", **tracking.PROMOTION_RULES}
+missing = {k: v for k, v in defaults.items() if variables["standard"].get(k) in (None, "")}
 if missing:
     variables["standard"].update(missing)
     project.set_variables(variables)
 print("Forecasters: Retrain trains {forecaster}, the lab tries {lab_forecaster}".format(**variables["standard"]))
+print("Promotion rules:", {k: variables["standard"][k] for k in tracking.PROMOTION_RULES})
 
 
 # what the project already has (read once, kept up to date below)
 datasets = {d["name"] for d in project.list_datasets()}
 recipes = {r["name"] for r in project.list_recipes()}
+
 
 
 def new_dataset(name):
@@ -135,15 +136,23 @@ for name in FOLDERS:
         folder_settings = folders[name].get_settings()
         folder_settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
         folder_settings.save()
-ref = lambda name: folders[name].id if name in folders else name
 existing_models = {m["name"]: m["id"] for m in project.list_saved_models()}
-saved_models = {name: project.get_saved_model(existing_models[name]) if name in existing_models
-                else project.create_mlflow_pyfunc_model(name, "REGRESSION") for name in cashflow.SAVED_MODELS.values()}
+saved_model = (project.get_saved_model(existing_models[cashflow.SAVED_MODEL]) if cashflow.SAVED_MODEL in existing_models
+               else project.create_mlflow_pyfunc_model(cashflow.SAVED_MODEL, "REGRESSION"))
+ref = lambda name: (folders[name].id if name in folders else saved_model.id if name == cashflow.SAVED_MODEL
+                    else name)
 
 for name, (inputs, outputs, _) in FLOW.items():
-    for item in inputs + outputs:      # inputs made by recipes created later (Score) get their dataset now
-        if item not in folders:
+    for item in inputs + outputs:
+        if item not in folders and item != cashflow.SAVED_MODEL:
             new_dataset(item)
+    if name in recipes:                # already there: its inputs and outputs changed? then made again
+        settings = project.get_recipe(name).get_settings()
+        if (set(settings.get_flat_input_refs()) != set(map(ref, inputs))
+                or set(settings.get_flat_output_refs()) != set(map(ref, outputs))):
+            project.get_recipe(name).delete()
+            recipes.discard(name)
+            print("recipe", name, "has new inputs or outputs: made again")
     if name in recipes:                # already there: only its code and code env are updated
         recipe = project.get_recipe(name)
     else:
@@ -160,18 +169,7 @@ for name, (inputs, outputs, _) in FLOW.items():
     settings.save()
     print("python recipe", name, "->", ", ".join(outputs))
 
-# Score recipes: the active version of each saved model
-for short, name in cashflow.SAVED_MODELS.items():
-    if f"score_{short}" in recipes:
-        continue
-    builder = project.new_recipe("prediction_scoring", f"score_{short}")
-    builder.with_input_model(saved_models[name].id)
-    builder.with_input("scoring_rows")
-    builder.with_existing_output(new_dataset(f"scored_{short}"))
-    builder.create().rename(f"score_{short}")        # Dataiku names a Score recipe after its input
-    print("score recipe", f"score_{short}", "->", f"scored_{short}")
-
-ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": ["scored_ev", "scored_p10", "scored_p90"], "Lab": []}
+ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": [], "Lab": []}
 for _, outputs, zone_name in FLOW.values():
     ZONES[zone_name] += [o for o in outputs if o not in ZONES[zone_name]]
 # the raw data goes in Dataiku's Default zone, renamed (so there is no empty zone). It exists once another zone does.
@@ -196,6 +194,5 @@ def safe_add(zone, item):
 for zone_name, items in ZONES.items():
     for item in items:
         safe_add(zones[zone_name], folders[item] if item in folders else project.get_dataset(item))
-for model in saved_models.values():       # next to the Score recipes that use them
-    safe_add(zones["Inference"], model)
+safe_add(zones["Inference"], saved_model)    # next to the recipe that uses it
 print("Flow ready:", ", ".join(zones))

@@ -2,10 +2,10 @@ import dataiku
 
 client = dataiku.api_client()
 project = client.get_project(dataiku.default_project_key())
-# catboost: the models; mlflow: Experiment Tracking and the saved models. Dataiku tested MLflow models with
+# scikit-learn: for the data scientist's models; mlflow: Experiment Tracking and the saved model. Dataiku tested MLflow models with
 # mlflow 2.22.0 and 3.10.1 (DSS 14 and 15 docs, "MLflow models: limitations"); mlflow 3 needs Python 3.10 or later.
 # Either works here; the request below asks for 2.22.0, which also runs on Python 3.9.
-PACKAGES = ("catboost==1.2.7", "scikit-learn", "mlflow==2.22.0")
+PACKAGES = ("scikit-learn", "mlflow==2.22.0")
 
 
 def check_code_env(name, packages=PACKAGES):

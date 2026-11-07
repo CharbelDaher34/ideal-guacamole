@@ -1,40 +1,49 @@
-"""Inference (project library: python/forecast.py): the production model's ID and the final forecast table.
-Inference reads nothing from training except the active version of the saved models (interface 3,
-cashflow.SAVED_MODELS)."""
+"""Inference (project library: python/forecast.py): the production model and the final forecast table. Inference reads
+nothing from training except the active version of the saved model cash_forecast (interface 3, cashflow.SAVED_MODEL).
+"""
 import numpy as np
 import pandas as pd
 
-from cashflow import HORIZONS, SAVED_MODELS, finish
+from cashflow import MIN_HISTORY_MONTHS, SAVED_MODEL, add_months
 
 
-def active_model_id():
-    """The production model: the active version of the saved models forecast_ev, forecast_p10 and forecast_p90, the
-    one the Score recipes use. All three must have the same."""
+def _saved_model_id():
     import dataiku
     project = dataiku.api_client().get_default_project()
     ids = {m["name"]: m["id"] for m in project.list_saved_models()}
-    missing = [name for name in SAVED_MODELS.values() if name not in ids]
-    if missing:
-        raise ValueError(f"Saved models not found: {', '.join(missing)}. Run the setup notebook.")
-    active = {name: (project.get_saved_model(ids[name]).get_active_version() or {}).get("id")
-              for name in SAVED_MODELS.values()}
-    if not all(active.values()):
+    if SAVED_MODEL not in ids:
+        raise ValueError(f"Saved model {SAVED_MODEL} not found. Run the setup notebook.")
+    return ids[SAVED_MODEL]
+
+
+def active_model_id():
+    """The production model: the active version of the saved model cash_forecast."""
+    import dataiku
+    model = dataiku.api_client().get_default_project().get_saved_model(_saved_model_id())
+    model_id = (model.get_active_version() or {}).get("id")
+    if not model_id:
         raise ValueError("No production model yet: run the scenario Retrain, test and promote")
-    if len(set(active.values())) != 1:
-        raise ValueError(f"The saved models do not have the same active version: {active}. Activate the same model "
-                         "ID in all three.")
-    return next(iter(active.values()))
+    return model_id
 
 
-def forecast_table(pred, last_month):
-    """The forecast: one row per client and month ahead, the net cash flow (money in minus money out) as P10, EV and
-    P90 in SAR. pred: the model rows of the cut-off with the model's ev, p10, p90. A client with less than 12 months
-    of history gets no forecast (status NOT_ENOUGH_HISTORY)."""
-    frame = pred[["client_no", "months_ahead", "history_months", "enough_history", "p10", "ev", "p90"]].copy()
-    frame[["p10", "ev", "p90"]] = finish(frame["ev"], frame["p10"], frame["p90"], frame.index)
-    enough = frame["enough_history"].astype(bool)
+def production_forecaster():
+    """The production model's trained forecaster (the active version of cash_forecast), and its model ID. The recipe
+    that calls it must have the saved model as an input."""
+    import dataiku
+    model_id = active_model_id()
+    predictor = dataiku.Model(_saved_model_id()).get_predictor(model_id)
+    return predictor.model.unwrap_python_model().forecaster, model_id
+
+
+def forecast_table(pred, history, last_month):
+    """The forecast: one row per client, category (and TOTAL) and month ahead, the net cash flow (money in minus money
+    out) as P10, EV and P90 in SAR. pred: the production model's forecast (models.forecast); history: months of
+    history per client (cashflow.history_months). A client with less than MIN_HISTORY_MONTHS months of history gets
+    no values (status NOT_ENOUGH_HISTORY)."""
+    frame = pred.merge(history.reset_index(), on="client_no", how="left")
+    enough = frame["history_months"].fillna(0) >= MIN_HISTORY_MONTHS
     frame.loc[~enough, ["p10", "ev", "p90"]] = np.nan
     frame["cutoff_month"] = last_month
-    frame["target_month"] = frame["months_ahead"].apply(lambda h: last_month + pd.offsets.DateOffset(months=h))
+    frame["target_month"] = frame["months_ahead"].map({h: add_months(last_month, h) for h in (1, 2, 3)})
     frame["status"] = np.where(enough, "OK", "NOT_ENOUGH_HISTORY")
-    return frame.sort_values(["client_no", "months_ahead"]).reset_index(drop=True)
+    return frame.sort_values(["client_no", "category", "months_ahead"]).reset_index(drop=True)

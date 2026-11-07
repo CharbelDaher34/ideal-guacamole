@@ -51,9 +51,6 @@ GENERATED_COLUMNS = {   # the generator's 17 source tables (sandbox only)
                 "amount", "post_dated_flag"],
 }
 
-# T24 module (SYS_ID) a posting or a scheduled payment carries, by the generator's origin type
-SYS_ID = {"NONE": "FT", "INVOICE": "FT", "CARD_SETTLEMENT": "FT", "CORP_CARD": "FT", "PAYROLL": "FT", "SADAD": "FT",
-          "CHEQUE": "CQ", "LOAN": "AA", "DEPOSIT": "AA", "LC": "LC", "STANDING_ORDER": "STO"}
 LEGAL = {"LLC": ("Limited Liability Company", "Company"), "JSC": ("Joint Stock Company", "Company"),
          "PARTNERSHIP": ("Partnership", "Company"), "SOLE_ESTABLISHMENT": ("Sole Proprietorship", "Establishment")}
 
@@ -146,8 +143,7 @@ def curate(t, day):
         "value_date": pd.to_datetime(tx["value_date"]),
         "direction": np.where(tx["debit_credit"] == "C", "IN", "OUT"),
         "amount": np.where(tx["debit_credit"] == "C", 1.0, -1.0) * tx["amount_sar"],
-        "origin_type": tx["origin_type"].replace("", np.nan).fillna("NONE").map(SYS_ID),
-        "txn_type_tag": tx["txn_type_tag"].replace("", np.nan).fillna("NONE"),
+        "txn_type": tx["txn_type_tag"].replace("", np.nan).fillna("OTHER"),       # TRNS_TYP: gives the category
         "txn_ref": ref.where(~own, "OWN" + tx["txn_id"].astype(str)),
         "reversal": np.where(tx["reversal_flag"].astype(bool), "R", None)})
     other_leg = entries[own.values].assign(
@@ -179,56 +175,9 @@ def curate(t, day):
             "transactions": pd.concat([entries, theirs], ignore_index=True)}
 
 
-def scheduled_payments(t, d, client_of):
-    """Every scheduled payment, past and future, with the date it became known."""
-    parts = []
-
-    def add(df, origin_type, ref, client, direction, tag, due, amount, known):
-        parts.append(pd.DataFrame({
-            "origin_type": origin_type, "origin_ref": df[ref].values, "client_no": np.asarray(client),
-            "direction": direction, "txn_type_tag": np.asarray(tag, dtype=object) if np.ndim(tag) else tag,
-            "due_date": pd.to_datetime(df[due]).values, "amount": np.asarray(amount, dtype=float),
-            "known_date": pd.to_datetime(df[known]).values}))
-
-    ln = t["financing_schedules"]
-    ln = ln.assign(known=np.where(ln["early_settlement_flag"].astype(bool), ln["due_date"], ln["contract_start_date"]))
-    add(ln, "LOAN", "loan_no", ln["client_no"], "OUT", "FINANCING", "due_date", ln["instalment_amount"], "known")
-    every = {"MONTHLY": 1, "QUARTERLY": 3, "SEMI_ANNUAL": 6, "ANNUAL": 12}
-    tag = {"RENT": "RENT", "SUPPLIER": "SUPPLIER"}
-    rows = []
-    for o in t["standing_orders"].itertuples():
-        stop = min(pd.Timestamp(o.end_date) if pd.notna(o.end_date) else d + pd.DateOffset(months=12),
-                   d + pd.DateOffset(months=12))
-        for day in pd.date_range(pd.Timestamp(o.start_date), stop, freq=pd.DateOffset(months=every[o.frequency])):
-            rows.append((o.instruction_id, client_of[o.account_no], tag.get(o.beneficiary_type, "OTHER"), day,
-                         o.amount, o.created_date))
-    so = pd.DataFrame(rows, columns=["ref", "client", "tag", "due", "amount", "known"])
-    add(so, "STANDING_ORDER", "ref", so["client"], "OUT", so["tag"], "due", so["amount"], "known")
-    dep = t["deposits"][t["deposits"]["rollover_instruction"] == "CREDIT_ACCOUNT"]
-    add(dep, "DEPOSIT", "deposit_id", dep["client_no"], "IN", "DEPOSIT", "maturity_date",
-        dep["amount"] + dep["expected_profit"], "start_date")
-    lc = t["trade_finance"][(t["trade_finance"]["instrument_type"] == "LC") & t["trade_finance"]["payment_date"].notna()]
-    add(lc, "LC", "instrument_id", lc["client_no"], "OUT", "SUPPLIER", "payment_date",
-        lc["amount"] * np.where(lc["currency"] == "USD", 3.75, 1.0), "issue_date")
-    card = t["corporate_cards"][t["corporate_cards"]["record_type"] == "STATEMENT"]
-    add(card, "CORP_CARD", "record_id", card["client_no"], "OUT", "CARD", "due_date", card["amount_due"],
-        "statement_date")
-    bills = t["sadad_payments"]
-    add(bills, "SADAD", "bill_number", bills["client_no"], "OUT",
-        np.where(bills["biller_category"] == "GOVERNMENT", "GOV", "UTILITY"), "due_date", bills["amount"],
-        "bill_issue_date")
-    chq = t["cheques"]
-    chq = chq[chq["post_dated_flag"].astype(bool) & (chq["direction"] == "DEPOSITED")]
-    chq = chq.assign(due=pd.to_datetime(chq["cheque_date"]) + pd.Timedelta(days=1))
-    add(chq, "CHEQUE", "cheque_id", chq["account_no"].map(client_of), "IN", "CHEQUE", "due", chq["amount"],
-        "received_date")
-    return pd.concat(parts, ignore_index=True).round({"amount": 2})
-
-
 def to_warehouse(df, table):
-    """A table in the warehouse's column names and codes (direction C / D); the optional columns, which the bank's
-    table does not have, are left out."""
-    out = pd.DataFrame({column: df[standard] for standard, column in COLUMNS[table].items() if column not in OPTIONAL})
+    """A table in the warehouse's column names and codes (direction C / D)."""
+    out = pd.DataFrame({column: df[standard] for standard, column in COLUMNS[table].items()})
     if "CRDT_DBT_FLG" in out:
         out["CRDT_DBT_FLG"] = out["CRDT_DBT_FLG"].map({"IN": "C", "OUT": "D"})
     return out.reset_index(drop=True)

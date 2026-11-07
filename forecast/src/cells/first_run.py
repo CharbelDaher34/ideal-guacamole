@@ -10,9 +10,9 @@ def build(items, mode):
 
 started = time.time()
 warehouse.set_cutoff()                                          # the first step of both scenarios
-build(["training_rows"], "RECURSIVE_FORCED_BUILD")
+build(["daily_flows"], "RECURSIVE_FORCED_BUILD")             # staging: clients and daily flows
 build(["experiments"], "NON_RECURSIVE_FORCED_BUILD")         # train, test, track and deploy the first model
 build(["promotion_log"], "NON_RECURSIVE_FORCED_BUILD")       # champion / challenger
-production = tracking.apply_promotion()                        # activates it in the three saved models
-build(["inference_log"], "RECURSIVE_FORCED_BUILD")           # score, forecast, archive, log the run
+production = tracking.apply_promotion()                        # activates its version of cash_forecast
+build(["inference_log"], "RECURSIVE_FORCED_BUILD")           # forecast, archive, log the run
 print(f"First run done in {(time.time() - started) / 60:.1f} minutes: production model {production}")

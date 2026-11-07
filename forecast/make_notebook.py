@@ -6,8 +6,8 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["stage_tables", "build_training_rows", "train_and_test", "champion_challenger",
-           "build_scoring_rows", "final_forecast", "archive_forecast", "try_forecaster"]
+RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast", "archive_forecast",
+           "try_forecaster"]
 
 
 def code(text):
@@ -45,31 +45,34 @@ write("build_forecast_project.ipynb", [
 This notebook sets up the Digital Cash Management Forecast in this Dataiku project (it also gives the project
 that name), the way it runs in production. Everything the project writes is a CSV file. It reads 2 warehouse tables
 as they are, read-only, and creates nothing in the warehouse: the clients (`EDW.DIM_CUSTOMER`) and the daily
-postings (`EDW.FCT_STATEMENT_ENTRY`), which the staging recipe sums per month in Dataiku. In the sandbox, they are
-the datasets the notebook `warehouse_simulator.ipynb` wrote in this project; in production, the warehouse's tables
-through the read-only database connection `WAREHOUSE_SQL_CONNECTION` (or CSV files in the landing folder). Names and
-codes: `python/warehouse.py` in the
-project library). It forecasts one value per client and month: the net cash flow (money in minus money out), 1,
-2 and 3 months ahead, as P10, EV and P90; there are no categories. It builds 5 flow zones, each with an owner:
+postings (`EDW.FCT_STATEMENT_ENTRY`), which the staging recipe sums per client, day and category in Dataiku, over
+each client's whole history. In the sandbox, they are the datasets the notebook `warehouse_simulator.ipynb` wrote in
+this project; in production, the warehouse's tables through the read-only database connection
+`WAREHOUSE_SQL_CONNECTION` (or CSV files in the landing folder). Names, codes and the categories (a mock list until
+the bank's transaction types are known): `python/warehouse.py` in the project library.
 
-- **Raw data** and **Staging** (shared): the 2 warehouse tables, read-only, then the business clients and the
-  postings summed per client and month, with the standard names and values.
-- **Training** (data scientist): the training rows, then each training run is one model with its own **model ID**,
-  trained with the **forecaster** the project variable `forecaster` names, tracked in Dataiku's **Experiment
-  Tracking** and deployed as a new **version** of the saved models `forecast_ev`, `forecast_p10`, `forecast_p90`.
-  A champion / challenger test activates the new version if it beats the production model.
-- **Inference** (inference owner): the scoring rows (latest month), visual Score recipes with the active version, the 3-month
-  forecast (every row says which model and which load produced it), the forecast archive, and the inference log
-  (one row per run: when, which model, which load, how many clients).
+It forecasts, per client, per category and in TOTAL (all categories together), the net cash flow (money in minus
+money out) of each of the next 3 months, as P10, EV and P90. It builds 5 flow zones, each with an owner:
+
+- **Raw data** and **Staging** (shared): the 2 warehouse tables, read-only, then `clients` (the business clients)
+  and `daily_flows` (money in and out per client, day and category): what every model gets.
+- **Training** (data scientist): each training run is one model with its own **model ID**, trained with the
+  **forecaster** the project variable `forecaster` names, tested on the last 6 months, tracked in Dataiku's
+  **Experiment Tracking** and deployed as a new **version** of the saved model `cash_forecast`. A champion /
+  challenger test activates the new version if it passes the **promotion rules** (project variables `promotion_*`).
+- **Inference** (inference owner): `final_forecast`, the production model's forecast for every active client (every
+  row says which model and which load produced it), the forecast archive, and the inference log (one row per run).
 - **Lab** (data scientist): `try_forecaster` tries the forecaster the project variable `lab_forecaster` names
   against the production model and adds the result to `lab_results`, without touching production. The notebook
   `forecast_lab.ipynb` does the same interactively.
 
-The zones only meet through three interfaces: **1. the model rows** (`model_rows` in `cashflow.py`: staging →
-training and inference), **2. the forecaster** (`models.py`: lab → training), **3. the active version of the saved
-models** (training → inference). Two independent scenarios run it: **Nightly batch** (inference) and **Retrain,
-test and promote** (training). Each starts by setting the cut-off month (`set_cutoff`: the month before today, or
-the project variable `cutoff_override`); the staging recipe stops if the postings do not reach it.
+The zones only meet through three interfaces: **1. the data** (`daily_flows` and `clients`: staging → training, lab
+and inference), **2. the forecaster** (`models.py`: lab → training), **3. the active version of the saved model**
+(training → inference). Until the data scientist's models are ready, the forecaster is a placeholder,
+`recent_average` (the average of the last 3 months, no machine learning). Two independent scenarios run it:
+**Nightly batch** (inference) and **Retrain, test and promote** (training). Each starts by setting the cut-off month
+(`set_cutoff`: the month before today, or the project variable `cutoff_override`); the staging recipe stops if the
+postings do not reach it.
 
 It then trains, tests and promotes a first model, and runs the first nightly batch.
 
@@ -82,7 +85,7 @@ saved model versions, zones, scenario history), and the recipes' code is updated
     md("""
 ## 1. Code environment
 
-The recipes need CatBoost, and MLflow for Dataiku's Experiment Tracking, in an existing code env (`CODE_ENV`
+The recipes need scikit-learn, and MLflow for Dataiku's Experiment Tracking, in an existing code env (`CODE_ENV`
 above). This notebook does not create it: an admin creates it once. This checks it is there with those packages,
 and otherwise stops with the request to send the admin.
 """),
@@ -92,15 +95,15 @@ and otherwise stops with the request to send the admin.
 
 The project library gets these files, by owner:
 
-- shared: `warehouse.py` (the warehouse tables and columns read, codes, monthly sums, cut-off month) and
-  `cashflow.py` (dates, the model rows, the saved model names)
-- training and lab: `models.py` (the forecaster interface, the reference CatBoost forecaster, the test and its
-  scores) and `tracking.py` (model IDs, Experiment Tracking, saved model versions, champion / challenger, promotion)
-- inference: `forecast.py` (the production model's ID, the final forecast table)
+- shared: `warehouse.py` (the warehouse tables and columns read, codes, categories, daily sums, cut-off month) and
+  `cashflow.py` (dates, the data interface, days to months, the saved model name)
+- training and lab: `models.py` (the forecaster interface, the placeholder forecaster, the test and its scores) and
+  `tracking.py` (model IDs, Experiment Tracking, saved model versions, promotion rules, champion / challenger)
+- inference: `forecast.py` (the production model, the final forecast table)
 - `forecasters.py`: the data scientist's own forecasters. Written only when it is created: running this notebook
   again never overwrites it.
 
-Each recipe below becomes a Python recipe in the flow; the visual recipes are created in the next step.
+Each recipe below becomes a Python recipe in the flow.
 """),
     code(embedded("WAREHOUSE_CODE", SRC / "warehouse.py")),
     code(embedded("LIBRARY_CODE", SRC / "library_cashflow.py")),
@@ -113,30 +116,30 @@ Each recipe below becomes a Python recipe in the flow; the visual recipes are cr
     md("""
 ## 3. Build the flow
 
-Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the recipes (Python and
-Score) and their CSV datasets, the folders `experiments` (tracked
-models), `forecast_archive` and `lab_experiments` (lab tries), the three saved models, and the project variables
-`forecaster` (`catboost`) and `lab_forecaster` (`catboost_deeper`) if they are not set yet, in 5 zones. Training
-(folder `experiments`), the promotion log, the saved models and the lab are only rebuilt when asked by name, so the
-nightly batch never retrains by accident.
+Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the Python recipes and their
+CSV datasets, the folders `experiments` (tracked models), `forecast_archive` and `lab_experiments` (lab tries), the
+saved model `cash_forecast`, and the project variables `forecaster` (`recent_average`), `lab_forecaster`
+(`recent_average_6m`) and the promotion rules (`promotion_*`) if they are not set yet, in 5 zones. Training (folder
+`experiments`), the promotion log and the lab are only rebuilt when asked by name, so the nightly batch never
+retrains by accident.
 """),
     code(read("cells/create_flow.py")),
     md("""
 ## 4. First run
 
-Checks the load, trains, tests and deploys a model, runs champion / challenger (with no production model yet, the
-first model is promoted, with a warning in promotion_log if its checks fail), then runs the nightly batch: score,
+Builds the daily flows, trains, tests and deploys a model, runs champion / challenger (with no production model yet,
+the first model is promoted, with a warning in promotion_log if its checks fail), then runs the nightly batch:
 forecast, archive, log.
 """),
     code(read("cells/first_run.py")),
     md("""
 ## 5. Scenarios
 
-- **Nightly batch**: check the load, build the scoring rows, forecast with the production model, archive it and
-  log the run. It does not touch the training data.
-- **Retrain, test and promote**: check the load, prepare the training data, train, test and deploy a new model
-  with the forecaster the project variable `forecaster` names, champion / challenger, activate it if better. It
-  does not forecast: the next Nightly batch uses the new active version.
+- **Nightly batch**: set the cut-off, build the daily flows, forecast with the production model, archive it and
+  log the run. It never trains.
+- **Retrain, test and promote**: set the cut-off, build the daily flows, train, test and deploy a new model with
+  the forecaster the project variable `forecaster` names, champion / challenger with the promotion rules, activate
+  it if it passes. It does not forecast: the next Nightly batch uses the new active version.
 
 Their triggers (daily at 06:00 and monthly on the 5th, Riyadh time) are created switched off; switch them on
 in production.
@@ -145,8 +148,8 @@ in production.
     md("""
 ## 6. Results
 
-To use another model (for example to roll back), activate its version in the three saved models
-(`forecast_ev`, `forecast_p10`, `forecast_p90`) and run the Nightly batch.
+To use another model (for example to roll back), activate its version in the saved model `cash_forecast` and run
+the Nightly batch. To change when a model is promoted, change the project variables `promotion_*` (no code change).
 """),
     code(read("cells/results.py")),
 ])
@@ -158,11 +161,10 @@ write("forecast_lab.ipynb", [
 Explore the data and try models here without touching production: nothing in this notebook changes the flow, the
 saved models or the production model.
 
-1. **EDA**: money in, money out and net per client and month, totals over time, seasonality, and what the models
-   learn.
+1. **EDA**: the daily flows per category, totals over time, seasonality, and one client day by day.
 2. **Models to try**: several forecasters trained and tested side by side on the same test as champion / challenger
    (trained without the last 6 months before the cut-off, tested on them), next to the production model and the
-   simple guess (the average of the last 3 months), with the decision champion / challenger would take for each.
+   simple guess (the same as the month before), with the decision champion / challenger would take for each.
    Each try is recorded in Experiment Tracking, experiment `cashflow_lab` (Lab → Experiment tracking); lab tries
    are never deployed.
 3. **Put one in production.**
@@ -177,34 +179,35 @@ In the sandbox the data is simulated: there, the scores show that the code works
     md("""
 ## 1. EDA
 
-The models predict one value per client and month: the net cash flow (money in minus money out), 1, 2 and 3 months
-ahead. First the monthly money in, money out and net per client, by segment (**negative_months**: the share of
-months where more money went out than came in).
+The data every model gets (interface 1): `daily_flows`, one row per client, day and category with money in and
+money out, and `clients`. The models predict, per client, per category and in TOTAL (all categories together), the
+net cash flow (money in minus money out) of each of the next 3 months. First, per category and per segment
+(**negative_months**: the share of months where more money went out than came in).
 """),
     code(read("lab_cells/eda_overview.py")),
     md("""
-Totals over time and seasonality. Ramadan and Eid move about 11 days earlier each year, so a calendar-month profile
-blurs them.
+Net cash flow per category over time, and seasonality. Ramadan and Eid move about 11 days earlier each year, so a
+calendar-month profile blurs them.
 """),
     code(read("lab_cells/eda_charts.py")),
     md("""
-What the models learn: `target` (the net cash flow) divided by the client's scale (its usual month), its spread by
-segment, and how much each input moves with it.
+One client day by day (what the models see) and its monthly totals (what they predict).
 """),
     code(read("lab_cells/eda_target.py")),
     md("""
 ## 2. Models to try
 
-A forecaster is a class with `name`, `params` (its settings), `inputs` (the model-row columns it reads), `fit(rows)`
-and `predict(rows)`, which returns `p10`, `ev` and `p90` in SAR (details in `models.py`, project library). Three
-examples, next to the reference CatBoost forecaster (`catboost`, the production recipe):
+A forecaster is a class with `name`, `params` (its settings), `fit(daily, clients, cutoff)` and
+`predict(daily, clients, cutoff)`, which returns one row per client, category (and TOTAL) and months ahead with `p10`,
+`ev` and `p90` in SAR (details in `models.py`, project library). `cashflow.monthly_matrix(daily, cutoff)` turns the
+days into months. Compared here:
 
-- `simple_guess`: no model, the average of the last 3 months, with a band from its own past errors
-- `catboost_depth8`: the reference CatBoost forecaster with deeper trees
-- `sklearn_boosting`: scikit-learn gradient boosting, one model per output (EV, P10, P90)
+- `recent_average`: the placeholder in production (the average of the last 3 months, no machine learning)
+- `recent_average_6m`: the same over 6 months (an example in `forecasters.py`)
+- `lag_boosting`: an example of a small model that learns: scikit-learn gradient boosting on the last 12 months
 
-Change them or add your own, then run the comparison. CatBoost, scikit-learn, pandas and matplotlib are in the code
-env; other packages need the admin.
+Change them or add your own, then run the comparison. scikit-learn, pandas and matplotlib are in the code env; other
+packages need the admin.
 """),
     code(read("lab_cells/forecasters_to_try.py")),
     code(read("lab_cells/compare.py")),
@@ -213,13 +216,14 @@ env; other packages need the admin.
 ## 3. Put one in production
 
 1. Copy its class into `forecasters.py` (project library) with the imports it needs (for example
-   `import numpy as np`, `import pandas as pd`, `from models import CAT_FEATURES, CatBoostForecaster, model_matrix`)
-   and add it to `FORECASTERS`. The setup notebook never overwrites that file.
+   `import pandas as pd`, `from cashflow import FORECAST_COLUMNS, HORIZONS, TOTAL, monthly_matrix`) and add it to
+   `FORECASTERS`. The setup notebook never overwrites that file.
 2. Set the project variable `forecaster` to its name.
-3. Run the scenario **Retrain, test and promote**. Champion / challenger promotes it only if it beats the
-   production model on the same 6 months; the next Nightly batch forecasts with it.
-4. To stop training it, set `forecaster` back to `catboost`. To use an earlier model now, activate its version in
-   the three saved models.
+3. Run the scenario **Retrain, test and promote**. Champion / challenger promotes it only if it passes the
+   promotion rules (project variables `promotion_*`) against the production model on the same 6 months; the next
+   Nightly batch forecasts with it.
+4. To stop training it, set `forecaster` back to `recent_average`. To use an earlier model now, activate its
+   version in the saved model `cash_forecast`.
 """),
 ], kernel={"display_name": "Python (env cashflow_forecast)", "language": "python",    # the code env's own kernel
            "name": "py-dku-venv-cashflow_forecast"})
@@ -252,7 +256,7 @@ The sample data generator, the warehouse table and column names, the publishing 
     md("""
 ## Load
 
-Generates the data (about 2 minutes), publishes it as of `AS_OF` and records the load.
+Generates the data (about 2 minutes), publishes it as of `AS_OF` and sets the project variable `cutoff_override`.
 """),
     code(read("sim_cells/load.py")),
 ])

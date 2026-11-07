@@ -8,8 +8,8 @@ Dataiku DSS 14.2.0 running in Docker (rootless) for testing development work: th
 - Image: `dataiku/dss:14.2.0` (Python 3.9 only)
 - URL (server-local only): http://127.0.0.1:10000
 - Data dir (projects, code envs, config, logs): `./dss_data` → `/home/dataiku/dss` in the container
-- Code env `cashflow_forecast` (CatBoost, MLflow): created by the forecast notebook if missing
-  (**Administration → Code Envs**).
+- Code env `cashflow_forecast` (scikit-learn, MLflow): created once by an admin; the forecast setup notebook
+  checks it (**Administration → Code Envs**).
 
 ## PostgreSQL
 

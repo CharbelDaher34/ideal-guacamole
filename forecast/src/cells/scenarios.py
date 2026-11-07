@@ -29,7 +29,7 @@ SCENARIOS = {
         "Tracking, deployed as a saved model version), and activate it if it beats the production model. It does not "
         "forecast: the Nightly batch uses the active version", "monthly", [
             ("Set the cut-off month", "set_cutoff"),
-            ("Prepare the training data", ["training_rows"], "RECURSIVE_FORCED_BUILD"),
+            ("Prepare the data (daily flows, clients)", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
             ("Train, test and deploy a new model", ["experiments"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Champion / challenger", ["promotion_log"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Promote if better", "apply_promotion"),

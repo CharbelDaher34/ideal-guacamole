@@ -76,209 +76,138 @@ svg text { font-family: var(--body); }
 <header>
   <div class="eyebrow">Cash-flow forecasting · How it works</div>
   <h1>Digital Cash Management Forecast</h1>
-  <p class="lead">For every business client, we forecast the net cash flow (money in minus money out) for each of the next 3 months, as a low value (P10), an expected value (EV) and a high value (P90). Two models predict the part nobody has scheduled.</p>
-  <div class="meta">4 November 2026 · Draft for the squad and the tech lead</div>
+  <p class="lead">For every business client, we forecast the net cash flow (money in minus money out) of each of the next 3 months, per category and in total, as a low value (P10), an expected value (EV) and a high value (P90). This project builds everything around the model; the model itself is a placeholder until the data scientist's models replace it.</p>
+  <div class="meta">7 November 2026 · Draft for the squad and the tech lead</div>
 </header>
 
 <section>
   <h2><span class="n">1</span>The whole journey</h2>
-  <p>Daily postings become each client's money in, money out and net cash flow per month, and the two models learn the net cash flow from each client's history.</p>
+  <p>Daily postings become each client's money in and money out per day and category. A forecaster reads that history and returns, per client and category (and in total), P10, EV and P90 for the next 3 months.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart LR
-  A[Statement entries: EDW.FCT_STATEMENT_ENTRY] --> C[Monthly money in and out per client: net cash flow]
-  C --> E[Training rows: cut-off month + 3 months ahead]
-  E --> F[EV model]
-  E --> G[P10 / P90 model]
-  F --> I[Final forecast + client total]
-  G --> I
+  A[Statement entries: EDW.FCT_STATEMENT_ENTRY] --> C[daily_flows: money in and out per client, day and category]
+  K[Clients: EDW.DIM_CUSTOMER] --> CL[clients: business clients]
+  C --> F[Forecaster: placeholder now, data scientist's model later]
+  CL --> F
+  F --> I[Forecast: per client, category and TOTAL, 1-3 months ahead, P10 / EV / P90]
 </pre>
   </div>
-  <p class="caption">No schedule of future payments is used: the warehouse tables give none, so the net cash flow is forecast from each client's history.</p>
+  <p class="caption">No schedule of future payments is used: the warehouse tables give none, so the forecast comes from each client's history.</p>
 </section>
 
 <section>
-  <h2><span class="n">2</span>The data</h2>
+  <h2><span class="n">2</span>Who builds what</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3>This project (around the model)</h3>
+      <ul>
+        <li>Getting the data: read the 2 warehouse tables, read-only, and turn them into <code>daily_flows</code> and <code>clients</code>, the format every model works on.</li>
+        <li>The inference pipeline: forecast every active client with the production model, archive and log each run.</li>
+        <li>The promotion pipeline: test every new model the same way, and promote it only if it passes the rules (project variables).</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>The data scientist (the model)</h3>
+      <ul>
+        <li>Explores the data and tries models in the lab, without touching production.</li>
+        <li>Puts a model in production by writing a forecaster: a small class with <code>fit</code> and <code>predict</code> (section 4).</li>
+        <li>Small models only (for example gradient boosting), no deep learning.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">3</span>The data</h2>
   <p>The project reads 2 tables of the bank's warehouse as they are, read-only, through the database connection (Oracle) or as CSV files in a landing folder. Nothing is created or run in the warehouse. Until the connection is set, a simulator writes sample tables shaped like the bank's.</p>
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Table</th><th>What the project reads</th><th>What it does with it, in Dataiku</th></tr></thead>
+    <thead><tr><th>Table</th><th>What the project reads</th><th>What it becomes, in Dataiku</th></tr></thead>
     <tbody>
-      <tr><td><code>EDW.DIM_CUSTOMER</code></td><td>The clients: CIF, customer type, line of business, legal entity, ID type, segment, sector, industry, city, status. Personal fields are never read.</td><td>Keeps the business clients: every line of business but retail, plus retail clients with a commercial registration (businesses owned by one person)</td></tr>
-      <tr><td><code>EDW.FCT_STATEMENT_ENTRY</code></td><td>The daily postings: CIF, value date, credit or debit, amount in SAR, reference, reversal marker</td><td>Reads them in chunks and sums them per client, month and direction (in or out), without reversed postings and transfers between the client's own accounts</td></tr>
+      <tr><td><code>EDW.DIM_CUSTOMER</code></td><td>The clients: CIF, customer type, line of business, legal entity, ID type, segment, sector, industry, city, status. Personal fields are never read.</td><td><code>clients</code>: the business clients (every line of business but retail, plus retail clients with a commercial registration: businesses owned by one person)</td></tr>
+      <tr><td><code>EDW.FCT_STATEMENT_ENTRY</code></td><td>The daily postings: CIF, value date, credit or debit, amount in SAR, transaction type, reference, reversal marker</td><td><code>daily_flows</code>: one row per client, day and category with money in and money out, over each client's whole history, without reversed postings and transfers between the client's own accounts</td></tr>
     </tbody>
   </table>
   </div>
   <ul>
+    <li><strong>Categories</strong> come from each posting's transaction type (<code>TRNS_TYP</code>), through one list in <code>warehouse.py</code>; a type not in the list goes to OTHER. The list is a <strong>mock</strong> for now (customer receipts, salaries, rent, suppliers, financing, government, utilities, cards, fees, other): at the bank it is replaced by the real codes, and nothing else changes.</li>
     <li>The client number (<code>CSTMR_CIF</code>) ties the 2 tables together.</li>
-    <li>No schedule of future payments: the net cash flow is forecast from each client's history. A table of loan, deposit or standing order schedules can be added later.</li>
-    <li>Annual sales and number of employees are not in <code>DIM_CUSTOMER</code>: those two model inputs stay empty. There are no account balances.</li>
-    <li>Sample clients have different history lengths: some 1 year, some 2, some 5.</li>
+    <li>Each client's whole history is kept: no cut at 2 or 5 years.</li>
   </ul>
 </section>
 
 <section>
-  <h2><span class="n">3</span>One value per client</h2>
-  <p>The forecast is one value per client and month: the <strong>net cash flow</strong>, money in minus money out. There are no categories, so the postings need no category and no code mapping. Money in and money out still feed the model as inputs (each client's last 3 months).</p>
-  <ul>
-    <li>Transfers between a client's own accounts and cancelled (reversed) payments are left out: no real money moved.</li>
-    <li>The net cash flow can be negative: a month where more money went out than came in.</li>
-  </ul>
-</section>
-
-<section>
-  <h2><span class="n">4</span>How a training row is built</h2>
-  <p>We stand at the end of a month (the cut-off), look back at least 12 months, and predict each of the next 3 months. One row = one client, one cut-off, one month ahead.</p>
-  <div class="figure">
-    <svg viewBox="0 0 760 205" width="100%" role="img" style="min-width:640px">
-      <title>Cut-off timeline</title>
-      <desc>Months from January 2025 to September 2026. The 12 months before the 30 June 2026 cut-off are what the model sees; July, August and September 2026 are predicted.</desc>
-      <text class="tl-m" x="140" y="40" text-anchor="middle">Older months, if any</text>
-      <line class="tl-line" x1="46" y1="52" x2="234" y2="52" stroke-width="1"/>
-      <text class="tl-a" x="428" y="40" text-anchor="middle">What the model sees: at least 12 months</text>
-      <line x1="238" y1="52" x2="618" y2="52" stroke="var(--accent)" stroke-width="2"/>
-      <text class="tl-p" x="668" y="40" text-anchor="middle">Predicted</text>
-      <line x1="622" y1="52" x2="714" y2="52" stroke="var(--model)" stroke-width="2"/>
-      <g stroke-width="1">
-        <rect class="tl-old" x="44" y="66" width="32" height="40" rx="3"/><rect class="tl-old" x="76" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-old" x="108" y="66" width="32" height="40" rx="3"/><rect class="tl-old" x="140" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-old" x="172" y="66" width="32" height="40" rx="3"/><rect class="tl-old" x="204" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-hist" x="236" y="66" width="32" height="40" rx="3"/><rect class="tl-hist" x="268" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-hist" x="300" y="66" width="32" height="40" rx="3"/><rect class="tl-hist" x="332" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-hist" x="364" y="66" width="32" height="40" rx="3"/><rect class="tl-hist" x="396" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-hist" x="428" y="66" width="32" height="40" rx="3"/><rect class="tl-hist" x="460" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-hist" x="492" y="66" width="32" height="40" rx="3"/><rect class="tl-hist" x="524" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-hist" x="556" y="66" width="32" height="40" rx="3"/><rect class="tl-hist" x="588" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-pred" x="620" y="66" width="32" height="40" rx="3"/><rect class="tl-pred" x="652" y="66" width="32" height="40" rx="3"/>
-        <rect class="tl-pred" x="684" y="66" width="32" height="40" rx="3"/>
-      </g>
-      <g text-anchor="middle" dominant-baseline="central">
-        <text class="tl-t" x="60" y="86">Jan</text><text class="tl-t" x="92" y="86">Feb</text><text class="tl-t" x="124" y="86">Mar</text>
-        <text class="tl-t" x="156" y="86">Apr</text><text class="tl-t" x="188" y="86">May</text><text class="tl-t" x="220" y="86">Jun</text>
-        <text class="tl-t" x="252" y="86">Jul</text><text class="tl-t" x="284" y="86">Aug</text><text class="tl-t" x="316" y="86">Sep</text>
-        <text class="tl-t" x="348" y="86">Oct</text><text class="tl-t" x="380" y="86">Nov</text><text class="tl-t" x="412" y="86">Dec</text>
-        <text class="tl-t" x="444" y="86">Jan</text><text class="tl-t" x="476" y="86">Feb</text><text class="tl-t" x="508" y="86">Mar</text>
-        <text class="tl-t" x="540" y="86">Apr</text><text class="tl-t" x="572" y="86">May</text><text class="tl-t" x="604" y="86">Jun</text>
-        <text class="tl-t" x="636" y="86">Jul</text><text class="tl-t" x="668" y="86">Aug</text><text class="tl-t" x="700" y="86">Sep</text>
-      </g>
-      <text class="tl-m" x="236" y="126" text-anchor="middle">2025</text>
-      <text class="tl-m" x="524" y="126" text-anchor="middle">2026</text>
-      <text class="tl-p" x="636" y="126" text-anchor="middle">+1</text>
-      <text class="tl-p" x="668" y="126" text-anchor="middle">+2</text>
-      <text class="tl-p" x="700" y="126" text-anchor="middle">+3</text>
-      <line class="tl-cut" x1="620" y1="58" x2="620" y2="150" stroke-width="1.5"/>
-      <text class="tl-t" x="620" y="168" text-anchor="middle" style="font-size:12px;font-weight:600">Cut-off: 30 Jun 2026</text>
-      <text class="tl-m" x="380" y="192" text-anchor="middle">Slide the cut-off one month back and repeat: every past month gives new training rows.</text>
-    </svg>
-  </div>
-  <p class="example">Example row: client 1043 · cut-off 30 Jun 2026 · 2 months ahead → the model must predict the client's August 2026 net cash flow.</p>
-  <ul>
-    <li>A client is used at a cut-off only if it has at least 12 months of history before it.</li>
-    <li>At scoring time, clients with less than 12 months get no forecast and are flagged.</li>
-    <li>Months with no movement count as 0. They are real information.</li>
-  </ul>
-</section>
-
-<section>
-  <h2><span class="n">5</span>What the model sees</h2>
-  <p>Each row has simple inputs, all known on the cut-off date, and one answer to learn.</p>
+  <h2><span class="n">4</span>The forecaster: the plug between the data and the model</h2>
+  <p>A forecaster is a small class. Any model that follows it can be tested, tracked, promoted and run every night without changing the rest of the project.</p>
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Group</th><th>Inputs</th></tr></thead>
+    <thead><tr><th>Part</th><th>What it is</th></tr></thead>
     <tbody>
-      <tr><td>What we ask</td><td>Months ahead (1, 2 or 3), calendar month being predicted</td></tr>
-      <tr><td>The client's net cash flow</td><td>Last month's, average of the last 3 months, same month last year</td></tr>
-      <tr><td>The client's overall flow</td><td>Average total in and total out over the last 3 months</td></tr>
-      <tr><td>Client profile</td><td>Segment, sector, city, company or sole proprietor, annual sales and number of employees (if the warehouse has them), months with the bank</td></tr>
+      <tr><td><code>fit(daily, clients, cutoff)</code></td><td>Learns from the daily flows known at the end of the cut-off month, and the clients</td></tr>
+      <tr><td><code>predict(daily, clients, cutoff)</code></td><td>Returns one row per client, category (and TOTAL: all its categories together) and months ahead (1, 2, 3): P10, EV and P90 of that month's net cash flow, in SAR</td></tr>
+      <tr><td><code>name</code>, <code>params</code></td><td>Its name (the project variable <code>forecaster</code> selects it) and its settings (recorded with each model)</td></tr>
     </tbody>
   </table>
   </div>
-  <div class="formula">Answer to learn = the client's net cash flow in the predicted month (money in − money out)</div>
-  <p>Amounts are divided by a usual size, so a small client and a large one look alike to the model: the client's average month (money in and out) over the last 12 months. The model predicts in that unit, and we multiply back to SAR.</p>
-  <p class="caption">The model never sees names, transaction descriptions, or anything dated after the cut-off.</p>
+  <p><strong>The placeholder, <code>recent_average</code></strong> (no machine learning): EV = the average of the last 3 months of each client and category; P10 and P90 = EV ∓ a width × how much that series moved over the last 12 months, the width set so that 80% of past months fell inside. It is the same for the 3 months ahead. Its only job is to let the whole pipeline run end to end.</p>
+  <p class="caption">The lab shows an example of a small model that learns (scikit-learn gradient boosting on the last 12 months) on the same plug.</p>
 </section>
 
 <section>
-  <h2><span class="n">6</span>The two models</h2>
-  <p>Both models learn from the same rows and the same inputs. Months ahead is an input, so one model covers all 3 months.</p>
-  <div class="grid2">
-    <div class="card">
-      <span class="chip md" style="justify-self:start">Model 1</span>
-      <h3>EV model</h3>
-      <p>Predicts the expected amount.</p>
-      <div class="out-vals">Output: EV</div>
-      <p class="caption">CatBoost regression. Swapping to XGBoost is a small change.</p>
-    </div>
-    <div class="card">
-      <span class="chip md" style="justify-self:start">Model 2</span>
-      <h3>P10 / P90 model</h3>
-      <p>Predicts a low and a high amount. Only 10% of months should fall below P10, and 10% above P90.</p>
-      <div class="out-vals">Output: P10, P90</div>
-      <p class="caption">CatBoost with both quantiles in one model (MultiQuantile).</p>
-    </div>
-  </div>
-  <p>After predicting, we make sure P10 ≤ EV ≤ P90 and that no amount is negative.</p>
-  <p>Which model is trained is a <strong>forecaster</strong>: a small class that learns from the training rows and returns P10, EV and P90. The reference one is the two CatBoost models above; the data scientist can add others. The project variable <code>forecaster</code> says which one is trained.</p>
-  <p>Each training run is one <strong>model</strong> with its own <strong>model ID</strong> (for example <code>CFF_202610_20261104T1416</code>: cut-off month and training time), recorded in Dataiku's <strong>Experiment Tracking</strong> and deployed as a new <strong>version</strong> of three saved models: <code>forecast_ev</code>, <code>forecast_p10</code>, <code>forecast_p90</code>. The production model is the <strong>active version</strong>; a new model is activated only if it is better, and the nightly batch always scores with the active version.</p>
+  <h2><span class="n">5</span>Model versions and promotion</h2>
+  <p>Each training run is one <strong>model</strong> with its own <strong>model ID</strong> (for example <code>CFF_202610_20261107T1000</code>: cut-off month and training time), recorded in Dataiku's <strong>Experiment Tracking</strong> and deployed as a new <strong>version</strong> of the saved model <code>cash_forecast</code>. The production model is the <strong>active version</strong>; the nightly forecast always uses it.</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart LR
   T[Train and test a new model with the chosen forecaster] --> X[(Experiment Tracking: model ID, forecaster, settings, test scores)]
-  X --> V[(New version of the 3 saved models, not active)]
-  V --> CC{Champion / challenger: same last 6 months}
+  X --> V[(New version of cash_forecast, not active)]
+  V --> CC{Champion / challenger: same last 6 months, promotion rules}
   P[(Active version: production)] --> CC
-  CC -- better --> PR[Activate the new version]
-  CC -- not better --> K[Keep the active version]
+  CC -- passes --> PR[Activate the new version]
+  CC -- fails --> K[Keep the active version]
   PR --> AV[(Active version)]
   K --> AV
-  AV -. read on its own schedule .-> N[Nightly batch: Score recipes use the active version]
+  AV -. read on its own schedule .-> N[Nightly batch: forecast with the active version]
 </pre>
   </div>
+  <p>The promotion rules are project variables: they change without touching the code.</p>
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Step</th><th>What happens</th></tr></thead>
+    <thead><tr><th>Rule (project variable)</th><th>Default</th><th>The new model is promoted only if</th></tr></thead>
     <tbody>
-      <tr><td>Forecaster</td><td>The project variable <code>forecaster</code> names the one trained: <code>catboost</code> (the reference) or one of the data scientist's in <code>forecasters.py</code></td></tr>
-      <tr><td>Tracking</td><td>The forecaster and its settings, cut-off, warehouse load, row counts, test scores on the last 6 months (EV error overall and per months ahead, P10–P90 coverage), the backtest forecaster, and the three MLflow models, under one model ID</td></tr>
-      <tr><td>Versions</td><td>The three MLflow models are deployed as version <em>model ID</em> of the saved models, with Dataiku's own evaluation on a reference sample</td></tr>
-      <tr><td>Champion / challenger</td><td>The new model and the production model are tested on the same last 6 months, each with its version trained without those months</td></tr>
-      <tr><td>Promotion (automatic)</td><td>The new version is activated if its EV error is lower (a tie keeps production), its P10–P90 coverage is between 70% and 90%, and it beats the simple guess. Every decision and its reason go to <code>promotion_log</code></td></tr>
-      <tr><td>Rollback</td><td>Activate an earlier version in the three saved models and run the nightly batch</td></tr>
-      <tr><td>Lab</td><td>The data scientist explores the data and tries forecasters on the same test, next to the production model, without touching production: notebook <code>forecast_lab</code> (EDA, then several forecasters side by side), or the recipe <code>try_forecaster</code> (<code>lab_results</code>). Tries are recorded in Experiment Tracking (experiment <code>cashflow_lab</code>) and never deployed</td></tr>
+      <tr><td><code>promotion_min_coverage</code>, <code>promotion_max_coverage</code></td><td>0.70, 0.90</td><td>its P10–P90 coverage is in this range (80% is the aim)</td></tr>
+      <tr><td><code>promotion_beat_simple_guess</code></td><td>true</td><td>its EV error is lower than the simple guess's (the same as the month before)</td></tr>
+      <tr><td><code>promotion_min_gain</code></td><td>0.0</td><td>its EV error is lower than the production model's by more than this share (0.02 = 2%); a tie keeps production</td></tr>
     </tbody>
   </table>
-  </div>
-</section>
-
-<section>
-  <h2><span class="n">7</span>The final forecast</h2>
-  <p>The model predictions are the final numbers: one P10, EV and P90 for each client's net cash flow, 1, 2 and 3 months ahead.</p>
-  <div class="figure">
-<pre class="mermaid">
-flowchart LR
-  M1[EV model] --> S[Net cash flow forecast: P10, EV, P90]
-  M2[P10 / P90 model] --> S
-</pre>
   </div>
   <ul>
-    <li>P10 ≤ EV ≤ P90 always holds. The net cash flow can be negative.</li>
+    <li>With no production model yet, the first model is promoted (the forecast needs one), with a warning if it fails the rules.</li>
+    <li>Every decision, its reason and the rules used go to <code>promotion_log</code>.</li>
+    <li>Rollback: activate an earlier version of <code>cash_forecast</code> and run the nightly batch.</li>
   </ul>
-  <div class="tablewrap">
-  <table>
-    <thead><tr><th>Client</th><th>Month</th><th>Ahead</th><th>P10</th><th>EV</th><th>P90</th></tr></thead>
-    <tbody>
-      <tr><td class="mono">1043</td><td class="mono">2026-07</td><td>1</td><td class="mono">−120,000</td><td class="mono">60,000</td><td class="mono">230,000</td></tr>
-      <tr><td class="mono">1043</td><td class="mono">2026-08</td><td>2</td><td class="mono">−210,000</td><td class="mono">35,000</td><td class="mono">260,000</td></tr>
-      <tr><td class="mono">1043</td><td class="mono">2026-09</td><td>3</td><td class="mono">−240,000</td><td class="mono">40,000</td><td class="mono">300,000</td></tr>
-    </tbody>
-  </table>
-  </div>
-  <p class="caption">Example output rows, in SAR. The numbers are illustrative.</p>
 </section>
 
 <section>
-  <h2><span class="n">8</span>Testing</h2>
-  <p>We hold out the last 6 months. The models train only on rows whose predicted month is before that window, then we score the held-out months and compare with what really happened.</p>
+  <h2><span class="n">6</span>The final forecast</h2>
+  <p>One row per active client, category (and TOTAL) and month ahead. P10 ≤ EV ≤ P90 always holds; the net cash flow can be negative. A client with less than 12 months of history gets no values and is flagged <code>NOT_ENOUGH_HISTORY</code>.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Client</th><th>Category</th><th>Month</th><th>Ahead</th><th>P10</th><th>EV</th><th>P90</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">1043</td><td>CUSTOMER_RECEIPTS</td><td class="mono">2026-11</td><td>1</td><td class="mono">1,450,000</td><td class="mono">1,855,000</td><td class="mono">2,450,000</td></tr>
+      <tr><td class="mono">1043</td><td>SALARIES</td><td class="mono">2026-11</td><td>1</td><td class="mono">−420,000</td><td class="mono">−400,000</td><td class="mono">−380,000</td></tr>
+      <tr><td class="mono">1043</td><td>TOTAL</td><td class="mono">2026-11</td><td>1</td><td class="mono">−120,000</td><td class="mono">60,000</td><td class="mono">230,000</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="caption">Example output rows, in SAR. The numbers are illustrative. Every row also carries the model ID and the warehouse load it came from.</p>
+</section>
+
+<section>
+  <h2><span class="n">7</span>Testing</h2>
+  <p>Every model is tested the same way: trained without the last 6 months, it forecasts each of them from the data known the month before, and we compare with what really happened.</p>
   <div class="figure">
     <svg viewBox="0 0 760 120" width="100%" role="img" style="min-width:560px">
       <title>Train and test split</title>
@@ -295,59 +224,56 @@ flowchart LR
   <table>
     <thead><tr><th>Check</th><th>What it tells us</th><th>Good result</th></tr></thead>
     <tbody>
-      <tr><td>EV error (WAPE)</td><td>Total of |actual − EV| divided by total of |actual|</td><td>As low as possible, and better than a simple "average of the last 3 months" guess</td></tr>
+      <tr><td>EV error (WAPE)</td><td>Total of |actual − EV| divided by total of |actual|</td><td>As low as possible, and better than the simple guess (the same as the month before)</td></tr>
       <tr><td>P10–P90 coverage</td><td>Share of actual months that fall between P10 and P90</td><td>About 80% (about 10% below P10, about 10% above P90)</td></tr>
     </tbody>
   </table>
   </div>
-  <p class="caption">Results are shown per months ahead, so we see how the error grows with the horizon.</p>
+  <p class="caption">Results are shown per months ahead, for the TOTAL rows and the category rows; promotion uses all rows together. In the sandbox the data is simulated: the scores show the pipeline works, not which model is better.</p>
 </section>
 
 <section>
-  <h2><span class="n">9</span>What gets built in Dataiku</h2>
-  <p>A setup notebook builds the project once, in an empty Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. After that, the project runs from two independent scenarios: <strong>Nightly batch</strong> after each warehouse load, and <strong>Retrain, test and promote</strong> (monthly, or when needed), which never forecasts. Each zone has an owner (shared, data scientist, inference owner), and the zones only meet through three interfaces: <strong>1. the model rows</strong> (<code>model_rows</code>: staging → training and inference), <strong>2. the forecaster</strong> (lab → training), <strong>3. the active version of the saved models</strong> (training → inference, the only thing inference reads from training). The cut-off month comes from the load record, so a new load moves the forecast forward on its own.</p>
+  <h2><span class="n">8</span>What gets built in Dataiku</h2>
+  <p>A setup notebook builds the project in a Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. Two independent scenarios run it: <strong>Nightly batch</strong> after each warehouse load (never trains), and <strong>Retrain, test and promote</strong> (monthly, or when needed; never forecasts). The zones only meet through three interfaces: <strong>1. the data</strong> (<code>daily_flows</code>, <code>clients</code>), <strong>2. the forecaster</strong> (lab → training), <strong>3. the active version of the saved model</strong> (training → inference, the only thing inference reads from training).</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart TB
-  subgraph Z1[Raw data: CSV, from the simulator or the warehouse landing files]
-    R[(EDW.DIM_CUSTOMER, EDW.FCT_STATEMENT_ENTRY: read-only)]
+  subgraph Z1[Raw data: from the simulator or the warehouse, read-only]
+    R[(EDW.DIM_CUSTOMER, EDW.FCT_STATEMENT_ENTRY)]
   end
   subgraph Z0[Staging]
-    ST[stage_tables: business clients, postings summed per month] --> S17[(clients, monthly_flows)]
+    ST[stage_tables: business clients, postings summed per day and category] --> S17[(clients, daily_flows)]
   end
   subgraph Z3[Training: monthly, data scientist]
-    P3[build_training_rows] --> TR[(training_rows)]
     P4[train_and_test: one model ID] --> EX[(experiments: Experiment Tracking)]
-    P4 --> SM[(saved models forecast_ev, p10, p90: one version per model ID)]
-    CH[champion_challenger] --> PL[(promotion_log)]
+    P4 --> TRS[(test_results)]
+    CH[champion_challenger: promotion rules] --> PL[(promotion_log)]
   end
   subgraph Z5[Inference: nightly, inference owner]
-    P5[build_scoring_rows] --> SR[(scoring_rows: latest month)]
-    S1[Score x3: active version] --> F[final_forecast: model_id, load_id]
-    F --> AF[archive_forecast] --> AR[(forecast_archive)]
+    SM[(saved model cash_forecast: one version per model ID)]
+    F[final_forecast: active version, model_id, load_id] --> AF[archive_forecast] --> AR[(forecast_archive)]
     AF --> IL[(inference_log: one row per run)]
   end
   subgraph Z6[Lab: data scientist]
-    LT[try_forecaster: the forecaster lab_forecaster names] --> LRS[(lab_results: one block of rows per try)]
+    LT[try_forecaster: the forecaster lab_forecaster names] --> LRS[(lab_results)]
     LT --> LX[(lab_experiments: experiment cashflow_lab)]
   end
   R --> ST
-  S17 --> P3
-  S17 --> P5
-  TR --> P4
-  TR --> CH
+  S17 --> P4
+  S17 --> CH
+  S17 --> F
+  S17 --> LT
   EX --> CH
-  SM -- active version, interface 3 --> S1
-  SR --> S1
-  TR --> LT
   EX --> LT
+  P4 -. new version .-> SM
+  SM -- active version, interface 3 --> F
 </pre>
   </div>
-  <p class="caption">Boxes with rounded ends are datasets or folders; rectangles are Python recipes. The 5 groups are the flow zones of the single project. <code>build_training_rows</code> and <code>build_scoring_rows</code> use the same code (<code>model_rows</code> in <code>cashflow.py</code>), so the model sees the same inputs in training and in the forecast. Each scenario starts by setting the cut-off month (a Python step: the month before today), which the recipes read; the staging recipe stops if the postings do not reach it. Training (folder <code>experiments</code>), the promotion log and the saved models are only rebuilt when built by name, so the nightly batch never retrains by accident. The project library is split by owner: shared (<code>cashflow.py</code>, <code>warehouse.py</code>), training and lab (<code>models.py</code>, <code>tracking.py</code>, and the data scientist's <code>forecasters.py</code>, which the setup never overwrites), inference (<code>forecast.py</code>). In the sandbox, both notebooks (the warehouse simulator and the setup) run in this same project.</p>
+  <p class="caption">Boxes with rounded ends are datasets, folders or the saved model; rectangles are Python recipes. Each scenario starts by setting the cut-off month (the month before today); the staging recipe stops if the postings do not reach it. The project library is split by owner: shared (<code>cashflow.py</code>, <code>warehouse.py</code>), training and lab (<code>models.py</code>, <code>tracking.py</code>, and the data scientist's <code>forecasters.py</code>, which the setup never overwrites), inference (<code>forecast.py</code>).</p>
 </section>
 
 <section>
-  <h2><span class="n">10</span>Inference log</h2>
+  <h2><span class="n">9</span>Inference log</h2>
   <p>Every forecast run adds one row to <code>inference_log</code> (in the Inference zone) and keeps the forecast as it was made in the folder <code>forecast_archive</code>.</p>
   <div class="tablewrap">
   <table>
@@ -365,30 +291,27 @@ flowchart TB
 </section>
 
 <section>
-  <h2><span class="n">11</span>Decisions and open points</h2>
+  <h2><span class="n">10</span>Decisions and open points</h2>
   <div class="grid2">
     <div class="card">
       <h3>Agreed</h3>
       <ul>
-        <li>One forecast per month, for each of the next 3 months. No daily forecasts.</li>
-        <li>Money in and money out kept separate. Own-account transfers left out.</li>
-        <li>Two models: EV, and P10/P90 together (CatBoost). One training path, in Python recipes.</li>
-        <li>Each training run is tracked with a model ID and deployed as a saved model version; a new version is activated automatically if it is better; the nightly batch scores with the active version.</li>
-        <li>Everything is stored as CSV files: the warehouse's landing files, the project's datasets, the archive and the logs.</li>
-        <li>At least 12 months of history to score a client. Otherwise flagged.</li>
-        <li>Test on the last 6 months.</li>
-        <li>One project (Digital Cash Management Forecast), with the warehouse simulator inside it in the sandbox. Production-shaped: the project only reads the warehouse's tables (read-only landing files in production), checks each load, takes its cut-off from the load record, and runs from two scenarios. Sample data comes from a separate warehouse simulator.</li>
-        <li>The warehouse is only read, never written to: Dataiku does all the prep (business clients, monthly sums) and the modelling.</li>
+        <li>Input: the daily flows per client, day and category, over each client's whole history. No monthly table in between.</li>
+        <li>Output: per client, category and TOTAL, one value per month for each of the next 3 months, as P10, EV and P90.</li>
+        <li>Small models only, no deep learning. A placeholder (<code>recent_average</code>) until the data scientist's models are ready.</li>
+        <li>Each training run is tracked with a model ID and deployed as a version of <code>cash_forecast</code>; it is activated only if it passes the promotion rules (project variables); the nightly batch uses the active version.</li>
+        <li>The warehouse is only read, never written to: Dataiku does all the prep and the modelling. Everything the project writes is a CSV file.</li>
+        <li>At least 12 months of history to forecast a client; otherwise flagged. Test on the last 6 months.</li>
       </ul>
     </div>
     <div class="card">
       <h3>To check</h3>
       <ul>
-        <li>Client total method: review once we see the test results.</li>
-        <li>How real transactions are labelled as rent or supplier payments without descriptions (counterparty, transaction code).</li>
-        <li>The project reads the daily postings row by row through the read-only connection and sums them in Dataiku: check the reading time on the full table.</li>
-        <li>Code env: the project needs a Python code env with <code>catboost 1.2.7</code>, <code>scikit-learn</code> and <code>mlflow 2.22.0</code> (Python 3.9) or <code>3.10.1</code> (Python 3.10 or later): the versions Dataiku tested. We cannot create one: a Dataiku admin creates it once.</li>
-        <li>The codes the project relies on (status values, retail line of business, commercial registration, sole proprietor legal entities) come from a small data profile: confirm them on business clients. If they differ, only <code>warehouse.py</code> changes.</li>
+        <li><strong>Scale:</strong> the bank has about 420,000 clients. Today staging and inference handle all clients in one go, which is fine for the sample data; the next step is to make them handle that many (batches of clients, and reading only the new days each night).</li>
+        <li>The real transaction type codes (<code>TRNS_TYP</code>) and the categories they map to, to replace the mock list.</li>
+        <li>Reading the whole of <code>FCT_STATEMENT_ENTRY</code> every run: check the reading time on the real table.</li>
+        <li>Code env: a Python code env with <code>scikit-learn</code> and <code>mlflow 2.22.0</code> (Python 3.9) or <code>3.10.1</code> (Python 3.10 or later). We cannot create one: a Dataiku admin creates it once.</li>
+        <li>The codes the project relies on (status values, retail line of business, commercial registration, sole proprietor legal entities): confirm them on business clients. If they differ, only <code>warehouse.py</code> changes.</li>
       </ul>
     </div>
   </div>

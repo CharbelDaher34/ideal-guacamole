@@ -1,8 +1,11 @@
-# What the models learn: the net cash flow divided by the client's scale (its usual month), overall and by segment
-scaled = rows.assign(y=rows["target"] / rows["scale"])
-display(scaled.groupby("segment")["y"].describe(percentiles=[0.01, 0.1, 0.5, 0.9, 0.99]).round(2))
-
-# How much each input moves with it (Spearman correlation, inputs divided by the scale too)
-inputs = ["last_amount", "avg_3m", "same_month_last_year", "client_in_avg_3m", "client_out_avg_3m"]
-x = scaled[inputs].div(scaled["scale"], axis=0)
-display(x.loc[:, x.nunique() > 1].corrwith(scaled["y"], method="spearman").round(2).to_frame("correlation"))
+# One client, day by day: what the models see (daily net, all categories), and the monthly totals they predict
+client_no = monthly[monthly["category"] == TOTAL].groupby("client_no")["net"].size().idxmax()   # longest history
+one = daily[daily["client_no"] == client_no].assign(net=lambda d: d["money_in"] - d["money_out"])
+one = one.groupby(pd.to_datetime(one["day"]))["net"].sum().loc[lambda s: s.index > cutoff - pd.DateOffset(months=6)]
+fig, (a, b) = plt.subplots(1, 2, figsize=(13, 3.5))
+(one / 1e3).plot(ax=a, style=".", title=f"Client {client_no}: daily net, last 6 months (thousand SAR)")
+months = monthly[(monthly["client_no"] == client_no) & (monthly["category"] == TOTAL)].set_index("month")["net"]
+(months.tail(24) / 1e3).plot.bar(ax=b, title="Monthly net, last 24 months (thousand SAR)")
+b.set_xticklabels([f"{m:%y-%m}" for m in months.tail(24).index], rotation=90)
+plt.tight_layout()
+plt.show()
