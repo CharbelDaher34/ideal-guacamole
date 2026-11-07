@@ -4,15 +4,15 @@
 # training. final_forecast has ONE row per active client (forecast.one_row_per_client): status OK, NOT_ENOUGH_HISTORY
 # (no values) or NO_POSTINGS (no posting at all, no values), the values as columns (TOTAL_m1_p10, TOTAL_m1_ev, ...),
 # and which model (model_id, forecaster) and which data (load_id) produced it.
-# Built to scale: the daily flows are read in chunks and spread over files on disk by client, then forecast one file
-# at a time (about inference_clients_per_chunk clients each, project variable), so memory holds one chunk of clients
-# whatever their number. Each chunk's rows are written at once to:
+# Built to scale: staging keeps daily_flows grouped by client, so it is read straight through in chunks of complete
+# clients (cashflow.iter_clients: about inference_clients_per_chunk clients each, project variable) and each chunk is
+# forecast as soon as it is read. Memory holds one chunk of clients, whatever their number. The chunks' forecasts are
+# kept on local disk, then, once every chunk has worked, written to:
 #   final_forecast: the forecast
 #   forecast_archive: one compressed CSV file per cut-off month and model (forecast_<cut-off>_<model ID>.csv.gz)
 #   inference_log: one row per run (appended), also when the run fails (status FAILED and the error): which model and
 #   load, how many active clients got a forecast or not and why, how long each step took, the most memory used
 import gzip
-import math
 import os
 import resource
 import tempfile
@@ -21,7 +21,7 @@ import time
 import dataiku
 import pandas as pd
 
-from cashflow import Spread, append_row, cutoff_month, history_months, iter_dataset, read_dataset, until
+from cashflow import append_row, cutoff_month, history_months, iter_clients, read_dataset, until
 from forecast import forecast_table, one_row_per_client, production_forecaster
 from models import active, forecast
 
@@ -29,7 +29,7 @@ LOG = {"run_at": "string", "status": "string", "error": "string", "load_id": "st
        "cutoff_month": "string", "model_id": "string", "forecaster": "string", "active_clients": "bigint",
        "clients_ok": "bigint", "clients_not_enough_history": "bigint", "clients_no_postings": "bigint",
        "daily_rows_read": "bigint", "chunks": "bigint", "seconds_reading": "double", "seconds_forecasting": "double",
-       "seconds_total": "double", "peak_memory_mb": "bigint", "archive_file": "string"}
+       "seconds_writing": "double", "seconds_total": "double", "peak_memory_mb": "bigint", "archive_file": "string"}
 NO_ROWS = ["client_no", "category", "months_ahead", "p10", "ev", "p90", "status", "history_months"]
 started = time.time()
 variables = dataiku.get_custom_variables()
@@ -46,34 +46,31 @@ def run():
     numbers = set(clients["client_no"])
     if not numbers:
         raise ValueError("No active client in clients: check the staging and STS_FLG in warehouse.py")
-    chunks = max(1, math.ceil(len(numbers) / int(variables.get("inference_clients_per_chunk") or 5000)))
+    per_chunk = int(variables.get("inference_clients_per_chunk") or 5000)
     name = f"forecast_{last_month:%Y-%m}_{model_id}.csv.gz"
-    log.update(active_clients=len(numbers), chunks=chunks, archive_file=name)
+    log.update(active_clients=len(numbers), archive_file=name)
 
     with tempfile.TemporaryDirectory() as folder:
-        spread = Spread(folder, chunks)
-        daily_rows = 0
-        for daily in iter_dataset("daily_flows"):
-            daily = until(daily, last_month)
-            daily = daily[daily["client_no"].isin(numbers)]
-            daily_rows += len(daily)
-            spread.add(daily, "client_no")
-        read_seconds = time.time() - started
-        log.update(daily_rows_read=daily_rows, seconds_reading=round(read_seconds, 1))
-
-        # forecast every chunk first, kept on disk: final_forecast is only written once all of them worked, so a
-        # failed run leaves the previous forecast as it was
-        done, seen = [], set()
-        for daily in spread.parts():
+        # read and forecast chunk by chunk; the forecasts are kept on disk: final_forecast is only written once every
+        # chunk worked, so a failed run leaves the previous forecast as it was
+        done, seen, daily_rows, forecasting = [], set(), 0, 0.0
+        for daily in iter_clients("daily_flows", per_chunk,
+                                  keep=lambda d: until(d[d["client_no"].isin(numbers)], last_month)):
+            ticked = time.time()
             group = clients[clients["client_no"].isin(set(daily["client_no"]))]
             pred = forecast(forecaster, daily, group, last_month)
             table = forecast_table(pred, history_months(daily, last_month), last_month)
             done.append(keep(one_row_per_client(table, last_month), folder, len(done)))
             seen |= set(group["client_no"])
+            daily_rows += len(daily)
+            forecasting += time.time() - ticked
         missing = numbers - seen                     # active clients with no posting at all: one row each
         if missing:
             done.append(keep(one_row_per_client(pd.DataFrame(columns=NO_ROWS), last_month, missing), folder,
                              len(done)))
+        read_done = time.time()
+        log.update(daily_rows_read=daily_rows, chunks=len(done) - bool(missing), seconds_forecasting=round(forecasting, 1),
+                   seconds_reading=round(read_done - started - forecasting, 1))
 
         out, writer, counts = dataiku.Dataset("final_forecast"), None, {}
         with dataiku.Folder("forecast_archive").get_writer(name) as archive_file, \
@@ -92,8 +89,7 @@ def run():
                     counts[status] = counts.get(status, 0) + int(n)
         writer.close()
     log.update(clients_ok=counts.get("OK", 0), clients_not_enough_history=counts.get("NOT_ENOUGH_HISTORY", 0),
-               clients_no_postings=counts.get("NO_POSTINGS", 0),
-               seconds_forecasting=round(time.time() - started - read_seconds, 1))
+               clients_no_postings=counts.get("NO_POSTINGS", 0), seconds_writing=round(time.time() - read_done, 1))
 
 
 def keep(frame, folder, n):

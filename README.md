@@ -1,6 +1,11 @@
-# Dataiku DSS — Free Edition (sandbox)
+# Digital Cash Management Forecast
 
-The cash-flow forecast project (CSV files, no database) is built by a notebook: see [`forecast/`](forecast/README.md).
+- **How it works, end to end:** [`docs/how_it_works.md`](docs/how_it_works.md)
+- **How to run it in the bank's Dataiku:** [`forecast/README.md`](forecast/README.md)
+
+The rest of this page is about the local test Dataiku (Docker sandbox), not the bank.
+
+## Local sandbox: Dataiku DSS — Free Edition
 
 Dataiku DSS 14.2.0 running in Docker (rootless) for testing development work: the closest image to the bank's
 14.2.2 (there is no 14.2.2 image). The earlier 15.2.0 data folder is kept in `dss_data_15.2_backup/` (not in git).
@@ -11,7 +16,7 @@ Dataiku DSS 14.2.0 running in Docker (rootless) for testing development work: th
 - Code env `cashflow_forecast` (scikit-learn, MLflow): created once by an admin; the forecast setup notebook
   checks it (**Administration → Code Envs**).
 
-## PostgreSQL
+### PostgreSQL
 
 Not used by the cash-flow forecast (it stores CSV files); kept for other work.
 
@@ -24,7 +29,7 @@ It is **not exposed to the server** — only reachable on the Docker network as 
   After logging in, check it under **Administration → Connections → postgres_local → Test**.
 - psql shell: `docker exec -it dataiku-postgres psql -U dataiku -d dataiku`
 
-## Start / stop
+### Start / stop
 
 ```bash
 make start   # start DSS + PostgreSQL, wait until ready
@@ -34,7 +39,7 @@ make stop    # stop both (keeps data)
 Login: **admin / admin** — `make start` resets the admin password to `admin` every time.
 Port 10000 is bound to 127.0.0.1 only; reach it with your own SSH tunnel.
 
-## Registration
+### Registration
 
 Registered (2026-10-28) as a Free Edition (Community) license for charbel.michel@eurisko.net —
 instance id `lyx3aosk`, no expiry. Registration was done from the server because the browser
@@ -46,7 +51,7 @@ DSS backend log: `dss_data/run/backend.log` (read it with `docker exec dataiku-d
 `dss_data` is owned by the container's `dataiku` user (rootless Docker maps it to a sub-UID),
 so edit or delete its contents through `docker exec`, not directly from the host.
 
-## What to expect from the Free Edition
+### What to expect from the Free Edition
 
 Works: Python/R/SQL/Shell recipes, Jupyter notebooks, code environments, project libraries,
 Git integration, plugin development, Dash/Bokeh/Shiny webapps, visual ML,
@@ -56,7 +61,7 @@ Not available: public REST API / API keys (so no VS Code extension or external `
 scheduled scenarios & automation, API node / deployer, Spark / Kubernetes (and therefore Code Studios),
 Snowflake/BigQuery/Oracle/etc. connectors, partitioning. Use the 14-day Dataiku Cloud trial to test those.
 
-## Reset from scratch
+### Reset from scratch
 
 ```bash
 docker compose down

@@ -1,258 +1,92 @@
-# Digital Cash Management Forecast
+# Digital Cash Management Forecast: run it at the bank
 
-A Dataiku project that forecasts, for each business client, the net cash flow (money in minus money out) of each of
-the next 3 months, **per category and in TOTAL**, as one value with a range (P10, EV, P90). It is set up the way it
-runs in production, in a single project, and stores all its data as CSV files (compressed for the big ones). It is
-built for the bank's ~420k clients: staging reads only the new days, and inference works in chunks of clients. For a plain-words explanation of how
-it works, see [`../docs/cashflow_forecast_design.html`](../docs/cashflow_forecast_design.html).
+Forecasts, for every active business client, the net cash flow of the next 3 months, per category and in TOTAL,
+as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/how_it_works.md).
 
-**Who owns what:**
-- **This project** covers everything around the model: getting the data into a format the data scientist can work
-  with, the inference pipeline, and the promotion pipeline with its rules.
-- **The model is a placeholder**, `quantile_boosting` (3 small models: EV, P10, P90), until the data scientist's models replace
-  it through the forecaster interface.
+## Before you start (ask once)
 
-There are four notebooks:
+1. **A Python code env** named `cashflow_forecast` (Python 3.9 or later) with `scikit-learn` and `mlflow==2.22.0`.
+   Only a Dataiku admin can create it. The setup notebook checks it and, if something is missing, prints the request
+   to send the admin.
+2. **A read-only database connection** to the warehouse (Oracle), usable by your group, for example `EDW`. The
+   project only reads `EDW.DIM_CUSTOMER` and `EDW.FCT_STATEMENT_ENTRY`, with a `SELECT` and a date filter. It never
+   writes there.
+3. **An empty Dataiku project** where you are at least a designer. Don't reuse a project from an older version.
 
-| Notebook | Role |
+## Set it up (once)
+
+1. **Put the bank's codes in `src/warehouse.py`:**
+   - `CATEGORY_OF_TYPE`: the real transaction types (`TRNS_TYP`) and their category. Today it's a mock list.
+   - Check `ACTIVE_STATUS`, `RETAIL`, `BUSINESS_ID`, `SOLE_PROPRIETOR` against `DIM_CUSTOMER`.
+
+   Then rebuild the notebooks: `python make_notebook.py`.
+2. **Import** `build_forecast_project.ipynb` into the project (Notebooks → New notebook → Import).
+3. **Fill its first cell:**
+
+   | Setting | Set it to |
+   |---|---|
+   | `WAREHOUSE_SQL_CONNECTION` | the connection's name, for example `"EDW"` |
+   | `WAREHOUSE_SQL_SCHEMA` | the tables' schema, for example `"EDW"` |
+   | `CONNECTION`, `FOLDER_CONNECTION` | where the project may write its datasets and folders |
+   | `CODE_ENV` | `"cashflow_forecast"` |
+
+4. **Run All.** It builds the flow, reads the whole history once, trains and promotes a first model, and runs the
+   first forecast. The first read of the whole history is the long part.
+5. **Check the last cell:** the production model, its test scores, `final_forecast` (one row per active client)
+   and the logs.
+6. **Switch on the scenario triggers** (Scenarios → each scenario → Settings): they are created switched off.
+
+Don't import or run `warehouse_simulator.ipynb` or `inference_load_test.ipynb` in this project: they replace the
+data with fake data.
+
+## Every day and every month
+
+| Scenario | When | What it does |
+|---|---|---|
+| **Nightly batch** | daily, 06:00 | reads the new days, forecasts every active client with the production model |
+| **Retrain, test and promote** | monthly, on the 5th | trains a new model and activates it only if it passes the promotion rules |
+| **Full rebuild of the daily flows** | by hand | reads the whole history again |
+
+**After each run, check:**
+- `inference_log`: `status` is `SUCCESS`; `active_clients` = `clients_ok` + `clients_not_enough_history` +
+  `clients_no_postings`.
+- `staging_log`: what was read from the warehouse.
+- `promotion_log`: whether the new model was promoted, and why.
+
+## When something goes wrong
+
+| You see | Do |
 |---|---|
-| [`warehouse_simulator.ipynb`](warehouse_simulator.ipynb) | **Sandbox only.** Plays the warehouse: writes sample `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` tables as CSV datasets of the project. |
-| [`build_forecast_project.ipynb`](build_forecast_project.ipynb) | Sets up the project (and names it Digital Cash Management Forecast): the flow, the first model, the scenarios and the first nightly batch. |
-| [`inference_load_test.ipynb`](inference_load_test.ipynb) | **Sandbox only, never in production.** Replaces `clients` and `daily_flows` with fake data for 420k clients, times the forecast and its memory, then puts the real data back. Run it on the bank's server as its benchmark. |
-| [`forecast_lab.ipynb`](forecast_lab.ipynb) | **The data scientist's lab.** An EDA of the daily flows, then several forecasters compared side by side with the production model on the same test. Each try is recorded in Experiment Tracking, and nothing here touches production. It opens in the code env's kernel. |
+| `staging_log` FAILED: "the warehouse load for that month looks late or partial" | wait for the warehouse load, then run the Nightly batch again |
+| "run the scenario Full rebuild" | run **Full rebuild of the daily flows**, then the Nightly batch |
+| `inference_log` FAILED | read its `error`; `final_forecast` still holds the previous forecast |
+| "No production model yet" | run **Retrain, test and promote** |
+| The setup stops on the code env | send the admin the request it printed |
+| A wrong forecast after a model change | activate the previous version of the saved model `cash_forecast`, run the Nightly batch |
 
-## Run it
+## Settings you can change without code (project variables)
 
-1. In the project, import the notebooks (Notebooks → New notebook → Import).
-2. **Sandbox only:** run `warehouse_simulator.ipynb` (Run All, about 1 minute).
-   - It writes sample `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` tables as of `AS_OF`, shaped like the bank's.
-   - They cover `N_CLIENTS` sample business clients (40 by default), plus a few retail customers that the forecast
-     leaves out.
-3. Run `build_forecast_project.ipynb`: check the settings in its first cell, then Run All (a few minutes).
-   - **Code env:** it needs an existing Python code env (`CODE_ENV`) with `scikit-learn` and `mlflow`, either
-     2.22.0 (Python 3.9 or later) or 3.10.1 (Python 3.10 or later). It was tested on DSS 14.2.0 with Python 3.9 and
-     mlflow 2.22.0. The notebook doesn't create the env, because that needs admin rights. If something is missing,
-     it stops and shows the request to send a Dataiku admin.
-   - **Data:** it uses the simulated tables if they're there; otherwise it reads the warehouse (see below).
-   - **Rights:** it needs no admin right on the project. Without one, it can't rename the project and says so.
-   - **Running it again in the same project** keeps what already exists (data, saved model versions, zones,
-     scenario history) and updates the recipes' code.
-4. **Every night after a load:** Scenarios → **Nightly batch** → Run. To retrain: **Retrain, test and promote**. To
-   read the whole history again: **Full rebuild of the daily flows** (by hand).
-
-### In production: connect to the warehouse
-
-Nothing is created or written in the warehouse. The project only reads `EDW.DIM_CUSTOMER` and
-`EDW.FCT_STATEMENT_ENTRY`, with one read-only query: a `SELECT` of the columns it uses with a date filter on
-`VAL_DT`.
-
-1. **Ask a Dataiku admin once** for a read-only database connection to the warehouse (Oracle), usable by your
-   group, for example named `EDW`.
-2. **In the setup notebook's first cell**, set:
-   - `WAREHOUSE_SQL_CONNECTION = "EDW"` (the connection's name);
-   - `WAREHOUSE_SQL_SCHEMA = "EDW"` (the tables' schema).
-
-   Don't run the simulator in that project.
-3. **Replace the mock categories** in `src/warehouse.py` (`CATEGORY_OF_TYPE`) with the bank's real transaction type
-   codes (`TRNS_TYP`), then run `python make_notebook.py`.
-4. Run the setup notebook.
-
-To simulate the next month in the sandbox, set `AS_OF` in the simulator to the next month's end, Run All, then run
-**Nightly batch**.
-
-## Input data (interface 1: what every model gets)
-
-The project reads 2 tables of the warehouse, read-only and as they are. The names, codes and categories it expects
-are all in `src/warehouse.py`, the only file to change if they differ at the bank.
-
-| Table | What the project reads | What it becomes (in Dataiku) |
+| Variable | Default | What it does |
 |---|---|---|
-| `EDW.DIM_CUSTOMER` | the clients: CIF, customer type, line of business, legal entity, ID type, segment, sector, industry, city, status. Personal fields are never read. | **`clients`**: the business clients (every line of business except retail, plus retail clients with a commercial registration, i.e. sole proprietors), one row per CIF |
-| `EDW.FCT_STATEMENT_ENTRY` | the daily postings: CIF, account, value date, credit / debit, amount in SAR, transaction type (`TRNS_TYP`), reference (`TRNS_RFR`), reversal marker | **`daily_flows`**: one row per client, day and category, with `money_in`, `money_out` and `postings`, over each client's whole history up to the cut-off month |
+| `forecaster` | `quantile_boosting` | the model Retrain trains |
+| `promotion_min_coverage`, `promotion_max_coverage` | 0.70, 0.90 | promotion rule: P10–P90 coverage range |
+| `promotion_beat_simple_guess` | true | promotion rule: must beat "same as last month" |
+| `promotion_min_gain` | 0.0 | promotion rule: how much better than production |
+| `inference_clients_per_chunk` | 5000 | clients forecast at a time: bigger is faster but needs more memory |
+| `cutoff_override` | empty | forecast from another month (YYYY-MM) |
 
-**Categories**
-- Each posting gets its category from its transaction type, through `CATEGORY_OF_TYPE`. A type that isn't listed
-  goes to `OTHER`.
-- **The list is a mock** built from the sample data's types: customer receipts, salaries, rent, suppliers,
-  financing, government, utilities, cards, fees, other. At the bank, replace it with the real codes; nothing else
-  changes.
+## Optional: benchmark the bank's server
 
-**Daily postings, summed in Dataiku**
-- The staging recipe reads the postings in chunks, keeps the business clients' postings up to the end of the
-  cut-off month, and sums them per client, day and category.
-- Reversed postings (and what they reverse) are left out, and so are transfers between the client's own accounts.
-- Big reads never sit in memory whole: the postings are spread over files on the server's disk, then summed one file
-  at a time.
+In a separate sandbox project with the forecast set up, run `inference_load_test.ipynb`. It times the nightly
+forecast for 420,000 fake clients and shows the memory used, which helps choose `inference_clients_per_chunk`.
 
-**Only the new days are read**
-- The first run reads the whole history once.
-- After that, each run reads only the postings after the last day already in `daily_flows`, up to the end of the
-  cut-off month, and **adds** them to `daily_flows`. Through the database connection the warehouse does the filter
-  (`WHERE VAL_DT >= …`), so only the new rows travel. From CSV files (sandbox, landing folder) the whole file is read
-  and filtered in Dataiku.
-- `staging_log` gets one row per run, also when it fails (`status` `FAILED` and the `error`, for example a late
-  load): `FULL`, `NEW_DAYS` or `NOTHING_NEW`, the days read, the rows read and added, and the last day now in
-  `daily_flows`. A failed run adds nothing, so the next run reads the same days again. If a run ever fails while
-  adding to `daily_flows` (`partial_write`), staging stops until the Full rebuild is run.
-- **Full rebuild of the daily flows** (a scenario run by hand) empties `daily_flows` and `staging_log`, then reads
-  the whole history again. Use it when old days must be rebuilt: for example after a reversal cancels a posting from
-  a day already staged (the nightly read only looks at new days, so it can't take that posting out), or after the
-  categories in `warehouse.py` change.
+## Files
 
-**Cut-off month**
-- It's the month before today, unless the project variable `cutoff_override` (YYYY-MM) is set; the simulator sets
-  it.
-- If the postings don't reach the cut-off month, or there are far fewer than the month before, the run stops,
-  because the warehouse load looks late.
-
-**Days to months:** `cashflow.monthly_matrix(daily, cutoff)` gives the net cash flow per client and category (and
-TOTAL) and month, for the models that work by month.
-
-## What the project builds
-
-| Zone | Recipes | Outputs (CSV files unless noted) |
-|---|---|---|
-| Raw data | (the simulator, or the read-only warehouse) | `DIM_CUSTOMER`, `FCT_STATEMENT_ENTRY` |
-| Staging | `stage_tables` | `clients`, `daily_flows` (new days added, compressed), `staging_log` (appended) |
-| Training (data scientist) | `train_and_test`, `champion_challenger` | folder `experiments` (Experiment Tracking), `test_results`, `promotion_log` (appended) |
-| Inference (inference owner) | `final_forecast` | saved model `cash_forecast` (one version per model ID), `final_forecast` (compressed), folder `forecast_archive`, `inference_log` (appended) |
-| Lab (data scientist) | `try_forecaster` | folder `lab_experiments` (Experiment Tracking, experiment `cashflow_lab`), `lab_results` (appended) |
-
-The zones only meet through three interfaces:
-
-1. **The data** (staging → training, lab and inference): `daily_flows` and `clients`.
-2. **The forecaster** (lab → training): a class described in `models.py`, with:
-   - `name` and `params`;
-   - `fit(daily, clients, cutoff)`;
-   - `predict(daily, clients, cutoff)`, which returns one row per client, category (and `TOTAL`) and months ahead
-     (1, 2, 3), with `p10`, `ev` and `p90` in SAR.
-
-   The project variable `forecaster` names the one that Retrain trains.
-3. **The active version of the saved model `cash_forecast`** (training → inference): `final_forecast` loads it and
-   writes its ID on every row. Inference reads nothing else from training.
-
-## The forecast (`final_forecast`)
-
-- **One row per active client**, with these columns:
-  - `client_no`, `cutoff_month`, `m1_month`, `m2_month`, `m3_month` (the 3 months forecast);
-  - `status`, `history_months`;
-  - the values: one column per category, month ahead and value, `TOTAL_m1_p10`, `TOTAL_m1_ev`, `TOTAL_m1_p90`,
-    `TOTAL_m2_p10`, … `UTILITIES_m3_p90` (TOTAL and every category of `warehouse.py`). A category the client doesn't
-    have stays empty;
-  - `model_id`, `forecaster` (the kind of model, for example `quantile_boosting`), `load_id`.
-- **Status:**
-  - `OK`;
-  - `NOT_ENOUGH_HISTORY`: less than 12 months of history (`MIN_HISTORY_MONTHS`), no values;
-  - `NO_POSTINGS`: an active client with no posting at all, no values. So every active client has its row.
-- The models still return one row per client, category and month ahead; `forecast.one_row_per_client` turns that
-  into the saved table.
-- **In chunks of clients:** the recipe reads `daily_flows` in chunks, spreads it over files on the server's disk by
-  client, then forecasts one file at a time: about `inference_clients_per_chunk` clients (project variable, 5,000
-  by default). Memory holds one chunk, whatever the number of clients. A bigger chunk is faster but needs more
-  memory; `inference_load_test.ipynb` measures both.
-- **Rule for the data scientist:** `predict` must give the same answer for a client whether it gets one chunk of
-  clients or all of them (the placeholders do: each client is forecast from its own history).
-- **Archive and log:** the same run writes the forecast, compressed, to the folder `forecast_archive`
-  (`forecast_<cut-off>_<model ID>.csv.gz`) and adds one row to `inference_log`:
-  - `status` (`SUCCESS` or `FAILED`) and the `error`: a failed run is logged too;
-  - the model (`model_id`, `forecaster`) and the load;
-  - `active_clients` = `clients_ok` + `clients_not_enough_history` + `clients_no_postings`;
-  - the rows read, the chunks, the seconds reading and forecasting (with writing), the most memory used.
-- **A failed run changes nothing:** every chunk is forecast first and kept on the server's disk; `final_forecast`
-  and the archive are only written once all of them worked.
-
-## Models: tracking, versions, promotion
-
-**Placeholder model: `quantile_boosting`, in `models.py`**
-- **3 models:** one for the EV, one for P10, one for P90 (scikit-learn gradient boosting; P10 and P90 with the
-  quantile loss, the EV with the median, which few huge months throw off far less than the mean).
-- **Not split by category:** each of the 3 models serves every category and TOTAL, with the category as one of its
-  inputs. So a category with little data learns from the others, and there are 3 models to track and promote, not 3
-  per category. The lab compares this with one set of 3 models per category (`quantile_boosting_by_category`).
-- **Inputs** per client and category: the last 12 months' net cash flow divided by the series' scale (so small and
-  large clients look alike), the category, how many months are known, the months ahead and the calendar month.
-- **Training:** the cut-offs of the last 24 months, at most 1,000,000 rows (`max_rows`: a fixed random sample
-  beyond that, so training stays bounded with 420k clients).
-- The 3 models are saved together in one version of `cash_forecast`, so they are always promoted together.
-- `recent_average` (no machine learning: the average of the last 3 months, P10 and P90 from the series' spread) is
-  kept to compare with and to fall back on.
-
-**Tracking**
-- Every run of `train_and_test` is one model, with a model ID like `CFF_202610_20261107T1000` (cut-off month,
-  training time).
-- It's recorded in **Experiment Tracking**, experiment `cashflow_forecast`:
-  - the forecaster and its settings;
-  - the test scores on the last 6 months, per level (TOTAL, categories) and per months ahead;
-  - the backtest forecaster;
-  - one MLflow model.
-
-**Versions:** that MLflow model is deployed as a new version of the saved model `cash_forecast`, named by the model
-ID. It isn't activated yet.
-
-**Promotion**
-- `champion_challenger` tests the new model and the production model on the same last 6 months, each with its
-  version trained without those months.
-- The rules are **project variables**, so you can change them without touching the code:
-
-| Variable | Default | The candidate is promoted only if |
-|---|---|---|
-| `promotion_min_coverage` | 0.70 | its P10–P90 coverage is at least this |
-| `promotion_max_coverage` | 0.90 | … and at most this (80% is the aim) |
-| `promotion_beat_simple_guess` | true | its EV error is lower than the simple guess (the same as the month before) |
-| `promotion_min_gain` | 0.0 | its EV error is lower than the production model's by more than this share (0.02 = 2%). A tie keeps production. |
-
-- With no production model to compare with, the new model is promoted (the forecast needs one), with a warning if
-  it fails the checks.
-- Each decision, its reason and the rules used are added to `promotion_log`.
-- "Promote if better" activates the version. To roll back, activate an earlier version of `cash_forecast`.
-
-## Trying other models (lab)
-
-The data scientist tries forecasters without touching production. They're tested the same way champion /
-challenger tests a model, next to the production model and the simple guess.
-
-**Notebook `forecast_lab.ipynb`**
-- **EDA:**
-  - the daily flows per category and per segment;
-  - the net cash flow per category over time;
-  - seasonality;
-  - one client day by day.
-- **Models to try** (with `lab_compare`):
-  - `quantile_boosting`, the production placeholder. Trained again here, it matches the production model's scores,
-    which checks that the test is the same.
-  - `quantile_boosting_by_category`: one set of 3 models per category instead of one shared set.
-  - `recent_average` and `recent_average_6m`: no machine learning.
-
-**Without a notebook:** set the project variable `lab_forecaster` and build `lab_results`.
-
-**To put a forecaster in production:**
-1. Add its class to `forecasters.py` and to `FORECASTERS`.
-2. Set the project variable `forecaster` to its name.
-3. Run **Retrain, test and promote**.
-
-## Scenarios
-
-| Scenario | Steps | Trigger (off in the sandbox) |
-|---|---|---|
-| Nightly batch | set the cut-off month → add the new days to the daily flows → forecast with the production model, archive it and log the run. It never trains. | daily, 06:00 Riyadh |
-| Retrain, test and promote | set the cut-off month → add the new days to the daily flows → train, test and deploy a new model → champion / challenger → promote if better. It doesn't forecast. | monthly, on the 5th at 07:00 Riyadh |
-| Full rebuild of the daily flows | set the cut-off month → empty `daily_flows` and `staging_log` → read the whole history again. It doesn't forecast: run the Nightly batch after it. | none: run by hand |
-
-**Alerts** (an email or a Teams message when a run fails) are planned, not built: [`alerts_plan.md`](alerts_plan.md).
-
-## Change the code
-
-The notebooks are assembled from `src/`. Edit those files, then run `python make_notebook.py`:
-
-- `src/warehouse.py`: the warehouse tables and columns, the codes, **the categories**, the daily sums and the
-  cut-off month
-- `src/library_cashflow.py`: the project library `cashflow.py`, shared by all zones (the data interface, days to
-  months, the saved model name)
-- `src/models.py`: the forecaster interface, the placeholders, the test and its scores, `lab_try` and `lab_compare`
-- `src/tracking.py`: model IDs, Experiment Tracking, saved model versions, **the promotion rules**, champion /
-  challenger
-- `src/forecast.py`: inference (the production model and the final forecast table)
-- `src/forecasters.py`: the first version of the data scientist's `forecasters.py`
-- `src/recipes/*.py`: one file per Python recipe
-- `src/cells/*.py` (setup notebook), `src/lab_cells/*.py` (lab notebook), `src/load_cells/*.py` (load test notebook)
-- `src/generate_data.py`, `src/simulator.py`, `src/sim_cells/*.py`: the warehouse simulator
+| File | What it is |
+|---|---|
+| `build_forecast_project.ipynb` | sets up the project |
+| `forecast_lab.ipynb` | the data scientist's lab: EDA and model comparison |
+| `warehouse_simulator.ipynb` | sandbox only: fake warehouse tables |
+| `inference_load_test.ipynb` | sandbox only: the 420k-client benchmark |
+| `alerts_plan.md` | planned email / Teams alerts (not built) |
+| `src/` | the code the notebooks are built from; edit it, then run `python make_notebook.py` |

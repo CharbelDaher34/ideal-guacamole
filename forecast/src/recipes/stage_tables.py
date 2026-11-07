@@ -4,13 +4,17 @@
 #   whole every run (it is small).
 #   daily_flows: the postings of FCT_STATEMENT_ENTRY summed per client, day and category (money in, money out):
 #   business clients only, no reversals, no transfers between the client's own accounts. Only the NEW days are read
-#   and added: the days after the last day already staged, up to the end of the cut-off month. When nothing is
-#   staged yet (the first run, or after the scenario Full rebuild), the whole history is read.
+#   from the warehouse: the days after the last day already staged, up to the end of the cut-off month. When nothing
+#   is staged yet (the first run, or after the scenario Full rebuild), the whole history is read.
+#   daily_flows is kept GROUPED BY CLIENT: all the rows of a client are next to each other (sorted by client, day,
+#   category within each group of clients). So when there are new days, it is written again: the rows already staged
+#   and the new ones, a group of clients at a time. Inference (and anyone else) can then read it in chunks of
+#   complete clients. When there is nothing new, daily_flows is not touched.
 #   staging_log: one row per run (appended), also when the run fails (status FAILED and the error): what was read,
 #   and the last day now in daily_flows.
 # A big read never sits in memory whole: the postings are spread over files on disk by TRNS_RFR (both sides of a
-# reversal or of an own-account transfer in the same file) and summed one file at a time; the totals are then spread
-# by client and added up one file at a time.
+# reversal or of an own-account transfer in the same file) and summed one file at a time; the new totals and the
+# rows already staged are then spread over files by client and written one file (a group of clients) at a time.
 import json
 import os
 import tempfile
@@ -24,6 +28,7 @@ from warehouse import (COLUMNS, TABLES, business_clients, daily_flows, to_standa
                        value_day)
 
 CHUNK, FILES = 200_000, 128
+ROWS_PER_GROUP = 1_000_000          # about this many daily_flows rows per group of clients when rewriting
 KEYS = ["client_no", "day", "category"]
 EMPTY = pd.DataFrame({"client_no": pd.Series(dtype=str), "day": pd.Series(dtype="datetime64[ns]"),
                       "category": pd.Series(dtype=str), "money_in": pd.Series(dtype=float),
@@ -64,7 +69,7 @@ def read_table(table, since=None):
 
 LOG = {"run_at": "string", "status": "string", "error": "string", "mode": "string", "cutoff_month": "string",
        "read_from": "string", "read_to": "string", "postings_read": "bigint", "postings_kept": "bigint",
-       "daily_rows_added": "bigint", "partial_write": "boolean", "last_day": "string", "postings_per_month": "string",
+       "daily_rows_added": "bigint", "daily_rows_total": "bigint", "partial_write": "boolean", "last_day": "string", "postings_per_month": "string",
        "clients": "bigint", "seconds": "double"}
 row = {"run_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), "cutoff_month": f"{cutoff:%Y-%m}",
        "read_to": f"{end - pd.Timedelta(days=1):%Y-%m-%d}", "partial_write": False}
@@ -87,6 +92,7 @@ def stage():
         for month, n in json.loads(months).items():
             staged[month] = staged.get(month, 0) + n
     last_day = pd.to_datetime(log["last_day"]).max() if len(log) else None
+    staged_rows = int(log.sort_values("run_at")["daily_rows_total"].iloc[-1]) if len(log) else 0
     if last_day is None:
         try:
             first = next(iter_dataset("daily_flows", rows=1, ignore_flow=True), EMPTY)
@@ -107,10 +113,8 @@ def stage():
     dataiku.Dataset("clients").write_with_schema(clients)
     row["clients"] = len(clients)
 
-    read_rows = kept = added = 0
+    read_rows = kept = added = total = 0
     new = {}                                       # postings per month read now
-    out = dataiku.Dataset("daily_flows")
-    out.write_schema_from_dataframe(EMPTY)
     with tempfile.TemporaryDirectory() as spread:
         if mode != "NOTHING_NEW":
             postings = Spread(os.path.join(spread, "postings"), FILES)
@@ -122,12 +126,13 @@ def stage():
                     last_day = max(value_day(chunk["value_date"]).max(), last_day or pd.Timestamp.min)
                     postings.add(chunk, chunk["txn_ref"].fillna(chunk["entry_id"].astype(str)))
             row.update(postings_read=read_rows, postings_kept=kept)
-            totals = Spread(os.path.join(spread, "totals"), FILES)
+            groups = Spread(os.path.join(spread, "groups"),
+                            max(16, -(-(staged_rows + kept) // ROWS_PER_GROUP)))   # groups of clients
             for part in postings.parts():
                 flows = daily_flows(part, numbers, cutoff)
                 for month, n in flows.groupby(flows["day"].dt.strftime("%Y-%m"))["postings"].sum().items():
                     new[month] = new.get(month, 0) + int(n)
-                totals.add(flows, "client_no")
+                groups.add(flows, "client_no")
 
         # the postings must reach the cut-off month: none, or far fewer than the month before, means a late load.
         # Checked before anything is added, so a failed run adds nothing and the next run reads the same days again.
@@ -138,16 +143,30 @@ def stage():
                              f"({before:,} the month before): the warehouse load for that month looks late or "
                              "partial")
 
-        if mode != "NOTHING_NEW":
+        if mode == "NOTHING_NEW":
+            total = staged_rows                    # daily_flows is not touched
+        else:
+            # the rows already staged join the new ones, by client; then daily_flows is written again, a group of
+            # clients at a time, each client's rows together
+            old = 0
+            for chunk in (iter_dataset("daily_flows", ignore_flow=True) if mode == "NEW_DAYS" else []):
+                groups.add(chunk[list(EMPTY.columns)], "client_no")
+                old += len(chunk)
+            if old != staged_rows:
+                raise ValueError(f"daily_flows has {old:,} rows but staging_log says {staged_rows:,}: run the "
+                                 "scenario Full rebuild of the daily flows")
+            out = dataiku.Dataset("daily_flows")
+            out.write_schema_from_dataframe(EMPTY)
             row["partial_write"] = True            # until the writing is done
             with out.get_writer() as writer:
-                for part in totals.parts():
+                for part in groups.parts():
                     part = (part.groupby(KEYS, as_index=False)[["money_in", "money_out", "postings"]].sum()
-                            .round({"money_in": 2, "money_out": 2}))
+                            .round({"money_in": 2, "money_out": 2}).sort_values(KEYS))
                     writer.write_dataframe(part[list(EMPTY.columns)])
-                    added += len(part)
+                    total += len(part)
             row["partial_write"] = False
-    row.update(postings_read=read_rows, postings_kept=kept, daily_rows_added=added,
+            added = total - old
+    row.update(postings_read=read_rows, postings_kept=kept, daily_rows_added=added, daily_rows_total=total,
                last_day=f"{last_day:%Y-%m-%d}", postings_per_month=json.dumps(dict(sorted(new.items()))))
 
 
@@ -164,4 +183,5 @@ except Exception as e:
 write_log("SUCCESS")
 print(f"{row['mode']}: {row['clients']:,} business clients; {row['postings_read']:,} postings read"
       + (f" from {row['read_from']}" if row["read_from"] else "") + f", {row['postings_kept']:,} kept; "
-      f"{row['daily_rows_added']:,} daily totals added; last day staged {row['last_day']}")
+      f"{row['daily_rows_added']:,} daily totals added, {row['daily_rows_total']:,} in daily_flows; last day staged "
+      f"{row['last_day']}")

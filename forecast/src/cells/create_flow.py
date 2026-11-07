@@ -44,8 +44,8 @@ FLOW = {
     "try_forecaster": (DATA + ["experiments"], ["lab_experiments", "lab_results"], "Lab"),
 }
 FOLDERS = ["experiments", "forecast_archive", "lab_experiments"]
-# each run adds rows: the logs, and daily_flows (staging adds the new days)
-APPENDED = ["daily_flows", "staging_log", "promotion_log", "inference_log", "lab_results"]
+# logs: each run adds rows
+APPENDED = ["staging_log", "promotion_log", "inference_log", "lab_results"]
 BUILT_BY_NAME = ["experiments", "promotion_log", "lab_experiments", "lab_results"]   # only built when asked by name
 
 try:                                                # needs the project's admin right

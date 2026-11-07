@@ -42,6 +42,45 @@ def iter_dataset(name, rows=1_000_000, columns=None, **kwargs):
         yield _plain(chunk)
 
 
+def iter_clients(name="daily_flows", clients=5000, rows=1_000_000, keep=None):
+    """daily_flows read in chunks of about `clients` COMPLETE clients: every row of a client is in the same chunk, so
+    memory holds one chunk of clients, never the whole table. Staging keeps daily_flows grouped by client, so it is
+    read straight through, rows read at a time. keep: a function applied to each read chunk first (a filter).
+    Stops with an error if a client's rows are not together (then run the scenario Full rebuild)."""
+    done, pending, tail = set(), None, None
+
+    def batch(out):
+        ids = set(out["client_no"])
+        if ids & done:
+            raise ValueError(f"{name} is not grouped by client (client {next(iter(ids & done))} is in two places): "
+                             "run the scenario Full rebuild of the daily flows")
+        done.update(ids)
+        return out.reset_index(drop=True)
+
+    for chunk in iter_dataset(name, rows=rows):
+        chunk = keep(chunk) if keep else chunk
+        if tail is not None:
+            chunk = pd.concat([tail, chunk], ignore_index=True)
+        if chunk.empty:
+            tail = None
+            continue
+        last = chunk["client_no"].iloc[-1]          # its rows may go on in the next chunk: kept for then
+        at_end = chunk["client_no"].eq(last)
+        tail = chunk[at_end]
+        pending = chunk[~at_end] if pending is None else pd.concat([pending, chunk[~at_end]], ignore_index=True)
+        ids = pending["client_no"].unique()
+        while len(ids) >= clients:                  # every full chunk of clients
+            first = pending["client_no"].isin(set(ids[:clients]))
+            yield batch(pending[first])
+            pending, ids = pending[~first], ids[clients:]
+    rest = [f for f in (pending, tail) if f is not None and len(f)]
+    if rest:
+        rest = pd.concat(rest, ignore_index=True)
+        ids = rest["client_no"].unique()
+        for i in range(0, len(ids), clients):
+            yield batch(rest[rest["client_no"].isin(set(ids[i:i + clients]))])
+
+
 def append_row(name, columns, row):
     """Add one row to a log dataset (an appended output of the recipe) with fixed column types, so that rows of
     failed runs (with empty values) never change how the earlier rows are read. columns: {name: Dataiku type}, one of
@@ -62,7 +101,7 @@ def append_row(name, columns, row):
 class Spread:
     """Rows spread over n files on local disk by the hash of a column, then read back one file at a time: all the
     rows with the same value of that column end up in the same file, and memory holds one file, not the whole table.
-    Used by staging (postings by reference, daily totals by client) and inference (daily flows by client)."""
+    Used by staging (postings by reference, then daily flows by client)."""
 
     def __init__(self, folder, n):
         import os
