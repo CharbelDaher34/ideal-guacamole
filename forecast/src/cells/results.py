@@ -9,4 +9,6 @@ one = final.loc[final["status"] == "OK", "client_no"].iloc[0]
 print(f"Final forecast: {final['client_no'].nunique()} clients, {len(final)} rows. One client, {one}:")
 display(final[final["client_no"] == one])
 print("Inference log (one row per forecast run):")
-display(dataiku.Dataset("inference_log").get_dataframe())
+display(dataiku.Dataset("inference_log").get_dataframe().sort_values("run_at"))
+print("Staging log (one row per staging run: what was read from the warehouse):")
+display(dataiku.Dataset("staging_log").get_dataframe().sort_values("run_at"))

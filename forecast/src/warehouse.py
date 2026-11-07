@@ -1,14 +1,16 @@
 """Warehouse tables (project library: python/warehouse.py).
 
-The forecast reads 2 tables of the bank's warehouse as they are, read-only, and creates nothing there:
+The forecast reads 2 tables of the bank's warehouse, read-only, and creates or writes nothing there:
     DIM_CUSTOMER          EDW.DIM_CUSTOMER: the clients. The project keeps the business clients (companies and sole
                           proprietors) and only the columns below: personal fields are never read.
-    FCT_STATEMENT_ENTRY   EDW.FCT_STATEMENT_ENTRY: the daily postings. The staging recipe reads them in chunks and
-                          sums them per client, day and category (money in, money out) in Dataiku, over each
-                          client's whole history: no query runs in the warehouse but reading the rows.
+    FCT_STATEMENT_ENTRY   EDW.FCT_STATEMENT_ENTRY: the daily postings. The staging recipe sums them per client, day
+                          and category (money in, money out) in Dataiku and adds the new days to daily_flows. Through
+                          the database connection, the only query is a read-only SELECT of the columns below with a
+                          date filter on VAL_DT (transactions_query): the whole history the first time (or after the
+                          scenario Full rebuild), then only the days after the last day already in daily_flows.
 Through the database connection to the warehouse (Oracle, read-only), or as CSV files in a landing folder; the setup
-notebook's settings choose. The sandbox's simulated tables are CSV. If a name or a code differs at the bank, only
-this file changes.
+notebook's settings choose. The sandbox's simulated tables are CSV (read whole, filtered by date in Dataiku). If a
+name or a code differs at the bank, only this file changes.
 """
 import numpy as np
 import pandas as pd
@@ -18,7 +20,7 @@ TABLES = {
     "clients": ("DIM_CUSTOMER", "EDW.DIM_CUSTOMER"),
     "transactions": ("FCT_STATEMENT_ENTRY", "EDW.FCT_STATEMENT_ENTRY"),
 }
-STAGED = ["clients", "daily_flows"]       # what the staging recipe writes
+STAGED = ["clients", "daily_flows", "staging_log"]       # what the staging recipe writes
 
 # Categories: each posting gets one from its transaction type (TRNS_TYP); a type not listed goes to OTHER.
 # MOCK LIST: these are the sample data's types. At the bank, replace it with the real TRNS_TYP codes (ask the
@@ -82,6 +84,28 @@ def business_clients(clients):
     return clients[business].drop_duplicates("client_no", keep="last").reset_index(drop=True)
 
 
+def value_day(dates):
+    """The day of each value date, as a plain (time zone free) timestamp."""
+    d = pd.to_datetime(pd.Series(dates))
+    if getattr(d.dt, "tz", None) is not None:
+        d = d.dt.tz_convert(None)
+    return d.dt.normalize()
+
+
+def transactions_query(table, since, end):
+    """The read-only query staging runs through the database connection: the columns read (COLUMNS) of the
+    postings with a value date from since (None: the whole history) to before end. table: the table's full quoted
+    name. The value date comes back as text YYYY-MM-DD (TO_CHAR: Oracle and PostgreSQL), so no time zone can move
+    it."""
+    date = COLUMNS["transactions"]["value_date"]
+    columns = [f"TO_CHAR(\"{date}\", 'YYYY-MM-DD') AS \"{date}\"" if c == date else f'"{c}"'
+               for c in COLUMNS["transactions"].values()]
+    where = [f"\"{date}\" < DATE '{end:%Y-%m-%d}'"]
+    if since is not None:
+        where.insert(0, f"\"{date}\" >= DATE '{since:%Y-%m-%d}'")
+    return f"SELECT {', '.join(columns)} FROM {table} WHERE {' AND '.join(where)}"
+
+
 def category(txn_type):
     """The category of each posting, from its transaction type (CATEGORY_OF_TYPE; OTHER if not listed)."""
     return txn_type.fillna("").astype(str).str.strip().str.upper().map(CATEGORY_OF_TYPE).fillna(OTHER)
@@ -94,7 +118,7 @@ def daily_flows(entries, client_numbers, cutoff):
     (a debit and a credit with the same TRNS_RFR on the same client, netting to zero). The staging recipe calls it on
     postings grouped so that all the postings of a TRNS_RFR are together."""
     e = entries[entries["client_no"].isin(set(client_numbers))].copy()
-    e["day"] = pd.to_datetime(e["value_date"]).dt.normalize()
+    e["day"] = value_day(e["value_date"])
     e = e[e["day"] < cutoff + pd.DateOffset(months=1)]
     marked = e["reversal"].notna() & ~e["reversal"].astype(str).str.strip().isin(["", "nan", "None"])
     e = e[~e["txn_ref"].isin(set(e.loc[marked, "txn_ref"].dropna()))]
@@ -126,6 +150,16 @@ def set_cutoff():
     project.set_variables(variables)
     print(f"Cut-off month {cutoff} (data as of {as_of:%Y-%m-%d})" + (" (cutoff_override)" if override else ""))
     return str(cutoff)
+
+
+def clear_daily_flows():
+    """First step of the scenario Full rebuild (after the cut-off): empties daily_flows and staging_log, so that the
+    staging recipe reads the whole history again. Run as: from warehouse import clear_daily_flows; clear_daily_flows()"""
+    import dataiku
+    project = dataiku.api_client().get_default_project()
+    for name in ("daily_flows", "staging_log"):
+        project.get_dataset(name).clear()
+    print("daily_flows and staging_log emptied: the staging recipe will read the whole history")
 
 
 for _table, _columns in COLUMNS.items():          # warehouse names unique within a table

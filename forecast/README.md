@@ -2,7 +2,8 @@
 
 A Dataiku project that forecasts, for each business client, the net cash flow (money in minus money out) of each of
 the next 3 months, **per category and in TOTAL**, as one value with a range (P10, EV, P90). It is set up the way it
-runs in production, in a single project, and stores all its data as CSV files. For a plain-words explanation of how
+runs in production, in a single project, and stores all its data as CSV files (compressed for the big ones). It is
+built for the bank's ~420k clients: staging reads only the new days, and inference works in chunks of clients. For a plain-words explanation of how
 it works, see [`../docs/cashflow_forecast_design.html`](../docs/cashflow_forecast_design.html).
 
 **Who owns what:**
@@ -11,12 +12,13 @@ it works, see [`../docs/cashflow_forecast_design.html`](../docs/cashflow_forecas
 - **The model is a placeholder**, `recent_average` (no machine learning), until the data scientist's models replace
   it through the forecaster interface.
 
-There are three notebooks, all in the same project:
+There are four notebooks:
 
 | Notebook | Role |
 |---|---|
 | [`warehouse_simulator.ipynb`](warehouse_simulator.ipynb) | **Sandbox only.** Plays the warehouse: writes sample `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` tables as CSV datasets of the project. |
 | [`build_forecast_project.ipynb`](build_forecast_project.ipynb) | Sets up the project (and names it Digital Cash Management Forecast): the flow, the first model, the scenarios and the first nightly batch. |
+| [`inference_load_test.ipynb`](inference_load_test.ipynb) | **Sandbox only, never in production.** Replaces `clients` and `daily_flows` with fake data for 420k clients, times the forecast and its memory, then puts the real data back. Run it on the bank's server as its benchmark. |
 | [`forecast_lab.ipynb`](forecast_lab.ipynb) | **The data scientist's lab.** An EDA of the daily flows, then several forecasters compared side by side with the production model on the same test. Each try is recorded in Experiment Tracking, and nothing here touches production. It opens in the code env's kernel. |
 
 ## Run it
@@ -35,12 +37,14 @@ There are three notebooks, all in the same project:
    - **Rights:** it needs no admin right on the project. Without one, it can't rename the project and says so.
    - **Running it again in the same project** keeps what already exists (data, saved model versions, zones,
      scenario history) and updates the recipes' code.
-4. **Every night after a load:** Scenarios → **Nightly batch** → Run. To retrain: **Retrain, test and promote**.
+4. **Every night after a load:** Scenarios → **Nightly batch** → Run. To retrain: **Retrain, test and promote**. To
+   read the whole history again: **Full rebuild of the daily flows** (by hand).
 
 ### In production: connect to the warehouse
 
-Nothing is created or run in the warehouse. The project only reads `EDW.DIM_CUSTOMER` and `EDW.FCT_STATEMENT_ENTRY`
-as they are.
+Nothing is created or written in the warehouse. The project only reads `EDW.DIM_CUSTOMER` and
+`EDW.FCT_STATEMENT_ENTRY`, with one read-only query: a `SELECT` of the columns it uses with a date filter on
+`VAL_DT`.
 
 1. **Ask a Dataiku admin once** for a read-only database connection to the warehouse (Oracle), usable by your
    group, for example named `EDW`.
@@ -77,6 +81,21 @@ are all in `src/warehouse.py`, the only file to change if they differ at the ban
 - The staging recipe reads the postings in chunks, keeps the business clients' postings up to the end of the
   cut-off month, and sums them per client, day and category.
 - Reversed postings (and what they reverse) are left out, and so are transfers between the client's own accounts.
+- Big reads never sit in memory whole: the postings are spread over files on the server's disk, then summed one file
+  at a time.
+
+**Only the new days are read**
+- The first run reads the whole history once.
+- After that, each run reads only the postings after the last day already in `daily_flows`, up to the end of the
+  cut-off month, and **adds** them to `daily_flows`. Through the database connection the warehouse does the filter
+  (`WHERE VAL_DT >= …`), so only the new rows travel. From CSV files (sandbox, landing folder) the whole file is read
+  and filtered in Dataiku.
+- `staging_log` gets one row per run: `FULL`, `NEW_DAYS` or `NOTHING_NEW`, the days read, the rows read and added,
+  and the last day now in `daily_flows`.
+- **Full rebuild of the daily flows** (a scenario run by hand) empties `daily_flows` and `staging_log`, then reads
+  the whole history again. Use it when old days must be rebuilt: for example after a reversal cancels a posting from
+  a day already staged (the nightly read only looks at new days, so it can't take that posting out), or after the
+  categories in `warehouse.py` change.
 
 **Cut-off month**
 - It's the month before today, unless the project variable `cutoff_override` (YYYY-MM) is set; the simulator sets
@@ -92,9 +111,9 @@ TOTAL) and month, for the models that work by month.
 | Zone | Recipes | Outputs (CSV files unless noted) |
 |---|---|---|
 | Raw data | (the simulator, or the read-only warehouse) | `DIM_CUSTOMER`, `FCT_STATEMENT_ENTRY` |
-| Staging | `stage_tables` | `clients`, `daily_flows` |
+| Staging | `stage_tables` | `clients`, `daily_flows` (new days added, compressed), `staging_log` (appended) |
 | Training (data scientist) | `train_and_test`, `champion_challenger` | folder `experiments` (Experiment Tracking), `test_results`, `promotion_log` (appended) |
-| Inference (inference owner) | `final_forecast`, `archive_forecast` | saved model `cash_forecast` (one version per model ID), `final_forecast`, folder `forecast_archive`, `inference_log` (appended) |
+| Inference (inference owner) | `final_forecast` | saved model `cash_forecast` (one version per model ID), `final_forecast` (compressed), folder `forecast_archive`, `inference_log` (appended) |
 | Lab (data scientist) | `try_forecaster` | folder `lab_experiments` (Experiment Tracking, experiment `cashflow_lab`), `lab_results` (appended) |
 
 The zones only meet through three interfaces:
@@ -118,8 +137,15 @@ The zones only meet through three interfaces:
   - `history_months`, `status`, `model_id`, `load_id`.
 - **Not enough history:** a client with less than 12 months of history (`MIN_HISTORY_MONTHS`) gets no values, and
   its status is `NOT_ENOUGH_HISTORY`.
-- **For now, all the rows are computed in one go.** That's fine for the sample data. Making inference handle the
-  bank's ~420k clients is the next step.
+- **In chunks of clients:** the recipe reads `daily_flows` in chunks, spreads it over files on the server's disk by
+  client, then forecasts one file at a time: about `inference_clients_per_chunk` clients (project variable, 5,000
+  by default). Memory holds one chunk, whatever the number of clients. A bigger chunk is faster but needs more
+  memory; `inference_load_test.ipynb` measures both.
+- **Rule for the data scientist:** `predict` must give the same answer for a client whether it gets one chunk of
+  clients or all of them (the placeholder does: each client is forecast from its own history).
+- **Archive and log:** the same run writes the forecast, compressed, to the folder `forecast_archive`
+  (`forecast_<cut-off>_<model ID>.csv.gz`) and adds one row to `inference_log`: the model and load, the clients and
+  rows, the chunks, the seconds spent reading and forecasting, and the most memory used (`peak_memory_mb`).
 
 ## Models: tracking, versions, promotion
 
@@ -187,8 +213,9 @@ challenger tests a model, next to the production model and the simple guess.
 
 | Scenario | Steps | Trigger (off in the sandbox) |
 |---|---|---|
-| Nightly batch | set the cut-off month → build the daily flows → forecast with the production model, archive it and log the run. It never trains. | daily, 06:00 Riyadh |
-| Retrain, test and promote | set the cut-off month → build the daily flows → train, test and deploy a new model → champion / challenger → promote if better. It doesn't forecast. | monthly, on the 5th at 07:00 Riyadh |
+| Nightly batch | set the cut-off month → add the new days to the daily flows → forecast with the production model, archive it and log the run. It never trains. | daily, 06:00 Riyadh |
+| Retrain, test and promote | set the cut-off month → add the new days to the daily flows → train, test and deploy a new model → champion / challenger → promote if better. It doesn't forecast. | monthly, on the 5th at 07:00 Riyadh |
+| Full rebuild of the daily flows | set the cut-off month → empty `daily_flows` and `staging_log` → read the whole history again. It doesn't forecast: run the Nightly batch after it. | none: run by hand |
 
 ## Change the code
 
@@ -204,5 +231,5 @@ The notebooks are assembled from `src/`. Edit those files, then run `python make
 - `src/forecast.py`: inference (the production model and the final forecast table)
 - `src/forecasters.py`: the first version of the data scientist's `forecasters.py`
 - `src/recipes/*.py`: one file per Python recipe
-- `src/cells/*.py` (setup notebook) and `src/lab_cells/*.py` (lab notebook)
+- `src/cells/*.py` (setup notebook), `src/lab_cells/*.py` (lab notebook), `src/load_cells/*.py` (load test notebook)
 - `src/generate_data.py`, `src/simulator.py`, `src/sim_cells/*.py`: the warehouse simulator

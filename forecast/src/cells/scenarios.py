@@ -1,13 +1,14 @@
 # Production runs: two independent scenarios. Nightly batch (inference) forecasts with the active version of the saved
 # models; Retrain, test and promote (training) adds a version and activates it if it is better, and never forecasts.
-# Each starts by setting the cut-off month (a Python step); the staging recipe stops if the postings do not reach
-# it. The tracked models (folder experiments) and the promotion log are only rebuilt when built by name, so the
+# Each starts by setting the cut-off month (a Python step); the staging recipe adds the new days to daily_flows and
+# stops if the postings do not reach the cut-off month. A third one, Full rebuild of the daily flows, has no trigger:
+# run it by hand to read the whole history again. The tracked models (folder experiments) and the promotion log are only rebuilt when built by name, so the
 # nightly batch never retrains by accident.
 def step(n, label, what, mode=None):
     common = {"id": f"step_{n}", "name": label, "enabled": True, "runConditionType": "RUN_IF_STATUS_MATCH",
               "runConditionStatuses": ["SUCCESS", "WARNING"]}
     if isinstance(what, str):           # a Python step: library function to call
-        module = "warehouse" if what == "set_cutoff" else "tracking"
+        module = "warehouse" if what in ("set_cutoff", "clear_daily_flows") else "tracking"
         return {**common, "type": "custom_python", "params": {
             "script": f"from {module} import {what}\n\n{what}()\n", "envSelection": {"envMode": "INHERIT"},
             "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
@@ -34,6 +35,14 @@ SCENARIOS = {
             ("Champion / challenger", ["promotion_log"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Promote if better", "apply_promotion"),
         ]),
+    "Full rebuild of the daily flows": (
+        "Run by hand: empties daily_flows and staging_log, then reads the whole history from the warehouse again "
+        "(the nightly runs only read the new days). For example after a reversal cancels a posting of a day already "
+        "staged. It does not forecast: run the Nightly batch after it", None, [
+            ("Set the cut-off month", "set_cutoff"),
+            ("Empty the daily flows", "clear_daily_flows"),
+            ("Read the whole history again", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
+        ]),
 }
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}
 for name, (description, schedule, steps) in SCENARIOS.items():
@@ -47,6 +56,9 @@ for name, (description, schedule, steps) in SCENARIOS.items():
     scenario = project.create_scenario(name, "step_based", {
         "active": False, "description": description,
         "params": {"steps": [step(n, *s) for n, s in enumerate(steps)]}})
+    if schedule is None:                           # run by hand only
+        print(f"Scenario ready: {name} (no trigger: run it by hand)")
+        continue
     settings = scenario.get_settings()
     if schedule == "daily":
         settings.add_daily_trigger(hour=6, timezone="Asia/Riyadh")

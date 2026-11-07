@@ -19,16 +19,64 @@ MIN_HISTORY_MONTHS = 12     # a client needs this many months before the cut-off
 FORECAST_COLUMNS = ["client_no", "category", "months_ahead", "p10", "ev", "p90"]   # what a forecaster returns
 
 
-def read_dataset(name, columns=None):
-    """A dataset as a DataFrame, with dates as plain (time zone free) timestamps and client numbers as text."""
-    import dataiku
-    df = dataiku.Dataset(name).get_dataframe(columns=columns)
+def _plain(df):
+    """Dates as plain (time zone free) timestamps, client numbers as text."""
     for c in df.columns:
         if isinstance(df[c].dtype, pd.DatetimeTZDtype):
             df[c] = df[c].dt.tz_convert(None)
     if "client_no" in df:
         df["client_no"] = df["client_no"].astype(str)
     return df
+
+
+def read_dataset(name, columns=None):
+    """A dataset as a DataFrame, with dates as plain (time zone free) timestamps and client numbers as text."""
+    import dataiku
+    return _plain(dataiku.Dataset(name).get_dataframe(columns=columns))
+
+
+def iter_dataset(name, rows=1_000_000, columns=None, **kwargs):
+    """A dataset read in chunks of rows (DataFrames, like read_dataset), so a big one never sits in memory whole."""
+    import dataiku
+    for chunk in dataiku.Dataset(name, **kwargs).iter_dataframes(chunksize=rows, columns=columns):
+        yield _plain(chunk)
+
+
+class Spread:
+    """Rows spread over n files on local disk by the hash of a column, then read back one file at a time: all the
+    rows with the same value of that column end up in the same file, and memory holds one file, not the whole table.
+    Used by staging (postings by reference, daily totals by client) and inference (daily flows by client)."""
+
+    def __init__(self, folder, n):
+        import os
+        os.makedirs(folder, exist_ok=True)
+        self.n = max(1, int(n))
+        self.paths = [os.path.join(folder, f"part_{i}.pkl") for i in range(self.n)]
+
+    def add(self, df, key):
+        """key: a column name, or a Series (same index as df) to spread by."""
+        import pickle
+        key = df[key] if isinstance(key, str) else key
+        part = pd.util.hash_pandas_object(key.astype(str), index=False).to_numpy() % self.n
+        for i, rows in df.groupby(part):
+            with open(self.paths[i], "ab") as f:
+                pickle.dump(rows, f, protocol=4)
+
+    def parts(self):
+        """Each file's rows (a DataFrame); files that got no rows are skipped."""
+        import os
+        import pickle
+        for path in self.paths:
+            if not os.path.exists(path):
+                continue
+            frames = []
+            with open(path, "rb") as f:
+                while True:
+                    try:
+                        frames.append(pickle.load(f))
+                    except EOFError:
+                        break
+            yield pd.concat(frames, ignore_index=True)
 
 
 def month_start(dates):

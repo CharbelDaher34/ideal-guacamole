@@ -25,9 +25,10 @@ tracking = load_module("tracking", TRACKING_CODE)
 RAW = [warehouse_table for warehouse_table, _ in warehouse.TABLES.values()]
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
+COMPRESSED = ["daily_flows", "final_forecast"]       # the big ones: compressed CSV (gz)
 
-# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file; experiments, forecast_archive and
-# lab_experiments are folders; cash_forecast is the saved model.
+# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file (compressed for the big ones);
+# experiments, forecast_archive and lab_experiments are folders; cash_forecast is the saved model.
 # Each zone has an owner, and the zones only meet through three interfaces:
 #   1. the data: daily_flows and clients (Staging) -> Training, Lab and Inference
 #   2. the forecaster (models.py): lab -> training. The project variable forecaster names the one Retrain trains;
@@ -38,12 +39,13 @@ FLOW = {
     "stage_tables": (RAW, warehouse.STAGED, "Staging"),
     "train_and_test": (DATA, ["experiments", "test_results"], "Training"),
     "champion_challenger": (DATA + ["experiments"], ["promotion_log"], "Training"),
-    "final_forecast": (DATA + [cashflow.SAVED_MODEL], ["final_forecast"], "Inference"),
-    "archive_forecast": (["final_forecast"], ["forecast_archive", "inference_log"], "Inference"),
+    "final_forecast": (DATA + [cashflow.SAVED_MODEL], ["final_forecast", "forecast_archive", "inference_log"],
+                       "Inference"),
     "try_forecaster": (DATA + ["experiments"], ["lab_experiments", "lab_results"], "Lab"),
 }
 FOLDERS = ["experiments", "forecast_archive", "lab_experiments"]
-APPENDED = ["promotion_log", "inference_log", "lab_results"]      # logs: each run adds rows
+# each run adds rows: the logs, and daily_flows (staging adds the new days)
+APPENDED = ["daily_flows", "staging_log", "promotion_log", "inference_log", "lab_results"]
 BUILT_BY_NAME = ["experiments", "promotion_log", "lab_experiments", "lab_results"]   # only built when asked by name
 
 try:                                                # needs the project's admin right
@@ -67,14 +69,16 @@ if not python_folder.get_file("forecasters.py"):
     print("forecasters.py created (the data scientist's forecasters)")
 
 # project variables, kept if they are already set: forecaster (the one Retrain trains), lab_forecaster (the one the
-# recipe try_forecaster tries)
+# recipe try_forecaster tries), inference_clients_per_chunk (how many clients final_forecast forecasts at a time)
 variables = project.get_variables()
-defaults = {"forecaster": "recent_average", "lab_forecaster": "recent_average_6m", **tracking.PROMOTION_RULES}
+defaults = {"forecaster": "recent_average", "lab_forecaster": "recent_average_6m",
+            "inference_clients_per_chunk": 5000, **tracking.PROMOTION_RULES}
 missing = {k: v for k, v in defaults.items() if variables["standard"].get(k) in (None, "")}
 if missing:
     variables["standard"].update(missing)
     project.set_variables(variables)
-print("Forecasters: Retrain trains {forecaster}, the lab tries {lab_forecaster}".format(**variables["standard"]))
+print("Forecasters: Retrain trains {forecaster}, the lab tries {lab_forecaster}; inference forecasts "
+      "{inference_clients_per_chunk} clients at a time".format(**variables["standard"]))
 print("Promotion rules:", {k: variables["standard"][k] for k in tracking.PROMOTION_RULES})
 
 
@@ -93,7 +97,7 @@ def new_dataset(name):
     dataset = project.new_managed_dataset(name).with_store_into(CONNECTION).create()
     settings = dataset.get_settings()
     settings.get_raw()["formatType"] = "csv"
-    settings.get_raw()["formatParams"].update(CSV)
+    settings.get_raw()["formatParams"].update(CSV, compress="gz" if name in COMPRESSED else "")
     if name in BUILT_BY_NAME:
         settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
     settings.save()
@@ -117,7 +121,9 @@ for name in RAW:
         continue
     datasets.add(name)
     if WAREHOUSE_SQL_CONNECTION:
-        project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name, WAREHOUSE_SQL_SCHEMA)
+        dataset = project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name,
+                                                   WAREHOUSE_SQL_SCHEMA)
+        dataset.autodetect_settings().save()       # the table's columns, read from the database
     else:
         dataset = project.create_dataset(name, "Filesystem", params={"connection": LANDING_CONNECTION,
                                                                      "path": "/" + name},

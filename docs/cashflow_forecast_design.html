@@ -120,7 +120,7 @@ flowchart LR
 
 <section>
   <h2><span class="n">3</span>The data</h2>
-  <p>The project reads 2 tables of the bank's warehouse as they are, read-only, through the database connection (Oracle) or as CSV files in a landing folder. Nothing is created or run in the warehouse. Until the connection is set, a simulator writes sample tables shaped like the bank's.</p>
+  <p>The project reads 2 tables of the bank's warehouse, read-only, through the database connection (Oracle) or as CSV files in a landing folder. Nothing is created or written in the warehouse: the only query is a read-only <code>SELECT</code> with a date filter. Until the connection is set, a simulator writes sample tables shaped like the bank's.</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Table</th><th>What the project reads</th><th>What it becomes, in Dataiku</th></tr></thead>
@@ -134,6 +134,8 @@ flowchart LR
     <li><strong>Categories</strong> come from each posting's transaction type (<code>TRNS_TYP</code>), through one list in <code>warehouse.py</code>; a type not in the list goes to OTHER. The list is a <strong>mock</strong> for now (customer receipts, salaries, rent, suppliers, financing, government, utilities, cards, fees, other): at the bank it is replaced by the real codes, and nothing else changes.</li>
     <li>The client number (<code>CSTMR_CIF</code>) ties the 2 tables together.</li>
     <li>Each client's whole history is kept: no cut at 2 or 5 years.</li>
+    <li><strong>Only the new days are read.</strong> The first run reads the whole history once. After that, each run reads only the postings after the last day already in <code>daily_flows</code> (<code>WHERE VAL_DT &gt;= …</code>) and adds them. <code>staging_log</code> records each read.</li>
+    <li><strong>Full rebuild</strong>, a scenario run by hand, empties <code>daily_flows</code> and reads the whole history again: for example after a reversal cancels a posting from a day already staged, which a nightly read can't take out.</li>
   </ul>
 </section>
 
@@ -234,7 +236,7 @@ flowchart LR
 
 <section>
   <h2><span class="n">8</span>What gets built in Dataiku</h2>
-  <p>A setup notebook builds the project in a Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file. Two independent scenarios run it: <strong>Nightly batch</strong> after each warehouse load (never trains), and <strong>Retrain, test and promote</strong> (monthly, or when needed; never forecasts). The zones only meet through three interfaces: <strong>1. the data</strong> (<code>daily_flows</code>, <code>clients</code>), <strong>2. the forecaster</strong> (lab → training), <strong>3. the active version of the saved model</strong> (training → inference, the only thing inference reads from training).</p>
+  <p>A setup notebook builds the project in a Dataiku project (a few minutes with the small sample data, including the first model). It needs no admin right, and it can be run again in the same project: what exists is kept and the recipes' code is updated. Every dataset is a CSV file (compressed for the big ones, <code>daily_flows</code> and <code>final_forecast</code>). Two independent scenarios run it: <strong>Nightly batch</strong> after each warehouse load (never trains), and <strong>Retrain, test and promote</strong> (monthly, or when needed; never forecasts). A third one, <strong>Full rebuild of the daily flows</strong>, is run by hand. The zones only meet through three interfaces: <strong>1. the data</strong> (<code>daily_flows</code>, <code>clients</code>), <strong>2. the forecaster</strong> (lab → training), <strong>3. the active version of the saved model</strong> (training → inference, the only thing inference reads from training).</p>
   <div class="figure">
 <pre class="mermaid">
 flowchart TB
@@ -242,7 +244,8 @@ flowchart TB
     R[(EDW.DIM_CUSTOMER, EDW.FCT_STATEMENT_ENTRY)]
   end
   subgraph Z0[Staging]
-    ST[stage_tables: business clients, postings summed per day and category] --> S17[(clients, daily_flows)]
+    ST[stage_tables: business clients, new days summed per day and category] --> S17[(clients, daily_flows)]
+    ST --> SL[(staging_log: one row per read)]
   end
   subgraph Z3[Training: monthly, data scientist]
     P4[train_and_test: one model ID] --> EX[(experiments: Experiment Tracking)]
@@ -251,8 +254,9 @@ flowchart TB
   end
   subgraph Z5[Inference: nightly, inference owner]
     SM[(saved model cash_forecast: one version per model ID)]
-    F[final_forecast: active version, model_id, load_id] --> AF[archive_forecast] --> AR[(forecast_archive)]
-    AF --> IL[(inference_log: one row per run)]
+    F[final_forecast: active version, chunks of clients] --> FF[(final_forecast)]
+    F --> AR[(forecast_archive)]
+    F --> IL[(inference_log: one row per run)]
   end
   subgraph Z6[Lab: data scientist]
     LT[try_forecaster: the forecaster lab_forecaster names] --> LRS[(lab_results)]
@@ -274,7 +278,7 @@ flowchart TB
 
 <section>
   <h2><span class="n">9</span>Inference log</h2>
-  <p>Every forecast run adds one row to <code>inference_log</code> (in the Inference zone) and keeps the forecast as it was made in the folder <code>forecast_archive</code>.</p>
+  <p>The recipe <code>final_forecast</code> is built for the bank's ~420,000 clients: it forecasts a chunk of clients at a time (project variable <code>inference_clients_per_chunk</code>, 5,000 by default), so memory holds one chunk whatever the number of clients. Every run adds one row to <code>inference_log</code> (in the Inference zone) and keeps the forecast as it was made, compressed, in the folder <code>forecast_archive</code>.</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Column</th><th>What it says</th></tr></thead>
@@ -283,6 +287,8 @@ flowchart TB
       <tr><td><code>load_id</code>, <code>as_of_date</code>, <code>cutoff_month</code></td><td>Which warehouse load it used, and the last full month</td></tr>
       <tr><td><code>model_id</code></td><td>Which model made the forecast: the active version (when it was promoted is in <code>promotion_log</code>)</td></tr>
       <tr><td><code>clients</code>, <code>clients_not_enough_history</code>, <code>forecast_rows</code></td><td>What it produced</td></tr>
+      <tr><td><code>daily_rows_read</code>, <code>chunks</code></td><td>How much it read, in how many chunks of clients</td></tr>
+      <tr><td><code>seconds_reading</code>, <code>seconds_forecasting</code>, <code>seconds_total</code>, <code>peak_memory_mb</code></td><td>How long each step took, and the most memory the run used</td></tr>
       <tr><td><code>archive_file</code></td><td>The run's file in <code>forecast_archive</code></td></tr>
     </tbody>
   </table>
@@ -307,9 +313,9 @@ flowchart TB
     <div class="card">
       <h3>To check</h3>
       <ul>
-        <li><strong>Scale:</strong> the bank has about 420,000 clients. Today staging and inference handle all clients in one go, which is fine for the sample data; the next step is to make them handle that many (batches of clients, and reading only the new days each night).</li>
+        <li><strong>Scale:</strong> staging reads only the new days and inference works in chunks of clients, tested here with 420,000 fake clients (notebook <code>inference_load_test.ipynb</code>). Run the same test on the bank's server, as its benchmark, to set the chunk size; partitions or parallel chunks only if it is still too slow.</li>
         <li>The real transaction type codes (<code>TRNS_TYP</code>) and the categories they map to, to replace the mock list.</li>
-        <li>Reading the whole of <code>FCT_STATEMENT_ENTRY</code> every run: check the reading time on the real table.</li>
+        <li>The first read of the whole of <code>FCT_STATEMENT_ENTRY</code> (and each Full rebuild): check how long it takes on the real table. Training still reads all clients at once: train on a sample of clients when that gets too heavy.</li>
         <li>Code env: a Python code env with <code>scikit-learn</code> and <code>mlflow 2.22.0</code> (Python 3.9) or <code>3.10.1</code> (Python 3.10 or later). We cannot create one: a Dataiku admin creates it once.</li>
         <li>The codes the project relies on (status values, retail line of business, commercial registration, sole proprietor legal entities): confirm them on business clients. If they differ, only <code>warehouse.py</code> changes.</li>
       </ul>

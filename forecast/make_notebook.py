@@ -1,13 +1,12 @@
 """Assemble the notebooks from the files in src/ (edit those, then run: python make_notebook.py):
-build_forecast_project.ipynb (sets up the forecast project), forecast_lab.ipynb (the data scientist's lab) and
-warehouse_simulator.ipynb (sandbox only)."""
+build_forecast_project.ipynb (sets up the forecast project), forecast_lab.ipynb (the data scientist's lab),
+warehouse_simulator.ipynb and inference_load_test.ipynb (sandbox only)."""
 import json
 from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast", "archive_forecast",
-           "try_forecaster"]
+RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast", "try_forecaster"]
 
 
 def code(text):
@@ -43,10 +42,11 @@ write("build_forecast_project.ipynb", [
 # Digital Cash Management Forecast: set up the project
 
 This notebook sets up the Digital Cash Management Forecast in this Dataiku project (it also gives the project
-that name), the way it runs in production. Everything the project writes is a CSV file. It reads 2 warehouse tables
-as they are, read-only, and creates nothing in the warehouse: the clients (`EDW.DIM_CUSTOMER`) and the daily
-postings (`EDW.FCT_STATEMENT_ENTRY`), which the staging recipe sums per client, day and category in Dataiku, over
-each client's whole history. In the sandbox, they are the datasets the notebook `warehouse_simulator.ipynb` wrote in
+that name), the way it runs in production. Everything the project writes is a CSV file (compressed for the big ones).
+It reads 2 warehouse tables, read-only, and creates or writes nothing in the warehouse: the clients
+(`EDW.DIM_CUSTOMER`) and the daily postings (`EDW.FCT_STATEMENT_ENTRY`), which the staging recipe sums per client,
+day and category in Dataiku. The first run reads each client's whole history; after that, each run reads only the
+new days (through the database connection, a `SELECT` with a date filter) and adds them to `daily_flows`. In the sandbox, they are the datasets the notebook `warehouse_simulator.ipynb` wrote in
 this project; in production, the warehouse's tables through the read-only database connection
 `WAREHOUSE_SQL_CONNECTION` (or CSV files in the landing folder). Names, codes and the categories (a mock list until
 the bank's transaction types are known): `python/warehouse.py` in the project library.
@@ -55,13 +55,15 @@ It forecasts, per client, per category and in TOTAL (all categories together), t
 money out) of each of the next 3 months, as P10, EV and P90. It builds 5 flow zones, each with an owner:
 
 - **Raw data** and **Staging** (shared): the 2 warehouse tables, read-only, then `clients` (the business clients)
-  and `daily_flows` (money in and out per client, day and category): what every model gets.
+  and `daily_flows` (money in and out per client, day and category): what every model gets. `staging_log` records
+  each read.
 - **Training** (data scientist): each training run is one model with its own **model ID**, trained with the
   **forecaster** the project variable `forecaster` names, tested on the last 6 months, tracked in Dataiku's
   **Experiment Tracking** and deployed as a new **version** of the saved model `cash_forecast`. A champion /
   challenger test activates the new version if it passes the **promotion rules** (project variables `promotion_*`).
-- **Inference** (inference owner): `final_forecast`, the production model's forecast for every active client (every
-  row says which model and which load produced it), the forecast archive, and the inference log (one row per run).
+- **Inference** (inference owner): `final_forecast`, the production model's forecast for every active client, made
+  a chunk of clients at a time so it scales to the bank's ~420k clients (every row says which model and which load
+  produced it), the forecast archive, and the inference log (one row per run, with timings and memory).
 - **Lab** (data scientist): `try_forecaster` tries the forecaster the project variable `lab_forecaster` names
   against the production model and adds the result to `lab_results`, without touching production. The notebook
   `forecast_lab.ipynb` does the same interactively.
@@ -119,7 +121,8 @@ Each recipe below becomes a Python recipe in the flow.
 Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the Python recipes and their
 CSV datasets, the folders `experiments` (tracked models), `forecast_archive` and `lab_experiments` (lab tries), the
 saved model `cash_forecast`, and the project variables `forecaster` (`recent_average`), `lab_forecaster`
-(`recent_average_6m`) and the promotion rules (`promotion_*`) if they are not set yet, in 5 zones. Training (folder
+(`recent_average_6m`), `inference_clients_per_chunk` (5000) and the promotion rules (`promotion_*`) if they are not
+set yet, in 5 zones. Training (folder
 `experiments`), the promotion log and the lab are only rebuilt when asked by name, so the nightly batch never
 retrains by accident.
 """),
@@ -127,7 +130,7 @@ retrains by accident.
     md("""
 ## 4. First run
 
-Builds the daily flows, trains, tests and deploys a model, runs champion / challenger (with no production model yet,
+Builds the daily flows (the whole history, the first time), trains, tests and deploys a model, runs champion / challenger (with no production model yet,
 the first model is promoted, with a warning in promotion_log if its checks fail), then runs the nightly batch:
 forecast, archive, log.
 """),
@@ -135,11 +138,14 @@ forecast, archive, log.
     md("""
 ## 5. Scenarios
 
-- **Nightly batch**: set the cut-off, build the daily flows, forecast with the production model, archive it and
-  log the run. It never trains.
-- **Retrain, test and promote**: set the cut-off, build the daily flows, train, test and deploy a new model with
+- **Nightly batch**: set the cut-off, add the new days to the daily flows, forecast with the production model,
+  archive it and log the run. It never trains.
+- **Retrain, test and promote**: set the cut-off, add the new days to the daily flows, train, test and deploy a new model with
   the forecaster the project variable `forecaster` names, champion / challenger with the promotion rules, activate
   it if it passes. It does not forecast: the next Nightly batch uses the new active version.
+
+- **Full rebuild of the daily flows** (run by hand, no trigger): empty `daily_flows` and `staging_log`, then read the
+  whole history again. For example after a reversal cancels a posting from a day already staged.
 
 Their triggers (daily at 06:00 and monthly on the 5th, Riyadh time) are created switched off; switch them on
 in production.
@@ -259,4 +265,32 @@ The sample data generator, the warehouse table and column names, the publishing 
 Generates the data (about 2 minutes), publishes it as of `AS_OF` and sets the project variable `cutoff_override`.
 """),
     code(read("sim_cells/load.py")),
+])
+
+write("inference_load_test.ipynb", [
+    md("""
+# Digital Cash Management Forecast: inference load test (sandbox only)
+
+Checks that the forecast scales to the bank's number of clients, and measures it: the benchmark of a Dataiku
+server. **Never in the production project**: it replaces `clients` and `daily_flows` with fake data.
+
+Run it in a sandbox project where the forecast is set up (`build_forecast_project.ipynb` done, so there is a
+production model). It:
+
+1. writes fake `clients` and `daily_flows` for `N_CLIENTS` clients (random amounts, the real columns);
+2. runs the recipe `final_forecast` alone and shows its row of `inference_log`: rows, chunks of clients, seconds
+   reading and forecasting, and the most memory it used (`peak_memory_mb`);
+3. puts the real data back (scenario **Full rebuild of the daily flows**, then **Nightly batch**).
+
+Inference forecasts `CLIENTS_PER_CHUNK` clients at a time (project variable `inference_clients_per_chunk`): a
+bigger chunk is faster but needs more memory. Try a few values on the bank's server and keep the best one.
+"""),
+    code(read("load_cells/settings.py")),
+    code(read("load_cells/setup.py")),
+    md("## 1. Fake data"),
+    code(read("load_cells/make_data.py")),
+    md("## 2. Forecast and measure"),
+    code(read("load_cells/run.py")),
+    md("## 3. Put the real data back"),
+    code(read("load_cells/restore.py")),
 ])
