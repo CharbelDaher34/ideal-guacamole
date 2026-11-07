@@ -1,14 +1,15 @@
 # Production runs: two independent scenarios. Nightly batch (inference) forecasts with the active version of the saved
 # models; Retrain, test and promote (training) adds a version and activates it if it is better, and never forecasts.
-# Each starts by setting the cut-off month (a Python step); the staging recipe adds the new days to daily_flows and
-# stops if the postings do not reach the cut-off month. A third one, Full rebuild of the daily flows, has no trigger:
+# Each starts by setting the cut-off day (yesterday) and checking the warehouse load of that day is finished (Python
+# steps; the check is a mock to replace with the bank's); the staging recipe adds the new days to daily_flows and
+# stops if the postings do not reach the cut-off day. A third one, Full rebuild of the daily flows, has no trigger:
 # run it by hand to read the whole history again. The tracked models (folder experiments) and the promotion log are only rebuilt when built by name, so the
 # nightly batch never retrains by accident.
 def step(n, label, what, mode=None):
     common = {"id": f"step_{n}", "name": label, "enabled": True, "runConditionType": "RUN_IF_STATUS_MATCH",
               "runConditionStatuses": ["SUCCESS", "WARNING"]}
     if isinstance(what, str):           # a Python step: library function to call
-        module = "warehouse" if what in ("set_cutoff", "clear_daily_flows") else "tracking"
+        module = "warehouse" if what in ("set_cutoff", "check_warehouse_loaded", "clear_daily_flows") else "tracking"
         return {**common, "type": "custom_python", "params": {
             "script": f"from {module} import {what}\n\n{what}()\n", "envSelection": {"envMode": "INHERIT"},
             "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
@@ -18,18 +19,20 @@ def step(n, label, what, mode=None):
         "builds": builds, "jobType": mode, "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
 
 
+START = [("Set the cut-off day (yesterday)", "set_cutoff"),
+         ("Check the warehouse load is finished", "check_warehouse_loaded")]
 NIGHTLY = [
-    ("Set the cut-off month", "set_cutoff"),
+    *START,
     ("Forecast with the production model, archive and log it", ["inference_log"], "RECURSIVE_FORCED_BUILD"),
 ]
 SCENARIOS = {
-    "Nightly batch": ("After each warehouse load: forecast the next 3 months with the production model (the active "
+    "Nightly batch": ("After each warehouse load: forecast the next 30, 60 and 90 days with the production model (the active "
                       "version of the saved models), archive it and log the run", "daily", NIGHTLY),
     "Retrain, test and promote": (
         "Train and test a new model with the forecaster the project variable forecaster names (tracked in Experiment "
         "Tracking, deployed as a saved model version), and activate it if it beats the production model. It does not "
         "forecast: the Nightly batch uses the active version", "monthly", [
-            ("Set the cut-off month", "set_cutoff"),
+            *START,
             ("Prepare the data (daily flows, clients)", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
             ("Train, test and deploy a new model", ["experiments"], "NON_RECURSIVE_FORCED_BUILD"),
             ("Champion / challenger", ["promotion_log"], "NON_RECURSIVE_FORCED_BUILD"),
@@ -39,7 +42,7 @@ SCENARIOS = {
         "Run by hand: empties daily_flows and staging_log, then reads the whole history from the warehouse again "
         "(the nightly runs only read the new days). For example after a reversal cancels a posting of a day already "
         "staged. It does not forecast: run the Nightly batch after it", None, [
-            ("Set the cut-off month", "set_cutoff"),
+            *START,
             ("Empty the daily flows", "clear_daily_flows"),
             ("Read the whole history again", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
         ]),

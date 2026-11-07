@@ -1,6 +1,7 @@
 # Digital Cash Management Forecast: run it at the bank
 
-Forecasts, for every active business client, the net cash flow of the next 3 months, per category and in TOTAL,
+Forecasts, for every active business client, the net cash flow of the next 30, 60 and 90 days (from all the data up
+to yesterday), per category and in TOTAL,
 as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/how_it_works.md).
 
 ## Before you start (ask once)
@@ -18,6 +19,8 @@ as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/
 1. **Put the bank's codes in `src/warehouse.py`:**
    - `CATEGORY_OF_TYPE`: the real transaction types (`TRNS_TYP`) and their category. Today it's a mock list.
    - Check `ACTIVE_STATUS`, `RETAIL`, `BUSINESS_ID`, `SOLE_PROPRIETOR` against `DIM_CUSTOMER`.
+   - `check_warehouse_loaded`: today a mock that always passes. Replace it with the bank's check that the
+     warehouse's load of yesterday is finished (for example a query on its load-control table).
 
    Then rebuild the notebooks: `python make_notebook.py`.
 2. **Import** `build_forecast_project.ipynb` into the project (Notebooks → New notebook → Import).
@@ -57,7 +60,7 @@ data with fake data.
 
 | You see | Do |
 |---|---|
-| `staging_log` FAILED: "the warehouse load for that month looks late or partial" | wait for the warehouse load, then run the Nightly batch again |
+| `staging_log` FAILED: "the warehouse load of <day> looks late" | wait for the warehouse load, then run the Nightly batch again |
 | "run the scenario Full rebuild" | run **Full rebuild of the daily flows**, then the Nightly batch |
 | `inference_log` FAILED | read its `error`; `final_forecast` still holds the previous forecast |
 | "No production model yet" | run **Retrain, test and promote** |
@@ -70,10 +73,10 @@ data with fake data.
 |---|---|---|
 | `forecaster` | `quantile_boosting` | the model Retrain trains |
 | `promotion_min_coverage`, `promotion_max_coverage` | 0.70, 0.90 | promotion rule: P10–P90 coverage range |
-| `promotion_beat_simple_guess` | true | promotion rule: must beat "same as last month" |
+| `promotion_beat_simple_guess` | true | promotion rule: must beat "same as the last 30 days" |
 | `promotion_min_gain` | 0.0 | promotion rule: how much better than production |
 | `inference_clients_per_chunk` | 5000 | clients forecast at a time: bigger is faster but needs more memory |
-| `cutoff_override` | empty | forecast from another month (YYYY-MM) |
+| `cutoff_override` | empty | forecast from another day's data (YYYY-MM-DD) instead of yesterday |
 
 ## Optional: benchmark the bank's server
 

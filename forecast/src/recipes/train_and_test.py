@@ -1,17 +1,17 @@
 # Train and test one model, with its own model ID, tracked in Experiment Tracking with its forecaster, settings and
 # scores. The forecaster is the one the project variable forecaster names (default quantile_boosting, in models.py; the
 # data scientist's own are in forecasters.py). It learns from the daily flows and the clients (interface 1).
-#   backtest: trained without the last 6 months, then tested on them (models.backtest, test_results)
+#   backtest: trained without the last 6 periods of 30 days, then tested on them (models.backtest, test_results)
 #   final: trained on everything up to the cut-off, deployed as version <model ID> of the saved model cash_forecast
 #   (not active: the promotion activates it)
 import dataiku
 
-from cashflow import cutoff_month, read_dataset, until
+from cashflow import cutoff_date, read_daily, read_dataset, until
 from models import backtest, new_forecaster, run_metrics, test_results
 from tracking import log_model, new_model_id
 
-cutoff = cutoff_month()
-daily, clients = until(read_dataset("daily_flows"), cutoff), read_dataset("clients")
+cutoff = cutoff_date()
+daily, clients = until(read_daily(), cutoff), read_dataset("clients")
 backtested, final = new_forecaster(), new_forecaster()
 tested = backtest(backtested, daily, clients, cutoff)
 final.fit(daily, clients, cutoff)
@@ -20,7 +20,7 @@ model_id = new_model_id(cutoff)
 results = test_results(tested)
 results.insert(0, "model_id", model_id)
 metrics = run_metrics(results)
-params = {"forecaster": final.name, **getattr(final, "params", {}), "cutoff_month": f"{cutoff:%Y-%m}",
+params = {"forecaster": final.name, **getattr(final, "params", {}), "cutoff_date": f"{cutoff:%Y-%m-%d}",
           "load_id": dataiku.get_custom_variables().get("load_id", ""), "daily_rows": len(daily),
           "clients": daily["client_no"].nunique(), "test_rows": len(tested)}
 log_model(model_id, params, metrics, backtested, final)

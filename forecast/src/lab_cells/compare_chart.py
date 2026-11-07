@@ -1,5 +1,5 @@
 errors = result["errors"].drop(index="ALL")
-ax = errors.plot.bar(figsize=(10, 4), title="EV error per months ahead (lower is better)")
-ax.set_xlabel("months ahead")
+ax = errors.plot.bar(figsize=(10, 4), title="EV error per window (lower is better)")
+ax.set_xlabel("window (1 = days 1-30, 2 = 31-60, 3 = 61-90)")
 plt.tight_layout()
 plt.show()

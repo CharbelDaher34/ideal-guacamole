@@ -1,8 +1,8 @@
 """Model tracking and promotion (project library: python/tracking.py), for training and the lab.
 
 Every training run is one model with its own model ID, recorded in Dataiku's Experiment Tracking (MLflow; artifacts in
-the managed folder "experiments"): its forecaster and settings, the cut-off, test scores on the last 6 months, the
-backtest forecaster (trained without those months, for champion / challenger tests) and one MLflow model (the final
+the managed folder "experiments"): its forecaster and settings, the cut-off, test scores on the last 6 periods of
+30 days, the backtest forecaster (trained without those periods, for champion / challenger tests) and one MLflow model (the final
 forecaster, which returns P10, EV and P90). It is deployed as a new version (version ID = model ID) of the saved model
 cash_forecast (interface 3, cashflow.SAVED_MODEL). The production model is the active version; promoting a model
 activates it, and the nightly forecast always uses the active version.
@@ -57,8 +57,8 @@ def _experiment_name(mlflow, experiment, folder):
 
 
 def new_model_id(cutoff):
-    """CFF_<cut-off month>_<training time>, for example CFF_202610_20261104T1215 (also the saved model version)."""
-    return f"CFF_{cutoff:%Y%m}_{pd.Timestamp.now():%Y%m%dT%H%M}"
+    """CFF_<cut-off day>_<training time>, for example CFF_20261031_20261104T1215 (also the saved model version)."""
+    return f"CFF_{cutoff:%Y%m%d}_{pd.Timestamp.now():%Y%m%dT%H%M}"
 
 
 def promotion_rules():
@@ -80,9 +80,8 @@ def saved_model(name=SAVED_MODEL):
 def forecast_model(forecaster):
     """An MLflow model around a trained forecaster. The nightly forecast unwraps it and calls the forecaster
     (forecast.production_forecaster); called as an MLflow model, it takes daily flows (interface 1) and returns the
-    forecast of the month after the last day it was given, without client details."""
+    forecast of the 3 windows after the last day it was given, without client details."""
     import mlflow.pyfunc
-    from cashflow import month_start
     from models import forecast
 
     class ForecastModel(mlflow.pyfunc.PythonModel):
@@ -90,7 +89,7 @@ def forecast_model(forecaster):
             self.forecaster = forecaster
 
         def predict(self, context, model_input, params=None):
-            cutoff = month_start(model_input["day"]).max()
+            cutoff = pd.to_datetime(model_input["day"]).max().normalize()
             return forecast(self.forecaster, model_input, None, cutoff)
 
     return ForecastModel(forecaster)
@@ -193,7 +192,7 @@ def promoted_model_ids():
 
 
 def load_backtest(model_id):
-    """The backtest forecaster of a training run (trained without the last 6 months, for champion / challenger)."""
+    """The backtest forecaster of a training run (trained without the last 6 periods, for champion / challenger)."""
     found = runs()
     match = found[found["model_id"] == model_id]
     if match.empty:

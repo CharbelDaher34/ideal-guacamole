@@ -6,14 +6,14 @@ class QuantileBoostingByCategory:
     params = dict(QuantileBoosting.params)
 
     def fit(self, daily, clients, cutoff):
-        wide = monthly_matrix(daily, cutoff)
+        wide = period_matrix(daily, cutoff)
         categories = wide.index.get_level_values("category")
-        self.shared = QuantileBoosting().fit_months(wide)
-        self.models = {c: QuantileBoosting().fit_months(wide[categories == c]) for c in sorted(set(categories))}
+        self.shared = QuantileBoosting().fit_periods(wide)
+        self.models = {c: QuantileBoosting().fit_periods(wide[categories == c]) for c in sorted(set(categories))}
         return self
 
     def predict(self, daily, clients, cutoff):
-        wide = monthly_matrix(daily, cutoff)
+        wide = period_matrix(daily, cutoff)
         categories = wide.index.get_level_values("category")
-        return pd.concat([self.models.get(c, self.shared).predict_months(wide[categories == c])
+        return pd.concat([self.models.get(c, self.shared).predict_periods(wide[categories == c])
                           for c in sorted(set(categories))], ignore_index=True)

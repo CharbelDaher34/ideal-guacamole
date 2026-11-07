@@ -113,13 +113,13 @@ def category(txn_type):
 
 def daily_flows(entries, client_numbers, cutoff):
     """The daily totals of postings (standard names): one row per client, day and category with money_in, money_out
-    (both positive, SAR) and the number of postings. Business clients only, every day up to the end of the cut-off
-    month, without reversed postings (nor what they reverse) and without transfers between the client's own accounts
+    (both positive, SAR) and the number of postings. Business clients only, every day up to the cut-off day,
+    without reversed postings (nor what they reverse) and without transfers between the client's own accounts
     (a debit and a credit with the same TRNS_RFR on the same client, netting to zero). The staging recipe calls it on
     postings grouped so that all the postings of a TRNS_RFR are together."""
     e = entries[entries["client_no"].isin(set(client_numbers))].copy()
     e["day"] = value_day(e["value_date"])
-    e = e[e["day"] < cutoff + pd.DateOffset(months=1)]
+    e = e[e["day"] <= cutoff]
     marked = e["reversal"].notna() & ~e["reversal"].astype(str).str.strip().isin(["", "nan", "None"])
     e = e[~e["txn_ref"].isin(set(e.loc[marked, "txn_ref"].dropna()))]
     legs = e[e["txn_ref"].notna()].groupby(["txn_ref", "client_no"]).agg(sides=("direction", "nunique"),
@@ -134,31 +134,44 @@ def daily_flows(entries, client_numbers, cutoff):
 
 
 def set_cutoff():
-    """The forecast's cut-off: the last complete month, by default the month before today. The project variable
-    cutoff_override (YYYY-MM) fixes it instead: the sandbox's simulator sets it, and it reruns a past month. Sets the
-    project variables cutoff_month, as_of_date and load_id (the data's as-of date), which the recipes read. The
-    staging recipe stops if the postings do not reach the cut-off month (a late warehouse load).
+    """The forecast's cut-off: the last day of data, by default yesterday. The project variable cutoff_override
+    (YYYY-MM-DD) fixes it instead: the sandbox's simulator sets it, and it reruns a past day. Sets the project
+    variables cutoff_date, as_of_date and load_id (the data's as-of date), which the recipes read. The staging recipe
+    stops if the warehouse has no posting up to the cut-off day.
     Run by the first step of each scenario: from warehouse import set_cutoff; set_cutoff()"""
     import dataiku
     project = dataiku.api_client().get_default_project()
     variables = project.get_variables()
     override = variables["standard"].get("cutoff_override")
-    cutoff = pd.Period(override, "M") if override else pd.Timestamp.now().to_period("M") - 1
-    as_of = cutoff.to_timestamp(how="end").normalize()
-    variables["standard"].update(cutoff_month=str(cutoff), as_of_date=f"{as_of:%Y-%m-%d}",
-                                 load_id=f"EDW_{as_of:%Y%m%d}")
+    cutoff = pd.Timestamp(override) if override else pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
+    variables["standard"].update(cutoff_date=f"{cutoff:%Y-%m-%d}", as_of_date=f"{cutoff:%Y-%m-%d}",
+                                 load_id=f"EDW_{cutoff:%Y%m%d}")
     project.set_variables(variables)
-    print(f"Cut-off month {cutoff} (data as of {as_of:%Y-%m-%d})" + (" (cutoff_override)" if override else ""))
-    return str(cutoff)
+    print(f"Cut-off day {cutoff:%Y-%m-%d}" + (" (cutoff_override)" if override else " (yesterday)"))
+    return f"{cutoff:%Y-%m-%d}"
+
+
+def check_warehouse_loaded():
+    """MOCK. Second step of each scenario: stops the scenario if the warehouse's load of the cut-off day is not
+    finished (the ETL from the source systems into EDW). It always passes for now. Replace its body with the bank's
+    real check, for example a read-only query on the warehouse's load-control table:
+        SELECT STATUS FROM EDW.<LOAD_CONTROL_TABLE> WHERE LOAD_DATE = DATE '<cutoff_date>'   -- must say finished
+    and raise an error if it is not finished. Whatever it says, staging also stops if the warehouse has no posting
+    up to the cut-off day. Run as: from warehouse import check_warehouse_loaded; check_warehouse_loaded()"""
+    import dataiku
+    cutoff = dataiku.api_client().get_default_project().get_variables()["standard"]["cutoff_date"]
+    print(f"MOCK warehouse check: the load of {cutoff} is assumed finished. Replace check_warehouse_loaded in "
+          "warehouse.py with the bank's real check.")
+    return True
 
 
 def clear_daily_flows():
-    """First step of the scenario Full rebuild (after the cut-off): empties daily_flows and staging_log, so that the
+    """Step of the scenario Full rebuild (after the cut-off and the warehouse check): empties daily_flows and staging_log, so that the
     staging recipe reads the whole history again. Run as: from warehouse import clear_daily_flows; clear_daily_flows()"""
     import dataiku
-    project = dataiku.api_client().get_default_project()
-    for name in ("daily_flows", "staging_log"):
-        project.get_dataset(name).clear()
+    from cashflow import clear_daily
+    clear_daily()
+    dataiku.api_client().get_default_project().get_dataset("staging_log").clear()
     print("daily_flows and staging_log emptied: the staging recipe will read the whole history")
 
 

@@ -9,7 +9,8 @@ def build(items, mode):
 
 
 started = time.time()
-warehouse.set_cutoff()                                          # the first step of both scenarios
+warehouse.set_cutoff()                                          # the first 2 steps of every scenario
+warehouse.check_warehouse_loaded()
 build(["daily_flows"], "RECURSIVE_FORCED_BUILD")             # staging: clients and daily flows
 build(["experiments"], "NON_RECURSIVE_FORCED_BUILD")         # train, test, track and deploy the first model
 build(["promotion_log"], "NON_RECURSIVE_FORCED_BUILD")       # champion / challenger

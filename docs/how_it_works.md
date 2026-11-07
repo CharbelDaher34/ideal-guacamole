@@ -1,8 +1,12 @@
 # Digital Cash Management Forecast: how it works
 
-For every active business client, the project forecasts the **net cash flow** (money in minus money out) of each of
-the **next 3 months**, **per category and in TOTAL**, as a low value (**P10**), an expected value (**EV**) and a high
-value (**P90**), in SAR.
+For every active business client, the project forecasts the **net cash flow** (money in minus money out) of the
+**next 30, 60 and 90 days**, **per category and in TOTAL**, as a low value (**P10**), an expected value (**EV**) and
+a high value (**P90**), in SAR.
+
+Every night, the forecast uses all the data **up to yesterday** (the **cut-off day**). On November 14, the data goes
+up to November 13, and the 3 windows are November 14 – December 13 (days 1–30), December 14 – January 12 (days
+31–60) and January 13 – February 11 (days 61–90).
 
 This project builds everything **around** the model: getting the data, testing and promoting models, and the nightly
 forecast. The model itself is a placeholder until the data scientist's models replace it.
@@ -63,8 +67,9 @@ for example, reads nothing from training except the active version of the saved 
 
 Every model gets these 2 datasets and nothing else.
 
-**`daily_flows`**: one row per client, day and category, over each client's whole history up to the end of the
-cut-off month.
+**`daily_flows`**: one row per client, day and category, over each client's whole history up to the cut-off day
+(yesterday). It is a Dataiku **folder of Parquet files**, not a dataset: read straight from the files, it is about
+35 times faster than a dataset (Dataiku's dataset reader handles about 0.4M rows a second, whatever the format).
 
 | Column | Meaning |
 |---|---|
@@ -76,9 +81,10 @@ cut-off month.
 
 Reversed postings (and what they reverse) and transfers between the client's own accounts are left out.
 
-`daily_flows` is kept **grouped by client**: all the rows of a client are next to each other. So anyone can read it
-in chunks of complete clients without loading it all: `cashflow.iter_clients("daily_flows", 5000)` gives 5,000
-clients at a time. Inference does this; training can too.
+`daily_flows` is kept **grouped by client**: each file holds complete clients. Read it with the project library:
+- `cashflow.read_daily()`: all of it as one table (fine for the sample data);
+- `cashflow.iter_clients("daily_flows", 5000)`: 5,000 complete clients at a time, without loading it all. Inference
+  does this; training can too.
 
 **`clients`**: one row per business client: `client_no`, customer type, line of business, legal entity, ID type,
 segment, sector, industry, city, `status` (`ACTIVE` / `CLOSED`), `sole_proprietor`. Business clients = every line
@@ -92,8 +98,11 @@ with no other change to the project.
 | Part | What it does |
 |---|---|
 | `name`, `params` | its name (the project variable `forecaster` picks it) and its settings |
-| `fit(daily, clients, cutoff)` | learns from `daily_flows` and `clients` known at the end of the cut-off month |
-| `predict(daily, clients, cutoff)` | returns one row per client, category (and `TOTAL`) and month ahead (1, 2, 3): `client_no`, `category`, `months_ahead`, `p10`, `ev`, `p90` |
+| `fit(daily, clients, cutoff)` | learns from `daily_flows` and `clients` known at the cut-off day (`cutoff`: the last day of data) |
+| `predict(daily, clients, cutoff)` | returns one row per client, category (and `TOTAL`) and window (1, 2, 3: days 1–30, 31–60, 61–90 after the cut-off day): `client_no`, `category`, `window`, `p10`, `ev`, `p90` |
+
+`cashflow.period_matrix(daily, cutoff)` gives each client's net cash flow per 30-day period ending at the cut-off
+day, for the models that work that way.
 
 Two rules: a client's forecast may only depend on that client's own data (inference sends clients in chunks), and
 P10 ≤ EV ≤ P90 (the project enforces it).
@@ -102,7 +111,7 @@ The data scientist's forecasters go in `forecasters.py` (project library). The s
 
 ### Interface 3: the active version of `cash_forecast` (Training → Inference)
 
-Each training run is one model with its own **model ID** (for example `CFF_202610_20261107T1000`: cut-off month,
+Each training run is one model with its own **model ID** (for example `CFF_20261031_20261107T1000`: cut-off day,
 training time). It becomes a **version** of the saved model `cash_forecast`. The **active** version is the
 production model; the nightly forecast always uses it. Rolling back means activating an earlier version.
 
@@ -113,10 +122,11 @@ production model; the nightly forecast always uses it. Rolling back means activa
 | Columns | Meaning |
 |---|---|
 | `client_no` | the client |
-| `cutoff_month`, `m1_month`, `m2_month`, `m3_month` | the last full month, and the 3 months forecast |
-| `status` | `OK`; `NOT_ENOUGH_HISTORY` (under 12 months of history: no values); `NO_POSTINGS` (no posting at all: no values) |
-| `history_months` | months from the client's first posting to the cut-off |
-| `TOTAL_m1_p10`, `TOTAL_m1_ev`, `TOTAL_m1_p90`, … `UTILITIES_m3_p90` | one column per category (TOTAL first), month ahead and value. Empty for a category the client doesn't have |
+| `cutoff_date` | the last day of data (yesterday) |
+| `w1_start`, `w1_end`, `w2_start`, `w2_end`, `w3_start`, `w3_end` | the first and last day of each window: days 1–30, 31–60, 61–90 after the cut-off |
+| `status` | `OK`; `NOT_ENOUGH_HISTORY` (under 360 days of history: no values); `NO_POSTINGS` (no posting at all: no values) |
+| `history_days` | days from the client's first posting to the cut-off |
+| `TOTAL_w1_p10`, `TOTAL_w1_ev`, `TOTAL_w1_p90`, … `UTILITIES_w3_p90` | one column per category (TOTAL first), window and value. Empty for a category the client doesn't have |
 | `model_id`, `forecaster`, `load_id` | which model and which warehouse load produced it |
 
 ---
@@ -127,15 +137,20 @@ production model; the nightly forecast always uses it. Rolling back means activa
 
 - **Read-only.** Nothing is created or written in the warehouse. The only query is a `SELECT` of the columns used,
   with a date filter on `VAL_DT`.
-- **Only the new days from the warehouse.** The first run reads the whole history once. After that, each run reads
-  only the postings after the last day already in `daily_flows`, up to the end of the cut-off month.
+- **Only the new days from the warehouse.** The first run reads the whole history once. After that, each night
+  reads only the postings after the last day already in `daily_flows`, up to the cut-off day (yesterday).
 - **Kept grouped by client.** When there are new days, staging writes `daily_flows` again with the new days in
-  place: each client's rows together, old and new. When there is nothing new (most nights, since only full months
-  are forecast), `daily_flows` is not touched.
-- **Cut-off month:** the month before today, or the project variable `cutoff_override` (YYYY-MM). Set by the first
-  step of each scenario.
-- **Late load check:** if the cut-off month has no postings, or far fewer than the month before, the run stops and
-  adds nothing. The next run reads the same days again.
+  place: each client's rows together, old and new, a group of clients per Parquet file. It writes a new version of
+  the files and only switches to it once every file is written, so a failed run leaves `daily_flows` as it was.
+  When there is nothing new, `daily_flows` is not touched.
+- **Cut-off day:** yesterday, or the project variable `cutoff_override` (YYYY-MM-DD). Set by the first step of each
+  scenario.
+- **Warehouse check:** the second step of each scenario checks that the warehouse's load of the cut-off day (the ETL
+  from the source systems) is finished. **It is a mock for now** (`check_warehouse_loaded` in `warehouse.py`, always
+  passes), to replace with the bank's real check, for example a read-only query on the warehouse's load-control
+  table.
+- **Late load check:** if the warehouse has no posting up to the cut-off day, staging stops and changes nothing. The
+  next run reads the same days again.
 - **Full rebuild** (a scenario run by hand) empties `daily_flows` and reads the whole history again. Use it after a
   reversal cancels a posting from a day already staged, or after the category list changes.
 - Big reads never sit in memory whole: rows are spread over files on the server's disk by client and handled one
@@ -144,17 +159,17 @@ production model; the nightly forecast always uses it. Rolling back means activa
 ### Step 2: train and test (`train_and_test`)
 
 - Trains the forecaster named by the project variable `forecaster` (default `quantile_boosting`).
-- **Test, the same for every model:** trained without the last 6 months, it forecasts each of them from the data
-  known the month before, and is compared with what happened:
+- **Test, the same for every model:** trained without the last 6 periods of 30 days, it forecasts the 3 windows after
+  each of the 6 test cut-offs (30 days apart) from the data known that day, and is compared with what happened:
   - **EV error (WAPE):** total of |actual − EV| ÷ total of |actual|. Lower is better; it should beat the simple guess
-    (the same as the month before).
-  - **P10–P90 coverage:** share of actual months between P10 and P90. The aim is about 80%.
+    (the same as the 30 days before).
+  - **P10–P90 coverage:** share of actual windows between P10 and P90. The aim is about 80%.
 - Records the run in Experiment Tracking (experiment `cashflow_forecast`): forecaster, settings, data used (cut-off,
   load, rows, clients), test scores, the model. Deploys it as a new **inactive** version of `cash_forecast`.
 
 ### Step 3: promote (`champion_challenger`, then "promote if better")
 
-Tests the new model and the production model on the same 6 months, then activates the new one only if it passes
+Tests the new model and the production model on the same 6 periods, then activates the new one only if it passes
 the **promotion rules**, which are project variables (no code change needed):
 
 | Project variable | Default | Promoted only if |
@@ -180,11 +195,11 @@ With no production model yet, the first model is promoted. Every decision, its r
 ### The placeholder model: `quantile_boosting`
 
 - **3 small models:** one for the EV, one for P10, one for P90 (scikit-learn gradient boosting; the EV is the
-  median, which a few huge months throw off far less than the mean).
+  median, which a few huge amounts throw off far less than the mean).
 - **Shared by every category:** the category is an input, so a category with little data learns from the others,
   and there are 3 models to track and promote, not 3 per category.
-- **Inputs:** the last 12 months of the client and category (scaled so small and large clients look alike), the
-  category, months known, months ahead, calendar month.
+- **Inputs:** the client and category's net cash flow over the last 12 periods of 30 days (scaled so small and
+  large clients look alike), the category, periods known, the window, and the calendar month of the window's middle.
 - The lab compares it with one set of 3 models per category (`quantile_boosting_by_category`) and with
   `recent_average` (no machine learning). Small models only, no deep learning.
 
@@ -194,9 +209,9 @@ With no production model yet, the first model is promoted. Every decision, its r
 
 | Scenario | Steps | Trigger |
 |---|---|---|
-| **Nightly batch** | set the cut-off → step 1 → step 4. Never trains. | daily, 06:00 Riyadh |
-| **Retrain, test and promote** | set the cut-off → step 1 → step 2 → step 3. Never forecasts: the next Nightly batch uses the new active version. | monthly, on the 5th, 07:00 Riyadh |
-| **Full rebuild of the daily flows** | set the cut-off → empty `daily_flows` and `staging_log` → read the whole history again | by hand |
+| **Nightly batch** | set the cut-off day → check the warehouse load → step 1 → step 4. Never trains. | daily, 06:00 Riyadh |
+| **Retrain, test and promote** | set the cut-off day → check the warehouse load → step 1 → step 2 → step 3. Never forecasts: the next Nightly batch uses the new active version. | monthly, on the 5th, 07:00 Riyadh |
+| **Full rebuild of the daily flows** | set the cut-off day → check the warehouse load → empty `daily_flows` and `staging_log` → read the whole history again | by hand |
 
 ## 6. What gets logged
 
@@ -218,28 +233,31 @@ fake clients, the 3-model placeholder and chunks of 5,000 clients:
 
 | Clients | Daily rows read | Reading | Forecasting | Writing | Total | Peak memory |
 |---|---|---|---|---|---|---|
-| 400,000 | 131M | 5.1 min | 2.2 min | 1.1 min | **8.5 min** | 1.2 GB |
-| 800,000 | 262M | 12.2 min | 4.7 min | 2.3 min | **19.2 min** | 1.3 GB |
+| 400,000 | 131M | 1.4 min | 2.2 min | 1.1 min | **4.7 min** | 1.6 GB |
+| 800,000 | 262M | 3.7 min | 4.4 min | 2.3 min | **10.4 min** | 1.8 GB |
 
+- Reading `daily_flows` as Parquet files cut the total from 8.5 to 4.7 min at 400k (from 19.2 to 10.4 min at 800k)
+  compared with a Dataiku dataset.
 - Memory barely moves when the clients double: it holds one chunk of clients at a time.
-- Most of the time is reading `daily_flows`, not the model.
 - The notebook `inference_load_test.ipynb` (sandbox only) repeats this test on the bank's server. If it is still too
-  slow there: read and forecast chunks in parallel, or partitions.
+  slow there: forecast chunks in parallel.
 - Not tested yet: training on all clients (it still loads all of `daily_flows`); train on a sample of clients, or
   read it with `iter_clients`, if it gets too heavy.
 
 ## 8. Decisions and open points
 
 **Agreed**
-- Input: each client's daily flows per category, whole history. Output: per client, category and TOTAL, months 1–3,
-  P10 / EV / P90, one row per client.
+- Input: each client's daily flows per category, whole history, up to yesterday. Output: per client, category and
+  TOTAL, the next 30, 60 and 90 days, P10 / EV / P90, one row per client.
 - Small models only. Placeholder `quantile_boosting` until the data scientist's models are ready.
 - Every model is tracked, deployed as a version, and activated only if it passes the promotion rules.
 - The warehouse is only read (read-only `SELECT` with a date filter), never written to. Everything the project writes
-  is a CSV file (compressed for the big ones).
-- At least 12 months of history to get a forecast. Models are tested on the last 6 months.
+  is a CSV file (compressed for the big one), except `daily_flows`: Parquet files, for reading speed.
+- At least 360 days of history to get a forecast. Models are tested on the last 6 periods of 30 days.
 
 **To confirm at the bank**
+- The real warehouse check: how to know the load of a day (the ETL from the source systems) is finished, to replace
+  the mock `check_warehouse_loaded`.
 - The real transaction type codes (`TRNS_TYP`) and their categories, to replace the mock list in `warehouse.py`.
 - The codes in `DIM_CUSTOMER` the project relies on: status values, retail line of business, commercial
   registration, sole-proprietor legal entities. If they differ, only `warehouse.py` changes.

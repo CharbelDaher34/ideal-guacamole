@@ -25,10 +25,11 @@ tracking = load_module("tracking", TRACKING_CODE)
 RAW = [warehouse_table for warehouse_table, _ in warehouse.TABLES.values()]
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
-COMPRESSED = ["daily_flows", "final_forecast"]       # the big ones: compressed CSV (gz)
+COMPRESSED = ["final_forecast"]       # the big one: compressed CSV (gz)
 
-# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file (compressed for the big ones);
-# experiments, forecast_archive and lab_experiments are folders; cash_forecast is the saved model.
+# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file (compressed for the big one); daily_flows
+# (Parquet files, read far faster than a dataset), experiments, forecast_archive and lab_experiments are folders;
+# cash_forecast is the saved model.
 # Each zone has an owner, and the zones only meet through three interfaces:
 #   1. the data: daily_flows and clients (Staging) -> Training, Lab and Inference
 #   2. the forecaster (models.py): lab -> training. The project variable forecaster names the one Retrain trains;
@@ -43,7 +44,7 @@ FLOW = {
                        "Inference"),
     "try_forecaster": (DATA + ["experiments"], ["lab_experiments", "lab_results"], "Lab"),
 }
-FOLDERS = ["experiments", "forecast_archive", "lab_experiments"]
+FOLDERS = ["daily_flows", "experiments", "forecast_archive", "lab_experiments"]
 # logs: each run adds rows
 APPENDED = ["staging_log", "promotion_log", "inference_log", "lab_results"]
 BUILT_BY_NAME = ["experiments", "promotion_log", "lab_experiments", "lab_results"]   # only built when asked by name

@@ -185,15 +185,14 @@ def to_warehouse(df, table):
 
 def load_warehouse(tables, day, connection):
     """Writes the 2 tables as the warehouse has them at the end of `day`, and sets the project variable
-    cutoff_override to that month (the month before if `day` is not a month end). Returns the cut-off month."""
+    cutoff_override to that day (the forecast's cut-off: the last day of data). Returns it (YYYY-MM-DD)."""
     tables = curate(as_of(tables, day), day)
     existing = {d["name"] for d in project.list_datasets()}
     for table, (warehouse_table, _) in TABLES.items():
         rows = to_warehouse(tables[table], table)
         write_table(warehouse_table, rows, connection, existing)
         print(f"{warehouse_table:22s} {len(rows):>9,} rows")
-    d = pd.Timestamp(day)
-    cutoff = d.to_period("M") if d == d + pd.offsets.MonthEnd(0) else d.to_period("M") - 1
+    cutoff = f"{pd.Timestamp(day):%Y-%m-%d}"
     variables = project.get_variables()
     variables["standard"]["cutoff_override"] = str(cutoff)
     project.set_variables(variables)

@@ -4,12 +4,14 @@
 #   whole every run (it is small).
 #   daily_flows: the postings of FCT_STATEMENT_ENTRY summed per client, day and category (money in, money out):
 #   business clients only, no reversals, no transfers between the client's own accounts. Only the NEW days are read
-#   from the warehouse: the days after the last day already staged, up to the end of the cut-off month. When nothing
+#   from the warehouse: the days after the last day already staged, up to the cut-off day (yesterday). When nothing
 #   is staged yet (the first run, or after the scenario Full rebuild), the whole history is read.
-#   daily_flows is kept GROUPED BY CLIENT: all the rows of a client are next to each other (sorted by client, day,
-#   category within each group of clients). So when there are new days, it is written again: the rows already staged
-#   and the new ones, a group of clients at a time. Inference (and anyone else) can then read it in chunks of
-#   complete clients. When there is nothing new, daily_flows is not touched.
+#   daily_flows is a folder of Parquet files (read straight from the files, far faster than a dataset), kept GROUPED
+#   BY CLIENT: each file holds complete clients (sorted by client, day, category). So when there are new days, it is
+#   written again as a new version: the rows already staged and the new ones, a group of clients per file; the new
+#   version only becomes the current one once every file is written (cashflow.write_daily), so a failed run leaves
+#   daily_flows as it was. Inference (and anyone else) reads it in chunks of complete clients. When there is nothing
+#   new, daily_flows is not touched.
 #   staging_log: one row per run (appended), also when the run fails (status FAILED and the error): what was read,
 #   and the last day now in daily_flows.
 # A big read never sits in memory whole: the postings are spread over files on disk by TRNS_RFR (both sides of a
@@ -23,24 +25,21 @@ import time
 import dataiku
 import pandas as pd
 
-from cashflow import Spread, append_row, cutoff_month, iter_dataset
+from cashflow import DAILY_COLUMNS, Spread, append_row, cutoff_date, iter_daily_parts, write_daily
 from warehouse import (COLUMNS, TABLES, business_clients, daily_flows, to_standard, transactions_query,
                        value_day)
 
 CHUNK, FILES = 200_000, 128
 ROWS_PER_GROUP = 1_000_000          # about this many daily_flows rows per group of clients when rewriting
 KEYS = ["client_no", "day", "category"]
-EMPTY = pd.DataFrame({"client_no": pd.Series(dtype=str), "day": pd.Series(dtype="datetime64[ns]"),
-                      "category": pd.Series(dtype=str), "money_in": pd.Series(dtype=float),
-                      "money_out": pd.Series(dtype=float), "postings": pd.Series(dtype="int64")})
 started = time.time()
-cutoff = cutoff_month()
-end = cutoff + pd.DateOffset(months=1)             # postings up to the end of the cut-off month
+cutoff = cutoff_date()
+end = cutoff + pd.Timedelta(days=1)                # postings up to the cut-off day (included)
 
 
 def read_table(table, since=None):
     """The table's chunks with the standard names, only the columns the project uses. Postings: only the value dates
-    from since (None: all) to the end of the cut-off month; through the database connection the warehouse filters
+    from since (None: all) to the cut-off day; through the database connection the warehouse filters
     them (transactions_query), from files they are filtered here."""
     dataset = dataiku.Dataset(TABLES[table][0])
     if table == "transactions":
@@ -67,38 +66,27 @@ def read_table(table, since=None):
         yield chunk
 
 
-LOG = {"run_at": "string", "status": "string", "error": "string", "mode": "string", "cutoff_month": "string",
+LOG = {"run_at": "string", "status": "string", "error": "string", "mode": "string", "cutoff_date": "string",
        "read_from": "string", "read_to": "string", "postings_read": "bigint", "postings_kept": "bigint",
-       "daily_rows_added": "bigint", "daily_rows_total": "bigint", "partial_write": "boolean", "last_day": "string", "postings_per_month": "string",
+       "daily_rows_added": "bigint", "daily_rows_total": "bigint", "last_day": "string", "postings_per_month": "string",
        "clients": "bigint", "seconds": "double"}
-row = {"run_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), "cutoff_month": f"{cutoff:%Y-%m}",
-       "read_to": f"{end - pd.Timedelta(days=1):%Y-%m-%d}", "partial_write": False}
+row = {"run_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), "cutoff_date": f"{cutoff:%Y-%m-%d}",
+       "read_to": f"{cutoff:%Y-%m-%d}"}
 
 
 def stage():
     """Reads the new days and adds them to daily_flows; fills row (the staging_log row) as it goes."""
     # what is already staged: staging_log (this recipe adds to it, so it reads it outside the flow's inputs). Failed
-    # runs added nothing, unless one failed while writing daily_flows (partial_write): then only a Full rebuild helps.
+    # runs changed nothing.
     try:
         log = dataiku.Dataset("staging_log", ignore_flow=True).get_dataframe()
     except Exception:
         log = pd.DataFrame(columns=list(LOG))
-    if len(log) and log["partial_write"].astype(str).str.lower().eq("true").any():
-        raise ValueError("A staging run failed while adding to daily_flows (partial_write in staging_log): run the "
-                         "scenario Full rebuild of the daily flows")
     log = log[log["status"] == "SUCCESS"] if len(log) else log
-    staged = {}                                    # postings per month already in daily_flows
-    for months in log["postings_per_month"]:
-        for month, n in json.loads(months).items():
-            staged[month] = staged.get(month, 0) + n
     last_day = pd.to_datetime(log["last_day"]).max() if len(log) else None
     staged_rows = int(log.sort_values("run_at")["daily_rows_total"].iloc[-1]) if len(log) else 0
     if last_day is None:
-        try:
-            first = next(iter_dataset("daily_flows", rows=1, ignore_flow=True), EMPTY)
-        except Exception:
-            first = EMPTY
-        if len(first):
+        if next(iter_daily_parts(ignore_flow=True), None) is not None:
             raise ValueError("staging_log is empty but daily_flows is not: run the scenario Full rebuild")
     since = None if last_day is None else last_day + pd.Timedelta(days=1)
     mode = "FULL" if since is None else "NOTHING_NEW" if since >= end else "NEW_DAYS"
@@ -134,37 +122,28 @@ def stage():
                     new[month] = new.get(month, 0) + int(n)
                 groups.add(flows, "client_no")
 
-        # the postings must reach the cut-off month: none, or far fewer than the month before, means a late load.
-        # Checked before anything is added, so a failed run adds nothing and the next run reads the same days again.
-        months = {m: staged.get(m, 0) + new.get(m, 0) for m in set(staged) | set(new)}
-        last, before = months.get(f"{cutoff:%Y-%m}", 0), months.get(f"{cutoff - pd.DateOffset(months=1):%Y-%m}", 0)
-        if last == 0 or last < 0.5 * before:
-            raise ValueError(f"FCT_STATEMENT_ENTRY has {last:,} postings of business clients in {cutoff:%Y-%m} "
-                             f"({before:,} the month before): the warehouse load for that month looks late or "
-                             "partial")
+        # the postings must reach the cut-off day (yesterday): otherwise the warehouse load looks late. Checked before
+        # anything is written, so a failed run changes nothing and the next run reads the same days again.
+        if last_day is None or last_day < cutoff:
+            raise ValueError(f"FCT_STATEMENT_ENTRY has no posting of business clients after "
+                             f"{'(none)' if last_day is None else f'{last_day:%Y-%m-%d}'}: the warehouse load of "
+                             f"{cutoff:%Y-%m-%d} (the cut-off day) looks late")
 
         if mode == "NOTHING_NEW":
             total = staged_rows                    # daily_flows is not touched
         else:
-            # the rows already staged join the new ones, by client; then daily_flows is written again, a group of
-            # clients at a time, each client's rows together
+            # the rows already staged join the new ones, by client; then daily_flows is written again as a new
+            # version, a group of clients per file, each client's rows together
             old = 0
-            for chunk in (iter_dataset("daily_flows", ignore_flow=True) if mode == "NEW_DAYS" else []):
-                groups.add(chunk[list(EMPTY.columns)], "client_no")
-                old += len(chunk)
+            for part in (iter_daily_parts(ignore_flow=True) if mode == "NEW_DAYS" else []):
+                groups.add(part[DAILY_COLUMNS], "client_no")
+                old += len(part)
             if old != staged_rows:
                 raise ValueError(f"daily_flows has {old:,} rows but staging_log says {staged_rows:,}: run the "
                                  "scenario Full rebuild of the daily flows")
-            out = dataiku.Dataset("daily_flows")
-            out.write_schema_from_dataframe(EMPTY)
-            row["partial_write"] = True            # until the writing is done
-            with out.get_writer() as writer:
-                for part in groups.parts():
-                    part = (part.groupby(KEYS, as_index=False)[["money_in", "money_out", "postings"]].sum()
-                            .round({"money_in": 2, "money_out": 2}).sort_values(KEYS))
-                    writer.write_dataframe(part[list(EMPTY.columns)])
-                    total += len(part)
-            row["partial_write"] = False
+            total = write_daily(part.groupby(KEYS, as_index=False)[["money_in", "money_out", "postings"]].sum()
+                                .round({"money_in": 2, "money_out": 2}).sort_values(KEYS)
+                                for part in groups.parts())
             added = total - old
     row.update(postings_read=read_rows, postings_kept=kept, daily_rows_added=added, daily_rows_total=total,
                last_day=f"{last_day:%Y-%m-%d}", postings_per_month=json.dumps(dict(sorted(new.items()))))
