@@ -1,11 +1,18 @@
 PROJECT_NAME = "Digital Cash Management Forecast"
-WAREHOUSE_SQL_CONNECTION = ""         # production: the read-only database connection to the warehouse (Oracle), to
-WAREHOUSE_SQL_SCHEMA = "EDW"          # read DIM_CUSTOMER and FCT_STATEMENT_ENTRY of this schema as they are. Empty:
-LANDING_CONNECTION = "EDW_LANDING"    # read them as CSV files from the landing folder (read-only connection). Neither
-                                      # is used for tables the warehouse simulator has written here (sandbox: CSV).
-CONNECTION = "filesystem_managed"     # where the project writes its own datasets (CSV files)
-FOLDER_CONNECTION = "filesystem_folders"   # where the tracked models and the forecast archive are kept
-HISTORY_YEARS = 2                     # years of postings read the first time (and by the scenario Full rebuild), up
-                                      # to yesterday; at least 2. None: the whole history. Then each night adds the
-                                      # new days. Changing it later: run the setup again, then the scenario Full rebuild
-CODE_ENV = "cashflow_forecast"        # Python code env for the recipes: an existing one (an admin creates it once)
+
+# ── 1. INPUT: the warehouse, read-only through SQL (nothing is ever written there) ──────────────────────────────────
+# The project reads 2 tables of this schema: DIM_CUSTOMER and FCT_STATEMENT_ENTRY.
+EDW_CONNECTION = "YOUR_EDW_CONNECTION"   # the Dataiku connection to the warehouse (Administration > Connections).
+                                         # At the bank, for example "EDW_AI"; on the test machine "EDW_LOCAL"
+EDW_SCHEMA = "EDW"                       # the schema that holds the 2 tables
+HISTORY_YEARS = 2                        # years of postings read the first time (and by the scenario Full rebuild),
+                                         # up to yesterday; at least 2. None: the whole history. Each night then adds
+                                         # the new days. To change it later: run the setup again, then Full rebuild
+
+# ── 2. OUTPUT: where the project writes its own results ─────────────────────────────────────────────────────────────
+OUTPUT_CONNECTION = "filesystem_managed"         # datasets (tables): clients, final_forecast, test_results, logs
+OUTPUT_FOLDER_CONNECTION = "filesystem_folders"  # folders (files): daily_flows (Parquet), models, forecast archive
+
+# ── 3. PYTHON ───────────────────────────────────────────────────────────────────────────────────────────────────────
+CODE_ENV = "YOUR_CODE_ENV"               # an existing Python code env with scikit-learn and mlflow==2.22.0 (an admin
+                                         # creates it once), for example "cashflow_forecast"

@@ -27,8 +27,7 @@ import pandas as pd
 
 from cashflow import (DAILY_COLUMNS, Progress, Spread, append_row, cutoff_date, history_start, iter_daily_parts,
                       write_daily)
-from warehouse import (COLUMNS, TABLES, business_clients, daily_flows, to_standard, table_query,
-                       value_day)
+from warehouse import TABLES, business_clients, daily_flows, table_query, to_standard, value_day
 
 CHUNK, FILES = 200_000, 128
 ROWS_PER_GROUP = 1_000_000          # about this many daily_flows rows per group of clients when rewriting
@@ -40,49 +39,41 @@ end = cutoff + pd.Timedelta(days=1)                # postings up to the cut-off 
 
 def read_table(table, since=None):
     """The table's chunks with the standard names, only the columns the project uses. Postings: only the value dates
-    from since (None: all) to the cut-off day. Through the database connection, our own SELECT of those columns
-    (table_query: the warehouse filters the dates), which does not use the column list Dataiku keeps for the
-    dataset; from files, the dates are filtered here."""
+    from since (None: all) to the cut-off day. Read through the database connection with our own SELECT of those
+    columns (table_query: the warehouse filters the dates), which does not use the column list Dataiku keeps for the
+    dataset."""
     dataset = dataiku.Dataset(TABLES[table][0])
-    name = sql_name(dataset)
-    if name:
-        reader = dataiku.SQLExecutor2(dataset=dataset).query_to_iter(table_query(table, name, since, end))
-        names, rows = [c["name"] for c in reader.get_schema()], []
-        for row in reader.iter_tuples():
-            rows.append(row)
-            if len(rows) == CHUNK:
-                yield to_standard(pd.DataFrame(rows, columns=names), table)
-                rows = []
-        if rows:
+    reader = dataiku.SQLExecutor2(dataset=dataset).query_to_iter(table_query(table, sql_name(dataset), since, end))
+    names, rows = [c["name"] for c in reader.get_schema()], []
+    for row in reader.iter_tuples():
+        rows.append(row)
+        if len(rows) == CHUNK:
             yield to_standard(pd.DataFrame(rows, columns=names), table)
-        return
-    for chunk in dataset.iter_dataframes(chunksize=CHUNK, columns=list(COLUMNS[table].values())):
-        chunk = to_standard(chunk, table)
-        if table == "transactions":
-            day = value_day(chunk["value_date"])
-            chunk = chunk[(day < end) & ((day >= since) if since is not None else True)]
-        yield chunk
+            rows = []
+    if rows:
+        yield to_standard(pd.DataFrame(rows, columns=names), table)
 
 
 def sql_name(dataset):
-    """The table's full quoted name when the dataset is a database table (None for files)."""
+    """The table's full quoted name. The project reads the warehouse through SQL only: anything else stops here."""
     try:
-        return dataset.get_location_info()["info"].get("quotedResolvedTableName")
+        name = dataset.get_location_info()["info"].get("quotedResolvedTableName")
     except Exception:
-        return None
+        name = None
+    if not name:
+        raise ValueError(f"{dataset.name} is not a database table: the project reads the warehouse through SQL only. "
+                         "Run the setup notebook again (it links the warehouse tables)")
+    return name
 
 
 def count_rows(table, since=None):
-    """How many rows read_table will read, for the progress lines: a read-only COUNT(*) with the same filter, through
-    the database connection only (None from files: the progress lines then show no percentage)."""
+    """How many rows read_table will read, for the progress lines: a read-only COUNT(*) with the same filter (None
+    if it fails: the progress lines then show no percentage)."""
     dataset = dataiku.Dataset(TABLES[table][0])
-    name = sql_name(dataset)
-    if not name:
-        return None
     print("PROGRESS counting the rows to read", flush=True)
     try:
         return int(dataiku.SQLExecutor2(dataset=dataset).query_to_df(
-            table_query(table, name, since, end, count=True)).iloc[0, 0])
+            table_query(table, sql_name(dataset), since, end, count=True)).iloc[0, 0])
     except Exception as e:                          # only the progress lines need it
         print(f"Could not count the rows to read ({e}): progress without a percentage")
         return None

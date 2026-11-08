@@ -18,7 +18,10 @@ Dataiku DSS 14.2.0 running in Docker (rootless) for testing development work: th
 
 ### PostgreSQL
 
-Not used by the cash-flow forecast (it stores CSV files); kept for other work.
+On the test machine it plays the bank's warehouse: `warehouse_simulator.ipynb` writes the fake `DIM_CUSTOMER` and
+`FCT_STATEMENT_ENTRY` into its schema `EDW`, and the forecast reads them through the DSS connection `EDW_LOCAL` with
+the same SQL as at the bank (set `EDW_CONNECTION = "EDW_LOCAL"` in the setup notebook). Oracle, the bank's database,
+can't be used here: the Free Edition licence forbids Oracle datasets.
 
 A `postgres:17` container (`dataiku-postgres`) runs next to DSS, with data in `./pg_data`.
 It is **not exposed to the server** — only reachable on the Docker network as `postgres:5432`.

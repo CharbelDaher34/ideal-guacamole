@@ -47,10 +47,11 @@ files in a folder, for reading speed).
 It reads 2 warehouse tables, read-only, and creates or writes nothing in the warehouse: the clients
 (`EDW.DIM_CUSTOMER`) and the daily postings (`EDW.FCT_STATEMENT_ENTRY`), which the staging recipe sums per client,
 day and category in Dataiku. The first run reads each client's whole history; after that, each run reads only the
-new days (through the database connection, a `SELECT` with a date filter) and adds them to `daily_flows`. In the sandbox, they are the datasets the notebook `warehouse_simulator.ipynb` wrote in
-this project; in production, the warehouse's tables through the read-only database connection
-`WAREHOUSE_SQL_CONNECTION` (or CSV files in the landing folder). Names, codes and the categories (a mock list until
-the bank's transaction types are known): `python/warehouse.py` in the project library.
+new days (through the database connection, a `SELECT` with a date filter) and adds them to `daily_flows`. It always
+reads them through SQL, through the read-only database connection `EDW_CONNECTION`: at the bank, the warehouse;
+on the test machine, a local test database with fake data (`warehouse_simulator.ipynb`). The same code, only the
+connection differs. Names, codes and the categories (a mock list until the bank's transaction types are known):
+`python/warehouse.py` in the project library.
 
 It forecasts, per client, per category and in TOTAL (all categories together), the net cash flow (money in minus
 money out) of each of the next 30, 60 and 90 days after the cut-off day (yesterday: days 1-30, 31-60, 61-90), as
@@ -81,10 +82,13 @@ if the postings do not reach the cut-off day.
 
 It then trains, tests and promotes a first model, and runs the first nightly batch.
 
-**How to use it:** in the project, import this notebook and `warehouse_simulator.ipynb` (Notebooks > New notebook
-> Import). In the sandbox, run the simulator first. Then check the settings below and run all cells (Cell > Run All):
-a few minutes with the small sample data. It can be run again in the same project: what exists is kept (data,
-saved model versions, zones, scenario history), and the recipes' code is updated.
+**How to use it (at the bank):** in a new empty project, import this notebook only (Notebooks > New notebook >
+Import), fill in the settings below (`EDW_CONNECTION`, `CODE_ENV`, ...) and run all cells (Cell > Run All). It first
+checks it can read the 2 warehouse tables, and stops with a clear message if not. It can be run again in the same
+project: what exists is kept (data, saved model versions, zones, scenario history), and the recipes' code is updated.
+
+On the test machine only: run `warehouse_simulator.ipynb` first (it writes fake tables into the local test
+database), then this notebook with `EDW_CONNECTION` set to that database's connection.
 """),
     code(read("cells/settings.py")),
     md("""
@@ -246,13 +250,15 @@ write("warehouse_simulator.ipynb", [
     md("""
 # Digital Cash Management Forecast: warehouse simulator (sandbox only)
 
-Plays the warehouse until the project is connected to the real one. Run it in the same project as the forecast,
-before `build_forecast_project.ipynb`.
+**Test machine only, never at the bank.** Plays the warehouse with fake data. Run it in the same project as the
+forecast, before `build_forecast_project.ipynb`.
 
 It generates sample data up to `SIM_END` and writes, as the warehouse would have them at the end of `AS_OF`, the 2
 tables the forecast reads, shaped like the bank's (`warehouse.py`): `DIM_CUSTOMER` (the business clients, and a few
-retail customers the forecast must leave out) and `FCT_STATEMENT_ENTRY` (the daily postings). They are CSV datasets
-of this project. It also sets the project variable `cutoff_override` to the month of `AS_OF`.
+retail customers the forecast must leave out) and `FCT_STATEMENT_ENTRY` (the daily postings). It writes them into a
+local test database (`EDW_CONNECTION`, schema `EDW_SCHEMA`), and the forecast reads them through SQL exactly as it
+reads the bank's warehouse. It cannot write into the bank's warehouse: that connection is read-only. It also sets
+the project variable `cutoff_override` to `AS_OF`.
 
 To simulate the next month, move `AS_OF` to the next month's end, run all cells again, then run the scenario
 **Nightly batch**.

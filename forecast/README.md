@@ -26,22 +26,27 @@ as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/
 2. **Import** `build_forecast_project.ipynb` into the project (Notebooks → New notebook → Import).
 3. **Fill its first cell:**
 
-   | Setting | Set it to |
-   |---|---|
-   | `WAREHOUSE_SQL_CONNECTION` | the connection's name, for example `"EDW"` |
-   | `WAREHOUSE_SQL_SCHEMA` | the tables' schema, for example `"EDW"` |
-   | `CONNECTION`, `FOLDER_CONNECTION` | where the project may write its datasets and folders |
-   | `CODE_ENV` | `"cashflow_forecast"` |
-   | `HISTORY_YEARS` | years of postings read the first time, up to yesterday, for example `2` (at least 2); `None` reads the whole history |
+   | Setting | What it is | At the bank |
+   |---|---|---|
+   | `EDW_CONNECTION` | **input**: the Dataiku connection to the warehouse (read-only) | for example `"EDW_AI"` |
+   | `EDW_SCHEMA` | **input**: the schema of `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` | `"EDW"` |
+   | `HISTORY_YEARS` | **input**: years of postings read the first time, up to yesterday (at least 2); `None` reads everything | for example `2` |
+   | `OUTPUT_CONNECTION` | **output**: where the project writes its datasets (tables) | `"filesystem_managed"` |
+   | `OUTPUT_FOLDER_CONNECTION` | **output**: where it writes its folders (files: `daily_flows`, models, archive) | `"filesystem_folders"` |
+   | `CODE_ENV` | the Python code env | for example `"cashflow_forecast"` |
 
-4. **Run All.** It builds the flow, reads the history once (the last `HISTORY_YEARS` years), trains and promotes a
-   first model, and runs the first forecast. This first read is the long part.
+   The project reads the warehouse through SQL only: there is no CSV input.
+
+4. **Run All.** It first checks it can read both warehouse tables (it stops with a clear message if not). Then it
+   builds the flow, reads the history once (the last `HISTORY_YEARS` years), trains and promotes a first model, and
+   runs the first forecast. This first read is the long part. Check it printed `DIM_CUSTOMER: linked to EDW.DIM_CUSTOMER
+   of <your connection>` (and the same for `FCT_STATEMENT_ENTRY`).
 5. **Check the last cell:** the production model, its test scores, `final_forecast` (one row per active client)
    and the logs.
 6. **Switch on the scenario triggers** (Scenarios → each scenario → Settings): they are created switched off.
 
-Don't import or run `warehouse_simulator.ipynb` or `inference_load_test.ipynb` in this project: they replace the
-data with fake data.
+Don't import or run `warehouse_simulator.ipynb` or `inference_load_test.ipynb` at the bank: they are for the test
+machine, with fake data. (The simulator can't write into the bank's warehouse anyway: that connection is read-only.)
 
 ## Every day and every month
 
@@ -68,6 +73,8 @@ data with fake data.
 | `inference_log` FAILED | read its `error`; `final_forecast` still holds the previous forecast |
 | "No production model yet" | run **Retrain, test and promote** |
 | The setup stops on the code env | send the admin the request it printed |
+| The setup says "Cannot read EDW.<table>" | check `EDW_CONNECTION`, `EDW_SCHEMA`, the table's columns, and that the connection's user may read it |
+| The setup says "already has a dataset ... that is not the table" | fake or old data in the project: delete that dataset, or use a new empty project |
 | Opening a warehouse dataset says "Invalid number of columns" | the dataset's Settings → **Test table & get schema** → Save (the recipes don't need it) |
 | A wrong forecast after a model change | activate the previous version of the saved model `cash_forecast`, run the Nightly batch |
 

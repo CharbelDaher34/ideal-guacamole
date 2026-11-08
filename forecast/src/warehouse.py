@@ -7,11 +7,11 @@ The forecast reads 2 tables of the bank's warehouse, read-only, and creates or w
     FCT_STATEMENT_ENTRY   EDW.FCT_STATEMENT_ENTRY: the daily postings. The staging recipe sums them per client, day
                           and category (money in, money out) in Dataiku and adds the new days to daily_flows. Through
                           the database connection, the only query is a read-only SELECT of the columns below with a
-                          date filter on VAL_DT (table_query): the whole history the first time (or after the
-                          scenario Full rebuild), then only the days after the last day already in daily_flows.
-Through the database connection to the warehouse (Oracle, read-only), or as CSV files in a landing folder; the setup
-notebook's settings choose. The sandbox's simulated tables are CSV (read whole, filtered by date in Dataiku). If a
-name or a code differs at the bank, only this file changes.
+                          date filter on VAL_DT (table_query): the last HISTORY_YEARS years the first time (or after
+                          the scenario Full rebuild), then only the days after the last day already in daily_flows.
+Always through the database connection to the warehouse (the setup's EDW_CONNECTION: Oracle at the bank, read-only;
+a local PostgreSQL with fake data on the test machine): the same code, only the connection differs. If a name or a
+code differs at the bank, only this file changes.
 """
 import numpy as np
 import pandas as pd

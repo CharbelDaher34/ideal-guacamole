@@ -1,6 +1,9 @@
-# Plays the warehouse: publishes the sample data as it was known on a date (AS_OF), as the
-# 2 warehouse tables the forecast reads, as CSV datasets of this project, shaped like the bank's: DIM_CUSTOMER (the
-# clients, with some retail customers the forecast must leave out) and FCT_STATEMENT_ENTRY (the daily postings).
+# Plays the warehouse (test machine only): publishes the sample data as it was known on a date (AS_OF), as the
+# 2 warehouse tables the forecast reads, written into a local test database (EDW_CONNECTION, schema EDW_SCHEMA), shaped
+# like the bank's: DIM_CUSTOMER (the clients, with some retail customers the forecast must leave out) and
+# FCT_STATEMENT_ENTRY (the daily postings). The forecast then reads them through SQL exactly as it reads the bank's
+# warehouse: the same code, only the connection differs. It cannot write into the bank's warehouse: that connection
+# is read-only.
 # It also sets the project variable cutoff_override to the month of AS_OF. The generator's own source tables (loans,
 # deposits, standing orders, ...) stay inside the simulator.
 # The sample data is generated once up to SIM_END; publishing "as of" a date keeps what had happened or was
@@ -183,14 +186,14 @@ def to_warehouse(df, table):
     return out.reset_index(drop=True)
 
 
-def load_warehouse(tables, day, connection):
-    """Writes the 2 tables as the warehouse has them at the end of `day`, and sets the project variable
-    cutoff_override to that day (the forecast's cut-off: the last day of data). Returns it (YYYY-MM-DD)."""
+def load_warehouse(tables, day, connection, schema):
+    """Writes the 2 tables as the warehouse has them at the end of `day` into the test database (connection,
+    schema), and sets the project variable cutoff_override to that day (the forecast's cut-off: the last day of
+    data). Returns it (YYYY-MM-DD)."""
     tables = curate(as_of(tables, day), day)
-    existing = {d["name"] for d in project.list_datasets()}
     for table, (warehouse_table, _) in TABLES.items():
         rows = to_warehouse(tables[table], table)
-        write_table(warehouse_table, rows, connection, existing)
+        write_table(warehouse_table, rows, connection, schema)
         print(f"{warehouse_table:22s} {len(rows):>9,} rows")
     cutoff = f"{pd.Timestamp(day):%Y-%m-%d}"
     variables = project.get_variables()
@@ -199,17 +202,17 @@ def load_warehouse(tables, day, connection):
     return str(cutoff)
 
 
-CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
-       "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
-
-
-def write_table(name, df, connection, existing):
-    """Write a warehouse table: a CSV dataset of this project."""
-    if name not in existing:
-        dataset = project.new_managed_dataset(name).with_store_into(connection).create()
-        settings = dataset.get_settings()
-        settings.get_raw()["formatType"] = "csv"
-        settings.get_raw()["formatParams"].update(CSV)
-        settings.save()
-        existing.add(name)
-    dataiku.Dataset(name).write_with_schema(df)
+def write_table(name, df, connection, schema):
+    """Write a warehouse table into the test database: the table schema.name, replaced. Through a temporary dataset,
+    deleted afterwards (the table stays): the setup links the project's own dataset to the table."""
+    if "VAL_DT" in df:
+        df = df.assign(VAL_DT=pd.to_datetime(df["VAL_DT"]))      # a real date column, like the warehouse's
+    database = client.get_connection(connection).get_info().get_type()
+    helper = f"simulator_{name}"
+    if helper in {d["name"] for d in project.list_datasets()}:
+        project.get_dataset(helper).delete(drop_data=False)
+    dataset = project.create_sql_table_dataset(helper, database, connection, name, schema)
+    try:
+        dataiku.Dataset(helper).write_with_schema(df)
+    finally:
+        dataset.delete(drop_data=False)

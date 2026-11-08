@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 import time
 import types
@@ -23,6 +24,27 @@ cashflow = load_module("cashflow", LIBRARY_CODE)
 warehouse = load_module("warehouse", WAREHOUSE_CODE)
 tracking = load_module("tracking", TRACKING_CODE)
 RAW = [warehouse_table for warehouse_table, _ in warehouse.TABLES.values()]
+
+# the input, checked before anything is built: the 2 warehouse tables, read-only through EDW_CONNECTION (SQL only)
+try:
+    database = client.get_connection(EDW_CONNECTION).get_info().get_type()      # Oracle, PostgreSQL, ...
+except Exception as e:
+    raise RuntimeError(f"Cannot use the connection {EDW_CONNECTION!r} ({e}). Check EDW_CONNECTION, or ask a Dataiku "
+                       "admin for a read-only database connection to the warehouse, usable by your group.") from None
+print(f"Input: {database} connection {EDW_CONNECTION}, read-only")
+for table, (name, _) in warehouse.TABLES.items():
+    columns = warehouse.read_columns(table)
+    query = warehouse.table_query(table, f'"{EDW_SCHEMA}"."{name}"', end=pd.Timestamp.now())
+    try:
+        dataiku.SQLExecutor2(connection=EDW_CONNECTION).query_to_df(f"SELECT * FROM ({query}) q WHERE 1 = 0")
+    except Exception as e:
+        found = re.search(r"(ORA-\d+[^\\\n']*|ERROR: [^\\\n']*)", str(e))    # the database's own message
+        reason = found.group(1).strip() if found else str(e).splitlines()[0][:200]
+        raise RuntimeError(f"Cannot read {EDW_SCHEMA}.{name} through {EDW_CONNECTION} ({reason}). Check EDW_SCHEMA, "
+                           f"that the table exists with the columns {', '.join(columns)}, and that the connection's "
+                           "user may read it.") from None
+    print(f"   {EDW_SCHEMA}.{name}: can be read ({len(columns)} columns used)")
+print(f"Output: datasets on {OUTPUT_CONNECTION}, folders on {OUTPUT_FOLDER_CONNECTION}")
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
 COMPRESSED = ["final_forecast"]       # the big one: compressed CSV (gz)
@@ -95,12 +117,12 @@ recipes = {r["name"] for r in project.list_recipes()}
 
 
 def new_dataset(name):
-    """Managed dataset of the project: a CSV file (comma-separated, with a header row) on CONNECTION. Kept if it
+    """Managed dataset of the project: a CSV file (comma-separated, with a header row) on OUTPUT_CONNECTION. Kept if it
     exists."""
     if name in datasets:
         return name
     datasets.add(name)
-    dataset = project.new_managed_dataset(name).with_store_into(CONNECTION).create()
+    dataset = project.new_managed_dataset(name).with_store_into(OUTPUT_CONNECTION).create()
     settings = dataset.get_settings()
     settings.get_raw()["formatType"] = "csv"
     settings.get_raw()["formatParams"].update(CSV, compress="gz" if name in COMPRESSED else "")
@@ -110,36 +132,32 @@ def new_dataset(name):
     return name
 
 
-# the 2 warehouse tables: already here if the warehouse simulator wrote them (sandbox, CSV), otherwise read-only from
-# the warehouse as they are (production): tables of WAREHOUSE_SQL_SCHEMA through the database connection
-# WAREHOUSE_SQL_CONNECTION, or CSV files in the landing folder (LANDING_CONNECTION). Nothing is created there.
-simulated = [name for name in RAW if name in datasets]
-source = WAREHOUSE_SQL_CONNECTION or LANDING_CONNECTION
-if WAREHOUSE_SQL_CONNECTION and len(simulated) < len(RAW):
-    try:
-        database = client.get_connection(WAREHOUSE_SQL_CONNECTION).get_info().get_type()   # Oracle, Teradata, ...
-    except Exception as e:
-        raise RuntimeError(f"Cannot use the connection {WAREHOUSE_SQL_CONNECTION!r} ({e}). Ask a Dataiku admin for a "
-                           "read-only database connection to the warehouse, usable by your group, or check its "
-                           "name in WAREHOUSE_SQL_CONNECTION.") from None
+# the 2 warehouse tables: datasets linked read-only to the tables of EDW_SCHEMA through EDW_CONNECTION (nothing is
+# created or written there). One already in the project is kept only if it is that table (a run of the setup again);
+# anything else (fake data, CSV, an old project's table) stops the setup before it is used.
 for name in RAW:
     if name in datasets:
+        raw = project.get_dataset(name).get_settings().get_raw()
+        params = raw.get("params", {})
+        if (params.get("connection"), params.get("schema"), params.get("table")) != (EDW_CONNECTION, EDW_SCHEMA, name):
+            raise RuntimeError(f"The project already has a dataset {name} that is not the table {EDW_SCHEMA}.{name} "
+                               f"of {EDW_CONNECTION} (it is {raw.get('type')} on {params.get('connection')}): fake or "
+                               f"old data. Delete it (Flow > {name} > Delete), or use a new empty project, then run "
+                               "the setup again.")
+        print(f"{name}: already linked to {EDW_SCHEMA}.{name} of {EDW_CONNECTION}")
         continue
     datasets.add(name)
-    if WAREHOUSE_SQL_CONNECTION:
-        dataset = project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name,
-                                                   WAREHOUSE_SQL_SCHEMA)
-        dataset.autodetect_settings().save()       # the table's columns, read from the database
-        if not dataset.get_settings().get_raw().get("schema", {}).get("columns"):
-            # staging reads with its own SELECT, so it still works; only Dataiku's view of the table would fail
-            print(f"WARNING: Dataiku could not read the columns of {WAREHOUSE_SQL_SCHEMA}.{name}: opening the dataset "
-                  "in Dataiku will fail. Fix: the dataset's Settings > Test table & get schema > Save.")
-    else:
-        dataset = project.create_dataset(name, "Filesystem", params={"connection": LANDING_CONNECTION,
-                                                                     "path": "/" + name},
-                                          formatType="csv", formatParams=CSV)
-        dataset.autodetect_settings().save()
-print(f"{len(simulated)} warehouse tables already in the project, {len(RAW) - len(simulated)} read from {source}")
+    dataset = project.create_sql_table_dataset(name, database, EDW_CONNECTION, name, EDW_SCHEMA)
+    dataset.autodetect_settings().save()           # the table's columns, read from the database
+    if not dataset.get_settings().get_raw().get("schema", {}).get("columns"):
+        # staging reads with its own SELECT, so it still works; only Dataiku's view of the table would fail
+        print(f"WARNING: Dataiku could not read the columns of {EDW_SCHEMA}.{name}: opening the dataset in Dataiku "
+              "will fail. Fix: the dataset's Settings > Test table & get schema > Save.")
+    print(f"{name}: linked to {EDW_SCHEMA}.{name} of {EDW_CONNECTION}")
+override = variables["standard"].get("cutoff_override")
+if override:
+    print(f"WARNING: the project variable cutoff_override is {override}: the forecast uses that day instead of "
+          "yesterday. Delete it (Project > Variables) unless you mean it.")
 
 existing_folders = {f["name"]: f["id"] for f in project.list_managed_folders()}
 folders = {}
@@ -147,7 +165,7 @@ for name in FOLDERS:
     if name in existing_folders:
         folders[name] = project.get_managed_folder(existing_folders[name])
         continue
-    folders[name] = project.create_managed_folder(name, connection_name=FOLDER_CONNECTION)
+    folders[name] = project.create_managed_folder(name, connection_name=OUTPUT_FOLDER_CONNECTION)
     if name in BUILT_BY_NAME:
         folder_settings = folders[name].get_settings()
         folder_settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"

@@ -25,4 +25,8 @@ def check_code_env(name, packages=PACKAGES):
     print(f"Code env {name} has {', '.join(packages)}")
 
 
+placeholders = [name for name, value in (("EDW_CONNECTION", EDW_CONNECTION), ("CODE_ENV", CODE_ENV))
+                if str(value).startswith("YOUR_")]
+if placeholders:
+    raise RuntimeError(f"Fill in {' and '.join(placeholders)} in the settings cell above, then run again.")
 check_code_env(CODE_ENV)
