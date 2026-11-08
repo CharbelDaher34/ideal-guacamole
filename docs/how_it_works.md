@@ -139,7 +139,7 @@ production model; the nightly forecast always uses it. Rolling back means activa
   columns used: `DIM_CUSTOMER` whole, the postings with a date filter on `VAL_DT`. They name the columns, so they
   don't depend on the column list Dataiku keeps for each table (an empty list there caused "Invalid number of
   columns" in the old project).
-- **Only the new days from the warehouse.** The first run reads the whole history once. After that, each night
+- **Only the new days from the warehouse.** The first run reads the history once: the last `HISTORY_YEARS` years up to the cut-off day (a setup setting, at least 2; `None`: everything). After that, each night
   reads only the postings after the last day already in `daily_flows`, up to the cut-off day (yesterday).
 - **Kept grouped by client.** When there are new days, staging writes `daily_flows` again with the new days in
   place: each client's rows together, old and new, a group of clients per Parquet file. It writes a new version of
@@ -153,7 +153,7 @@ production model; the nightly forecast always uses it. Rolling back means activa
   table.
 - **Late load check:** if the warehouse has no posting up to the cut-off day, staging stops and changes nothing. The
   next run reads the same days again.
-- **Full rebuild** (a scenario run by hand) empties `daily_flows` and reads the whole history again. Use it after a
+- **Full rebuild** (a scenario run by hand) empties `daily_flows` and reads the history again (the last `HISTORY_YEARS` years). Use it after a
   reversal cancels a posting from a day already staged, or after the category list changes.
 - Big reads never sit in memory whole: rows are spread over files on the server's disk by client and handled one
   group of clients at a time.
@@ -213,7 +213,7 @@ With no production model yet, the first model is promoted. Every decision, its r
 |---|---|---|
 | **Nightly batch** | set the cut-off day → check the warehouse load → step 1 → step 4. Never trains. | daily, 06:00 Riyadh |
 | **Retrain, test and promote** | set the cut-off day → check the warehouse load → step 1 → step 2 → step 3. Never forecasts: the next Nightly batch uses the new active version. | monthly, on the 5th, 07:00 Riyadh |
-| **Full rebuild of the daily flows** | set the cut-off day → check the warehouse load → empty `daily_flows` and `staging_log` → read the whole history again | by hand |
+| **Full rebuild of the daily flows** | set the cut-off day → check the warehouse load → empty `daily_flows` and `staging_log` → read the history again (the last `HISTORY_YEARS` years) | by hand |
 
 ## 6. What gets logged
 

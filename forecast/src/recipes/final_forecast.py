@@ -21,7 +21,7 @@ import time
 import dataiku
 import pandas as pd
 
-from cashflow import append_row, cutoff_date, history_days, iter_clients, read_dataset, until
+from cashflow import Progress, append_row, cutoff_date, history_days, iter_clients, read_dataset, until
 from forecast import forecast_table, one_row_per_client, production_forecaster
 from models import active, forecast
 
@@ -54,6 +54,7 @@ def run():
         # read and forecast chunk by chunk; the forecasts are kept on disk: final_forecast is only written once every
         # chunk worked, so a failed run leaves the previous forecast as it was
         done, seen, daily_rows, forecasting = [], set(), 0, 0.0
+        progress = Progress(f"forecasting the active clients ({per_chunk:,} per chunk)", len(numbers))
         for daily in iter_clients("daily_flows", per_chunk,
                                   keep=lambda d: until(d[d["client_no"].isin(numbers)], cutoff)):
             ticked = time.time()
@@ -64,7 +65,10 @@ def run():
             seen |= set(group["client_no"])
             daily_rows += len(daily)
             forecasting += time.time() - ticked
+            progress.add(len(group))
         missing = numbers - seen                     # active clients with no posting at all: one row each
+        progress.add(len(missing))
+        progress.finish()
         if missing:
             done.append(keep(one_row_per_client(pd.DataFrame(columns=NO_ROWS), cutoff, missing), folder,
                              len(done)))
@@ -73,6 +77,7 @@ def run():
                    seconds_reading=round(read_done - started - forecasting, 1))
 
         out, writer, counts = dataiku.Dataset("final_forecast"), None, {}
+        progress = Progress("writing final_forecast and the archive (chunks)", len(done))
         with dataiku.Folder("forecast_archive").get_writer(name) as archive_file, \
                 gzip.GzipFile(fileobj=archive_file, mode="wb") as archive:
             for path in done:
@@ -87,7 +92,9 @@ def run():
                 archive.write(frame.to_csv(index=False, header=path == done[0]).encode())
                 for status, n in frame["status"].value_counts().items():
                     counts[status] = counts.get(status, 0) + int(n)
+                progress.add()
         writer.close()
+        progress.finish()
     log.update(clients_ok=counts.get("OK", 0), clients_not_enough_history=counts.get("NOT_ENOUGH_HISTORY", 0),
                clients_no_postings=counts.get("NO_POSTINGS", 0), seconds_writing=round(time.time() - read_done, 1))
 

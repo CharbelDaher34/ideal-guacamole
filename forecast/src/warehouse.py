@@ -93,15 +93,16 @@ def value_day(dates):
     return d.dt.normalize()
 
 
-def table_query(table, name, since=None, end=None):
+def table_query(table, name, since=None, end=None, count=False):
     """The read-only query staging runs through the database connection: only the columns read (COLUMNS) of a table,
     named in the query, so it never depends on the column list Dataiku keeps for the dataset. name: the table's full
     quoted name. For the postings, only the value dates from since (None: the whole history) to before end; the value
-    date comes back as text YYYY-MM-DD (TO_CHAR: Oracle and PostgreSQL), so no time zone can move it."""
+    date comes back as text YYYY-MM-DD (TO_CHAR: Oracle and PostgreSQL), so no time zone can move it. count: the
+    same rows counted (COUNT(*)), for the progress lines."""
     date = COLUMNS["transactions"]["value_date"] if table == "transactions" else None
     columns = [f"TO_CHAR(\"{date}\", 'YYYY-MM-DD') AS \"{date}\"" if c == date else f'"{c}"'
                for c in COLUMNS[table].values()]
-    query = f"SELECT {', '.join(columns)} FROM {name}"
+    query = f"SELECT {'COUNT(*) AS N' if count else ', '.join(columns)} FROM {name}"
     if date:
         where = [f"\"{date}\" < DATE '{end:%Y-%m-%d}'"]
         if since is not None:

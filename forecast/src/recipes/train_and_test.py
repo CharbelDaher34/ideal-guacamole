@@ -4,17 +4,31 @@
 #   backtest: trained without the last 6 periods of 30 days, then tested on them (models.backtest, test_results)
 #   final: trained on everything up to the cut-off, deployed as version <model ID> of the saved model cash_forecast
 #   (not active: the promotion activates it)
+import time
+
 import dataiku
 
 from cashflow import cutoff_date, read_daily, read_dataset, until
 from models import backtest, new_forecaster, run_metrics, test_results
 from tracking import log_model, new_model_id
 
+started = time.time()
+
+
+def step(what):
+    """A progress line in the job's log (the setup notebook shows it while it waits)."""
+    print(f"PROGRESS training: {what} ({(time.time() - started) / 60:.1f} min so far)", flush=True)
+
+
 cutoff = cutoff_date()
+step("reading daily_flows and clients")
 daily, clients = until(read_daily(), cutoff), read_dataset("clients")
 backtested, final = new_forecaster(), new_forecaster()
+step(f"1/2 test: training without the last periods, then testing on them ({len(daily):,} daily rows)")
 tested = backtest(backtested, daily, clients, cutoff)
+step("2/2 training the final model on everything up to the cut-off")
 final.fit(daily, clients, cutoff)
+step("saving and deploying the model")
 model_id = new_model_id(cutoff)
 
 results = test_results(tested)

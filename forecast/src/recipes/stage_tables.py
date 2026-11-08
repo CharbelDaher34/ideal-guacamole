@@ -25,7 +25,8 @@ import time
 import dataiku
 import pandas as pd
 
-from cashflow import DAILY_COLUMNS, Spread, append_row, cutoff_date, iter_daily_parts, write_daily
+from cashflow import (DAILY_COLUMNS, Progress, Spread, append_row, cutoff_date, history_start, iter_daily_parts,
+                      write_daily)
 from warehouse import (COLUMNS, TABLES, business_clients, daily_flows, to_standard, table_query,
                        value_day)
 
@@ -43,10 +44,7 @@ def read_table(table, since=None):
     (table_query: the warehouse filters the dates), which does not use the column list Dataiku keeps for the
     dataset; from files, the dates are filtered here."""
     dataset = dataiku.Dataset(TABLES[table][0])
-    try:
-        name = dataset.get_location_info()["info"].get("quotedResolvedTableName")
-    except Exception:
-        name = None
+    name = sql_name(dataset)
     if name:
         reader = dataiku.SQLExecutor2(dataset=dataset).query_to_iter(table_query(table, name, since, end))
         names, rows = [c["name"] for c in reader.get_schema()], []
@@ -64,6 +62,30 @@ def read_table(table, since=None):
             day = value_day(chunk["value_date"])
             chunk = chunk[(day < end) & ((day >= since) if since is not None else True)]
         yield chunk
+
+
+def sql_name(dataset):
+    """The table's full quoted name when the dataset is a database table (None for files)."""
+    try:
+        return dataset.get_location_info()["info"].get("quotedResolvedTableName")
+    except Exception:
+        return None
+
+
+def count_rows(table, since=None):
+    """How many rows read_table will read, for the progress lines: a read-only COUNT(*) with the same filter, through
+    the database connection only (None from files: the progress lines then show no percentage)."""
+    dataset = dataiku.Dataset(TABLES[table][0])
+    name = sql_name(dataset)
+    if not name:
+        return None
+    print("PROGRESS counting the rows to read", flush=True)
+    try:
+        return int(dataiku.SQLExecutor2(dataset=dataset).query_to_df(
+            table_query(table, name, since, end, count=True)).iloc[0, 0])
+    except Exception as e:                          # only the progress lines need it
+        print(f"Could not count the rows to read ({e}): progress without a percentage")
+        return None
 
 
 LOG = {"run_at": "string", "status": "string", "error": "string", "mode": "string", "cutoff_date": "string",
@@ -90,10 +112,14 @@ def stage():
             raise ValueError("staging_log is empty but daily_flows is not: run the scenario Full rebuild")
     since = None if last_day is None else last_day + pd.Timedelta(days=1)
     mode = "FULL" if since is None else "NOTHING_NEW" if since >= end else "NEW_DAYS"
-    row.update(mode=mode, read_from=f"{since:%Y-%m-%d}" if mode == "NEW_DAYS" else "")
+    if mode == "FULL":
+        since = history_start(cutoff)              # project variable history_years (None: the whole history)
+    row.update(mode=mode, read_from=f"{since:%Y-%m-%d}" if since is not None and mode != "NOTHING_NEW" else "")
 
+    print(f"PROGRESS staging ({mode}): reading the clients", flush=True)
     clients = business_clients(pd.concat([business_clients(chunk) for chunk in read_table("clients")],
                                          ignore_index=True))
+    print(f"PROGRESS {len(clients):,} business clients", flush=True)
     if clients.empty:
         raise ValueError("No business client in DIM_CUSTOMER: check the codes RETAIL and BUSINESS_ID in "
                          "warehouse.py")
@@ -106,21 +132,27 @@ def stage():
     with tempfile.TemporaryDirectory() as spread:
         if mode != "NOTHING_NEW":
             postings = Spread(os.path.join(spread, "postings"), FILES)
+            progress = Progress("reading the postings from the warehouse", count_rows("transactions", since))
             for chunk in read_table("transactions", since):
                 read_rows += len(chunk)
+                progress.add(len(chunk))
                 chunk = chunk[chunk["client_no"].isin(numbers)]
                 kept += len(chunk)
                 if len(chunk):
                     last_day = max(value_day(chunk["value_date"]).max(), last_day or pd.Timestamp.min)
                     postings.add(chunk, chunk["txn_ref"].fillna(chunk["entry_id"].astype(str)))
+            progress.finish()
             row.update(postings_read=read_rows, postings_kept=kept)
             groups = Spread(os.path.join(spread, "groups"),
                             max(16, -(-(staged_rows + kept) // ROWS_PER_GROUP)))   # groups of clients
+            progress = Progress("summing the postings per client, day and category (files)", postings.n)
             for part in postings.parts():
                 flows = daily_flows(part, numbers, cutoff)
                 for month, n in flows.groupby(flows["day"].dt.strftime("%Y-%m"))["postings"].sum().items():
                     new[month] = new.get(month, 0) + int(n)
                 groups.add(flows, "client_no")
+                progress.add()
+            progress.finish()
 
         # the postings must reach the cut-off day (yesterday): otherwise the warehouse load looks late. Checked before
         # anything is written, so a failed run changes nothing and the next run reads the same days again.
@@ -135,18 +167,29 @@ def stage():
             # the rows already staged join the new ones, by client; then daily_flows is written again as a new
             # version, a group of clients per file, each client's rows together
             old = 0
-            for part in (iter_daily_parts(ignore_flow=True) if mode == "NEW_DAYS" else []):
-                groups.add(part[DAILY_COLUMNS], "client_no")
-                old += len(part)
+            if mode == "NEW_DAYS":
+                progress = Progress("adding the rows already in daily_flows", staged_rows)
+                for part in iter_daily_parts(ignore_flow=True):
+                    groups.add(part[DAILY_COLUMNS], "client_no")
+                    old += len(part)
+                    progress.add(len(part))
+                progress.finish()
             if old != staged_rows:
                 raise ValueError(f"daily_flows has {old:,} rows but staging_log says {staged_rows:,}: run the "
                                  "scenario Full rebuild of the daily flows")
-            total = write_daily(part.groupby(KEYS, as_index=False)[["money_in", "money_out", "postings"]].sum()
-                                .round({"money_in": 2, "money_out": 2}).sort_values(KEYS)
+            progress = Progress("writing daily_flows (groups of clients)", groups.n)
+            total = write_daily(counted(part.groupby(KEYS, as_index=False)[["money_in", "money_out", "postings"]]
+                                        .sum().round({"money_in": 2, "money_out": 2}).sort_values(KEYS), progress)
                                 for part in groups.parts())
+            progress.finish()
             added = total - old
     row.update(postings_read=read_rows, postings_kept=kept, daily_rows_added=added, daily_rows_total=total,
                last_day=f"{last_day:%Y-%m-%d}", postings_per_month=json.dumps(dict(sorted(new.items()))))
+
+
+def counted(part, progress):
+    progress.add()
+    return part
 
 
 def write_log(status, error=""):

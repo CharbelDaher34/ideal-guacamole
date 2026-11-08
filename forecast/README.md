@@ -32,9 +32,10 @@ as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/
    | `WAREHOUSE_SQL_SCHEMA` | the tables' schema, for example `"EDW"` |
    | `CONNECTION`, `FOLDER_CONNECTION` | where the project may write its datasets and folders |
    | `CODE_ENV` | `"cashflow_forecast"` |
+   | `HISTORY_YEARS` | years of postings read the first time, up to yesterday, for example `2` (at least 2); `None` reads the whole history |
 
-4. **Run All.** It builds the flow, reads the whole history once, trains and promotes a first model, and runs the
-   first forecast. The first read of the whole history is the long part.
+4. **Run All.** It builds the flow, reads the history once (the last `HISTORY_YEARS` years), trains and promotes a
+   first model, and runs the first forecast. This first read is the long part.
 5. **Check the last cell:** the production model, its test scores, `final_forecast` (one row per active client)
    and the logs.
 6. **Switch on the scenario triggers** (Scenarios → each scenario → Settings): they are created switched off.
@@ -48,7 +49,9 @@ data with fake data.
 |---|---|---|
 | **Nightly batch** | daily, 06:00 | reads the new days, forecasts every active client with the production model |
 | **Retrain, test and promote** | monthly, on the 5th | trains a new model and activates it only if it passes the promotion rules |
-| **Full rebuild of the daily flows** | by hand | reads the whole history again |
+| **Full rebuild of the daily flows** | by hand | reads the history again (the last `HISTORY_YEARS` years) |
+
+**To follow a long run:** the setup notebook prints progress lines while it runs (rows read of the total, %, about how long is left). For a scenario, open its job (Jobs) → Log and search `PROGRESS`.
 
 **After each run, check:**
 - `inference_log`: `status` is `SUCCESS`; `active_clients` = `clients_ok` + `clients_not_enough_history` +
@@ -77,6 +80,7 @@ data with fake data.
 | `promotion_beat_simple_guess` | true | promotion rule: must beat "same as the last 30 days" |
 | `promotion_min_gain` | 0.0 | promotion rule: how much better than production |
 | `inference_clients_per_chunk` | 5000 | clients forecast at a time: bigger is faster but needs more memory |
+| `history_years` | from `HISTORY_YEARS` | set by the setup; to change it, run the setup again with a new `HISTORY_YEARS`, then **Full rebuild** |
 | `cutoff_override` | empty | forecast from another day's data (YYYY-MM-DD) instead of yesterday |
 
 ## Optional: benchmark the bank's server

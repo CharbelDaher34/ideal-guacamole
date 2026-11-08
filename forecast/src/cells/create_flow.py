@@ -78,6 +78,11 @@ missing = {k: v for k, v in defaults.items() if variables["standard"].get(k) in 
 if missing:
     variables["standard"].update(missing)
     project.set_variables(variables)
+# history_years: always the setup's setting HISTORY_YEARS (staging's first read and the scenario Full rebuild)
+variables["standard"]["history_years"] = "" if cashflow.history_years(HISTORY_YEARS) is None else HISTORY_YEARS
+project.set_variables(variables)
+print("History read the first time (and by Full rebuild):",
+      "the whole history" if HISTORY_YEARS is None else f"the last {HISTORY_YEARS} years up to the cut-off day")
 print("Forecasters: Retrain trains {forecaster}, the lab tries {lab_forecaster}; inference forecasts "
       "{inference_clients_per_chunk} clients at a time".format(**variables["standard"]))
 print("Promotion rules:", {k: variables["standard"][k] for k in tracking.PROMOTION_RULES})

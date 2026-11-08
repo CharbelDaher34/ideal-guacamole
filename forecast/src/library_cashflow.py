@@ -171,6 +171,46 @@ def append_row(name, columns, row):
         writer.write_dataframe(frame)
 
 
+class Progress:
+    """Progress lines in the job's log, for long steps: how much is done (of how much, when known), the percentage,
+    the time so far and about how long is left. One line at most every `every` seconds, and the last one always. They
+    start with PROGRESS, so the setup notebook can show them while it waits for the job.
+        progress = Progress("reading postings", total=41_000_000); progress.add(200_000) ... progress.finish()"""
+
+    def __init__(self, what, total=None, every=30):
+        import time
+        self.what, self.total, self.every = what, total, every
+        self.started = self.printed = time.time()
+        self.done = 0
+        print(f"PROGRESS {what}: starting" + (f", {total:,} to do" if total else ""), flush=True)
+
+    def add(self, n=1):
+        import time
+        self.done += n
+        if time.time() - self.printed >= self.every:
+            self.show()
+
+    def finish(self):
+        self.show(last=True)
+
+    def show(self, last=False):
+        import time
+        now = time.time()
+        self.printed = now
+        minutes = (now - self.started) / 60
+        if last:
+            print(f"PROGRESS {self.what}: done, {self.done:,} in {minutes:.1f} min", flush=True)
+            return
+        line = f"PROGRESS {self.what}: {self.done:,}"
+        if self.total:
+            share = min(self.done / self.total, 1.0)
+            line += f" of {self.total:,} ({share:.0%})"
+        line += f", {minutes:.1f} min so far"
+        if self.total and 0 < share < 1:
+            line += f", about {minutes * (1 - share) / share:.0f} min left"
+        print(line, flush=True)
+
+
 class Spread:
     """Rows spread over n files on local disk by the hash of a column, then read back one file at a time: all the
     rows with the same value of that column end up in the same file, and memory holds one file, not the whole table.
@@ -221,6 +261,35 @@ def cutoff_date():
     first step of each scenario: warehouse.set_cutoff)."""
     import dataiku
     return pd.Timestamp(dataiku.get_custom_variables()["cutoff_date"])
+
+
+MIN_HISTORY_YEARS = 2       # history_years can't be less: a client needs MIN_HISTORY_DAYS of history, and the test
+                            # keeps the last 6 periods of 30 days aside
+
+
+def history_years(value):
+    """The number of years of history to read (project variable history_years): None for the whole history. Stops
+    with a clear message if it is not a whole number of at least MIN_HISTORY_YEARS."""
+    value = "" if value is None else str(value).strip()
+    if value in ("", "None", "none", "ALL", "all"):
+        return None
+    try:
+        years = int(float(value))
+    except ValueError:
+        years = None
+    if years is None or years != float(value) or years < MIN_HISTORY_YEARS:
+        raise ValueError(f"history_years is {value!r}: it must be a whole number of years, at least "
+                         f"{MIN_HISTORY_YEARS} (a client needs {MIN_HISTORY_DAYS} days of history and the test keeps "
+                         "the last 180 days aside), or empty for the whole history")
+    return years
+
+
+def history_start(cutoff):
+    """The first day staging reads when it reads everything (the first run, or the scenario Full rebuild): the
+    project variable history_years years before the cut-off day, or None for the whole history."""
+    import dataiku
+    years = history_years(dataiku.get_custom_variables().get("history_years"))
+    return None if years is None else cutoff - pd.DateOffset(years=years) + pd.Timedelta(days=1)
 
 
 def until(daily, cutoff):
