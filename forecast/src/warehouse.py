@@ -2,11 +2,12 @@
 
 The forecast reads 2 tables of the bank's warehouse, read-only, and creates or writes nothing there:
     DIM_CUSTOMER          EDW.DIM_CUSTOMER: the clients. The project keeps the business clients (companies and sole
-                          proprietors) and only the columns below: personal fields are never read.
+                          proprietors) and only the columns below: personal fields are never read. Through the
+                          database connection, a read-only SELECT of those columns (table_query), whole every run.
     FCT_STATEMENT_ENTRY   EDW.FCT_STATEMENT_ENTRY: the daily postings. The staging recipe sums them per client, day
                           and category (money in, money out) in Dataiku and adds the new days to daily_flows. Through
                           the database connection, the only query is a read-only SELECT of the columns below with a
-                          date filter on VAL_DT (transactions_query): the whole history the first time (or after the
+                          date filter on VAL_DT (table_query): the whole history the first time (or after the
                           scenario Full rebuild), then only the days after the last day already in daily_flows.
 Through the database connection to the warehouse (Oracle, read-only), or as CSV files in a landing folder; the setup
 notebook's settings choose. The sandbox's simulated tables are CSV (read whole, filtered by date in Dataiku). If a
@@ -92,18 +93,21 @@ def value_day(dates):
     return d.dt.normalize()
 
 
-def transactions_query(table, since, end):
-    """The read-only query staging runs through the database connection: the columns read (COLUMNS) of the
-    postings with a value date from since (None: the whole history) to before end. table: the table's full quoted
-    name. The value date comes back as text YYYY-MM-DD (TO_CHAR: Oracle and PostgreSQL), so no time zone can move
-    it."""
-    date = COLUMNS["transactions"]["value_date"]
+def table_query(table, name, since=None, end=None):
+    """The read-only query staging runs through the database connection: only the columns read (COLUMNS) of a table,
+    named in the query, so it never depends on the column list Dataiku keeps for the dataset. name: the table's full
+    quoted name. For the postings, only the value dates from since (None: the whole history) to before end; the value
+    date comes back as text YYYY-MM-DD (TO_CHAR: Oracle and PostgreSQL), so no time zone can move it."""
+    date = COLUMNS["transactions"]["value_date"] if table == "transactions" else None
     columns = [f"TO_CHAR(\"{date}\", 'YYYY-MM-DD') AS \"{date}\"" if c == date else f'"{c}"'
-               for c in COLUMNS["transactions"].values()]
-    where = [f"\"{date}\" < DATE '{end:%Y-%m-%d}'"]
-    if since is not None:
-        where.insert(0, f"\"{date}\" >= DATE '{since:%Y-%m-%d}'")
-    return f"SELECT {', '.join(columns)} FROM {table} WHERE {' AND '.join(where)}"
+               for c in COLUMNS[table].values()]
+    query = f"SELECT {', '.join(columns)} FROM {name}"
+    if date:
+        where = [f"\"{date}\" < DATE '{end:%Y-%m-%d}'"]
+        if since is not None:
+            where.insert(0, f"\"{date}\" >= DATE '{since:%Y-%m-%d}'")
+        query += f" WHERE {' AND '.join(where)}"
+    return query
 
 
 def category(txn_type):

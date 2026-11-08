@@ -10,7 +10,7 @@ as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/
    Only a Dataiku admin can create it. The setup notebook checks it and, if something is missing, prints the request
    to send the admin.
 2. **A read-only database connection** to the warehouse (Oracle), usable by your group, for example `EDW`. The
-   project only reads `EDW.DIM_CUSTOMER` and `EDW.FCT_STATEMENT_ENTRY`, with a `SELECT` and a date filter. It never
+   project only reads `EDW.DIM_CUSTOMER` and `EDW.FCT_STATEMENT_ENTRY`, with a `SELECT` of only the columns used. It never
    writes there.
 3. **An empty Dataiku project** where you are at least a designer. Don't reuse a project from an older version.
 
@@ -65,6 +65,7 @@ data with fake data.
 | `inference_log` FAILED | read its `error`; `final_forecast` still holds the previous forecast |
 | "No production model yet" | run **Retrain, test and promote** |
 | The setup stops on the code env | send the admin the request it printed |
+| Opening a warehouse dataset says "Invalid number of columns" | the dataset's Settings → **Test table & get schema** → Save (the recipes don't need it) |
 | A wrong forecast after a model change | activate the previous version of the saved model `cash_forecast`, run the Nightly batch |
 
 ## Settings you can change without code (project variables)

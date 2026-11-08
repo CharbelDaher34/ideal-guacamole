@@ -26,7 +26,7 @@ import dataiku
 import pandas as pd
 
 from cashflow import DAILY_COLUMNS, Spread, append_row, cutoff_date, iter_daily_parts, write_daily
-from warehouse import (COLUMNS, TABLES, business_clients, daily_flows, to_standard, transactions_query,
+from warehouse import (COLUMNS, TABLES, business_clients, daily_flows, to_standard, table_query,
                        value_day)
 
 CHUNK, FILES = 200_000, 128
@@ -39,25 +39,25 @@ end = cutoff + pd.Timedelta(days=1)                # postings up to the cut-off 
 
 def read_table(table, since=None):
     """The table's chunks with the standard names, only the columns the project uses. Postings: only the value dates
-    from since (None: all) to the cut-off day; through the database connection the warehouse filters
-    them (transactions_query), from files they are filtered here."""
+    from since (None: all) to the cut-off day. Through the database connection, our own SELECT of those columns
+    (table_query: the warehouse filters the dates), which does not use the column list Dataiku keeps for the
+    dataset; from files, the dates are filtered here."""
     dataset = dataiku.Dataset(TABLES[table][0])
-    if table == "transactions":
-        try:
-            name = dataset.get_location_info()["info"].get("quotedResolvedTableName")
-        except Exception:
-            name = None
-        if name:
-            reader = dataiku.SQLExecutor2(dataset=dataset).query_to_iter(transactions_query(name, since, end))
-            names, rows = [c["name"] for c in reader.get_schema()], []
-            for row in reader.iter_tuples():
-                rows.append(row)
-                if len(rows) == CHUNK:
-                    yield to_standard(pd.DataFrame(rows, columns=names), table)
-                    rows = []
-            if rows:
+    try:
+        name = dataset.get_location_info()["info"].get("quotedResolvedTableName")
+    except Exception:
+        name = None
+    if name:
+        reader = dataiku.SQLExecutor2(dataset=dataset).query_to_iter(table_query(table, name, since, end))
+        names, rows = [c["name"] for c in reader.get_schema()], []
+        for row in reader.iter_tuples():
+            rows.append(row)
+            if len(rows) == CHUNK:
                 yield to_standard(pd.DataFrame(rows, columns=names), table)
-            return
+                rows = []
+        if rows:
+            yield to_standard(pd.DataFrame(rows, columns=names), table)
+        return
     for chunk in dataset.iter_dataframes(chunksize=CHUNK, columns=list(COLUMNS[table].values())):
         chunk = to_standard(chunk, table)
         if table == "transactions":

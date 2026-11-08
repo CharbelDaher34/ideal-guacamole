@@ -125,6 +125,10 @@ for name in RAW:
         dataset = project.create_sql_table_dataset(name, database, WAREHOUSE_SQL_CONNECTION, name,
                                                    WAREHOUSE_SQL_SCHEMA)
         dataset.autodetect_settings().save()       # the table's columns, read from the database
+        if not dataset.get_settings().get_raw().get("schema", {}).get("columns"):
+            # staging reads with its own SELECT, so it still works; only Dataiku's view of the table would fail
+            print(f"WARNING: Dataiku could not read the columns of {WAREHOUSE_SQL_SCHEMA}.{name}: opening the dataset "
+                  "in Dataiku will fail. Fix: the dataset's Settings > Test table & get schema > Save.")
     else:
         dataset = project.create_dataset(name, "Filesystem", params={"connection": LANDING_CONNECTION,
                                                                      "path": "/" + name},

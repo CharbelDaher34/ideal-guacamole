@@ -135,8 +135,10 @@ production model; the nightly forecast always uses it. Rolling back means activa
 
 ### Step 1: get the data (`stage_tables`)
 
-- **Read-only.** Nothing is created or written in the warehouse. The only query is a `SELECT` of the columns used,
-  with a date filter on `VAL_DT`.
+- **Read-only.** Nothing is created or written in the warehouse. The only queries are our own `SELECT`s of the
+  columns used: `DIM_CUSTOMER` whole, the postings with a date filter on `VAL_DT`. They name the columns, so they
+  don't depend on the column list Dataiku keeps for each table (an empty list there caused "Invalid number of
+  columns" in the old project).
 - **Only the new days from the warehouse.** The first run reads the whole history once. After that, each night
   reads only the postings after the last day already in `daily_flows`, up to the cut-off day (yesterday).
 - **Kept grouped by client.** When there are new days, staging writes `daily_flows` again with the new days in
@@ -251,7 +253,7 @@ fake clients, the 3-model placeholder and chunks of 5,000 clients:
   TOTAL, the next 30, 60 and 90 days, P10 / EV / P90, one row per client.
 - Small models only. Placeholder `quantile_boosting` until the data scientist's models are ready.
 - Every model is tracked, deployed as a version, and activated only if it passes the promotion rules.
-- The warehouse is only read (read-only `SELECT` with a date filter), never written to. Everything the project writes
+- The warehouse is only read (read-only `SELECT`s of the columns used), never written to. Everything the project writes
   is a CSV file (compressed for the big one), except `daily_flows`: Parquet files, for reading speed.
 - At least 360 days of history to get a forecast. Models are tested on the last 6 periods of 30 days.
 
