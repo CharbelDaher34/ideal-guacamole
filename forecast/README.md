@@ -16,15 +16,18 @@ as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/
 
 ## Set it up (once)
 
-1. **Put the bank's codes in `src/warehouse.py`:**
+You only need `build_forecast_project.ipynb`: it holds all the code and creates the whole project.
+
+1. **Import** `build_forecast_project.ipynb` into a new, empty project (Notebooks → New notebook → Import).
+2. **Put the bank's codes in its cell `WAREHOUSE_CODE = r'''`** (section 2, Code):
    - `CATEGORY_OF_TYPE`: the real transaction types (`TRNS_TYP`) and their category. Today it's a mock list.
    - Check `ACTIVE_STATUS`, `RETAIL`, `BUSINESS_ID`, `SOLE_PROPRIETOR` against `DIM_CUSTOMER`.
    - `check_warehouse_loaded`: today a mock that always passes. Replace it with the bank's check that the
      warehouse's load of yesterday is finished (for example a query on its load-control table).
 
-   Then rebuild the notebooks: `python make_notebook.py`.
-2. **Import** `build_forecast_project.ipynb` into the project (Notebooks → New notebook → Import).
-3. **Fill its first cell:**
+   A new version of the notebook starts again from the mock codes: send the real ones to whoever maintains the code,
+   so the next versions already have them.
+3. **Fill its first cell (settings):**
 
    | Setting | What it is | At the bank |
    |---|---|---|
@@ -45,8 +48,8 @@ as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/
    and the logs.
 6. **Switch on the scenario triggers** (Scenarios → each scenario → Settings): they are created switched off.
 
-Don't import or run `warehouse_simulator.ipynb` or `inference_load_test.ipynb` at the bank: they are for the test
-machine, with fake data. (The simulator can't write into the bank's warehouse anyway: that connection is read-only.)
+The test-machine notebooks (`warehouse_simulator.ipynb`, `inference_load_test.ipynb`) are not part of the bank's
+package: they use fake data.
 
 ## Every day and every month
 
@@ -90,18 +93,15 @@ machine, with fake data. (The simulator can't write into the bank's warehouse an
 | `history_years` | from `HISTORY_YEARS` | set by the setup; to change it, run the setup again with a new `HISTORY_YEARS`, then **Full rebuild** |
 | `cutoff_override` | empty | forecast from another day's data (YYYY-MM-DD) instead of yesterday |
 
-## Optional: benchmark the bank's server
-
-In a separate sandbox project with the forecast set up, run `inference_load_test.ipynb`. It times the nightly
-forecast for 420,000 fake clients and shows the memory used, which helps choose `inference_clients_per_chunk`.
 
 ## Files
 
+The bank's package is `build_forecast_project.ipynb` and this README. The rest stays in the code repository:
+
 | File | What it is |
 |---|---|
-| `build_forecast_project.ipynb` | sets up the project |
-| `forecast_lab.ipynb` | the data scientist's lab: EDA and model comparison |
-| `warehouse_simulator.ipynb` | sandbox only: fake warehouse tables |
-| `inference_load_test.ipynb` | sandbox only: the 420k-client benchmark |
-| `alerts_plan.md` | planned email / Teams alerts (not built) |
 | `src/` | the code the notebooks are built from; edit it, then run `python make_notebook.py` |
+| `forecast_lab.ipynb` | the data scientist's lab: EDA and model comparison |
+| `warehouse_simulator.ipynb` | test machine only: fake warehouse tables in a local test database |
+| `inference_load_test.ipynb` | test machine only: the 420k-client benchmark |
+| `alerts_plan.md` | planned email / Teams alerts (not built) |

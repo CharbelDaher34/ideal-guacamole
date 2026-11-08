@@ -1,6 +1,7 @@
 """Assemble the notebooks from the files in src/ (edit those, then run: python make_notebook.py):
 build_forecast_project.ipynb (sets up the forecast project), forecast_lab.ipynb (the data scientist's lab),
-warehouse_simulator.ipynb and inference_load_test.ipynb (sandbox only)."""
+warehouse_simulator.ipynb and inference_load_test.ipynb (test machine only). A notebook whose files are not in src/
+is skipped: the bank's package has only what build_forecast_project.ipynb needs."""
 import json
 from pathlib import Path
 
@@ -26,6 +27,14 @@ def embedded(name, path):
 
 def read(path):
     return (SRC / path).read_text()
+
+
+def write_if_present(name, folder, cells, kernel=None):
+    """Writes the notebook only if src/<folder> is there (cells: a function returning its cells)."""
+    if not (SRC / folder).is_dir():
+        print(f"skipped {name} (no src/{folder})")
+        return
+    write(name, cells(), kernel)
 
 
 def write(name, cells, kernel=None):
@@ -168,7 +177,7 @@ the Nightly batch. To change when a model is promoted, change the project variab
     code(read("cells/results.py")),
 ])
 
-write("forecast_lab.ipynb", [
+write_if_present("forecast_lab.ipynb", "lab_cells", lambda: [
     md("""
 # Digital Cash Management Forecast: lab (data scientist)
 
@@ -246,7 +255,7 @@ packages need the admin.
 ], kernel={"display_name": "Python (env cashflow_forecast)", "language": "python",    # the code env's own kernel
            "name": "py-dku-venv-cashflow_forecast"})
 
-write("warehouse_simulator.ipynb", [
+write_if_present("warehouse_simulator.ipynb", "sim_cells", lambda: [
     md("""
 # Digital Cash Management Forecast: warehouse simulator (sandbox only)
 
@@ -281,7 +290,7 @@ Generates the data (about 2 minutes), publishes it as of `AS_OF` and sets the pr
     code(read("sim_cells/load.py")),
 ])
 
-write("inference_load_test.ipynb", [
+write_if_present("inference_load_test.ipynb", "load_cells", lambda: [
     md("""
 # Digital Cash Management Forecast: inference load test (sandbox only)
 
