@@ -2,6 +2,7 @@
 
 - **How it works, end to end:** [`docs/how_it_works.md`](docs/how_it_works.md)
 - **How to run it in the bank's Dataiku:** [`forecast/README.md`](forecast/README.md)
+- **The 2 warehouse tables (columns, what we know):** [`docs/warehouse_tables.md`](docs/warehouse_tables.md)
 
 The rest of this page is about the local test Dataiku (Docker sandbox), not the bank.
 

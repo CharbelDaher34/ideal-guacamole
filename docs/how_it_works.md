@@ -27,7 +27,7 @@ flowchart TB
   C["Step 3 · champion_challenger<br/>+ promote if better"]
   F["Step 4 · final_forecast<br/>forecasts every active client"]
   O[("final_forecast<br/>forecast_archive<br/>inference_log")]
-  L["Lab · data scientist<br/>tries models"]
+  L["Lab notebook · data scientist<br/>tries models (outside the flow)"]
 
   W --> S --> D
   D -- "interface 1: the data" --> T
@@ -45,7 +45,7 @@ flowchart TB
 | 2. Train and test | `train_and_test` | interface 1 | a run in Experiment Tracking, a new **inactive** version of `cash_forecast`, `test_results` | Retrain |
 | 3. Promote | `champion_challenger`, then "promote if better" | interface 1, the new and the active version | `promotion_log`; activates the new version if it passes | Retrain |
 | 4. Forecast | `final_forecast` | interface 1, interface 3 | `final_forecast`, `forecast_archive`, `inference_log` | Nightly batch |
-| Lab | `try_forecaster`, `forecast_lab.ipynb` | interface 1, the production model | `lab_results`, lab runs in Experiment Tracking | by hand |
+| Lab (not in the flow) | the notebook `forecast_lab.ipynb` | interface 1, the production model | lab runs in Experiment Tracking (experiment `cashflow_lab`) | by hand |
 
 **The steps only meet through 3 interfaces** (section 3). A step never reads another step's internals: inference,
 for example, reads nothing from training except the active version of the saved model.
@@ -57,13 +57,13 @@ for example, reads nothing from training except the active version of the saved 
 | Raw data, Staging | you | read the warehouse, build `daily_flows` and `clients` (interface 1) |
 | Training | data scientist (model), you (pipeline) | train, test, track and promote models (promotion rules are project variables) |
 | Inference | you | forecast every active client each night with the active model, archive and log it |
-| Lab | data scientist | try models without touching production; hand over a forecaster (interface 2) |
+| (no zone) Lab notebook | data scientist | try models without touching production; hand over a forecaster (interface 2): set the project variable `forecaster`, run Retrain |
 
 ---
 
 ## 3. The interfaces
 
-### Interface 1: the data (Staging → Training, Lab, Inference)
+### Interface 1: the data (Staging → Training, Inference, the lab notebook)
 
 Every model gets these 2 datasets and nothing else.
 
@@ -87,10 +87,10 @@ Reversed postings (and what they reverse) and transfers between the client's own
   does this; training can too.
 
 **`clients`**: one row per business client: `client_no`, customer type, line of business, legal entity, ID type,
-segment, sector, industry, city, `status` (`ACTIVE` / `CLOSED`), `sole_proprietor`. Business clients = every line
-of business except retail, plus retail clients with a commercial registration. Personal fields are never read.
+segment, sector, industry, city, `status` (`ACTIVE` / `CLOSED`), `sole_proprietor`. Business clients = the bank's rule:
+`PRIME_RM LIKE '12%' OR SCTR_DSC = 'Sole Proprietorships'`, current row `END_DT = DATE '2199-12-31'`. Personal fields are never read.
 
-### Interface 2: the forecaster (Lab → Training)
+### Interface 2: the forecaster (lab notebook → Training)
 
 A forecaster is a small Python class. Any class that follows it can be tested, tracked, promoted and run every night,
 with no other change to the project.
@@ -135,11 +135,22 @@ production model; the nightly forecast always uses it. Rolling back means activa
 
 ### Step 1: get the data (`stage_tables`)
 
-- **Read-only.** Nothing is created or written in the warehouse. The only queries are our own `SELECT`s of the
-  columns used: `DIM_CUSTOMER` whole, the postings with a date filter on `VAL_DT`. They name the columns, so they
-  don't depend on the column list Dataiku keeps for each table (an empty list there caused "Invalid number of
-  columns" in the old project).
-- **Only the new days from the warehouse.** The first run reads the history once: the last `HISTORY_YEARS` years up to the cut-off day (a setup setting, at least 2; `None`: everything). After that, each night
+- **Read-only.** Nothing is created or written in the warehouse. The only queries are our own read-only
+  `SELECT`s (`table_query`, `daily_totals_query` in `warehouse.py`). They name the columns, so they don't depend on
+  the column list Dataiku keeps for each table (an empty list there caused "Invalid number of columns" in the old
+  project). Each query is printed in the job log (`PROGRESS SQL:`).
+- **The warehouse does the heavy work, so little travels:**
+  - Clients: the bank's own conditions (`warehouse.py`): business clients `PRIME_RM LIKE '12%' OR SCTR_DSC =
+    'Sole Proprietorships'` (`CLIENTS_BUSINESS`), and only each one's current row `END_DT = DATE '2199-12-31'`
+    (`CLIENTS_CURRENT_ROW`): about 420k rows, one per customer, out of about 520 million (`DIM_CUSTOMER` keeps
+    history). If it ever sends several rows per client, staging warns.
+  - Postings: Oracle sums them into **daily totals** per client, day and category, for business clients only,
+    without reversals and own-account transfers. Only those totals come back, not every posting. The table is
+    partitioned by month on its load date `AS_OF_DT`: the query also filters on it (from 31 days before the first
+    value day read), so Oracle reads only the partitions needed. The first read still scans the big history
+    partition once; each night then reads only the latest one or two. The rules are the
+    same as the earlier Python version: tested to give identical `daily_flows` on PostgreSQL and on Oracle.
+- **Only the new days from the warehouse.** The first run reads the history once: the last `HISTORY_MONTHS` months up to the cut-off day (a setup setting; `-1`: everything), for all business clients or only the first `CLIENTS_LIMIT` (to test fast). Under 18 months the setup only stages the data: training needs 18. After that, each night
   reads only the postings after the last day already in `daily_flows`, up to the cut-off day (yesterday).
 - **Kept grouped by client.** When there are new days, staging writes `daily_flows` again with the new days in
   place: each client's rows together, old and new, a group of clients per Parquet file. It writes a new version of
@@ -153,10 +164,12 @@ production model; the nightly forecast always uses it. Rolling back means activa
   table.
 - **Late load check:** if the warehouse has no posting up to the cut-off day, staging stops and changes nothing. The
   next run reads the same days again.
-- **Full rebuild** (a scenario run by hand) empties `daily_flows` and reads the history again (the last `HISTORY_YEARS` years). Use it after a
+- **Full rebuild** (a scenario run by hand) empties `daily_flows` and reads the history again (the last `HISTORY_MONTHS` months). Use it after a
   reversal cancels a posting from a day already staged, or after the category list changes.
-- Big reads never sit in memory whole: rows are spread over files on the server's disk by client and handled one
-  group of clients at a time.
+- Big reads never sit in memory whole: the daily totals are spread over files on the server's disk by client and
+  written one group of clients at a time.
+- **Progress in the job log:** each query, a line every minute while the warehouse is still running it, then the
+  rows read as they arrive.
 
 ### Step 2: train and test (`train_and_test`)
 
@@ -213,13 +226,13 @@ With no production model yet, the first model is promoted. Every decision, its r
 |---|---|---|
 | **Nightly batch** | set the cut-off day → check the warehouse load → step 1 → step 4. Never trains. | daily, 06:00 Riyadh |
 | **Retrain, test and promote** | set the cut-off day → check the warehouse load → step 1 → step 2 → step 3. Never forecasts: the next Nightly batch uses the new active version. | monthly, on the 5th, 07:00 Riyadh |
-| **Full rebuild of the daily flows** | set the cut-off day → check the warehouse load → empty `daily_flows` and `staging_log` → read the history again (the last `HISTORY_YEARS` years) | by hand |
+| **Full rebuild of the daily flows** | set the cut-off day → check the warehouse load → empty `daily_flows` and `staging_log` → read the history again (the last `HISTORY_MONTHS` months) | by hand |
 
 ## 6. What gets logged
 
 | Where | One row per | What it says |
 |---|---|---|
-| `staging_log` | staging run, **also failed ones** | `status` / `error`, mode (`FULL`, `NEW_DAYS`, `NOTHING_NEW`), days read, postings read and kept, daily rows added and in total, last day staged |
+| `staging_log` | staging run, **also failed ones** | `status` / `error`, mode (`FULL`, `NEW_DAYS`, `NOTHING_NEW`), days read, postings in the daily totals read and kept (business clients, without reversals and own transfers), daily rows added and in total, last day staged |
 | Experiment Tracking | training run, and lab try | forecaster, settings, data used, test scores, the model |
 | `promotion_log` | promotion decision | candidate and production scores, decision, reason, rules used |
 | `inference_log` | forecast run, **also failed ones** | `status` / `error`; `model_id` and `forecaster`; `active_clients` = `clients_ok` + `clients_not_enough_history` + `clients_no_postings`; rows read, chunks, seconds reading, forecasting and writing, peak memory; archive file |

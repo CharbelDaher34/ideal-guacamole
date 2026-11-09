@@ -7,7 +7,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast", "try_forecaster"]
+RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast"]
 
 
 def code(text):
@@ -64,7 +64,7 @@ connection differs. Names, codes and the categories (a mock list until the bank'
 
 It forecasts, per client, per category and in TOTAL (all categories together), the net cash flow (money in minus
 money out) of each of the next 30, 60 and 90 days after the cut-off day (yesterday: days 1-30, 31-60, 61-90), as
-P10, EV and P90. It builds 5 flow zones, each with an owner:
+P10, EV and P90. It builds 4 flow zones, each with an owner:
 
 - **Raw data** and **Staging** (shared): the 2 warehouse tables, read-only, then `clients` (the business clients)
   and `daily_flows` (money in and out per client, day and category): what every model gets. `staging_log` records
@@ -76,9 +76,8 @@ P10, EV and P90. It builds 5 flow zones, each with an owner:
 - **Inference** (inference owner): `final_forecast`, the production model's forecast for every active client, made
   a chunk of clients at a time so it scales to the bank's ~420k clients (every row says which model and which load
   produced it), the forecast archive, and the inference log (one row per run, with timings and memory).
-- **Lab** (data scientist): `try_forecaster` tries the forecaster the project variable `lab_forecaster` names
-  against the production model and adds the result to `lab_results`, without touching production. The notebook
-  `forecast_lab.ipynb` does the same interactively.
+The data scientist tries new forecasters outside the flow, in the notebook `forecast_lab.ipynb` (it never touches
+production), then sets the project variable `forecaster` and runs **Retrain, test and promote**.
 
 The zones only meet through three interfaces: **1. the data** (`daily_flows` and `clients`: staging → training, lab
 and inference), **2. the forecaster** (`models.py`: lab → training), **3. the active version of the saved model**
@@ -135,12 +134,10 @@ Each recipe below becomes a Python recipe in the flow.
 ## 3. Build the flow
 
 Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the Python recipes and their
-CSV datasets, the folders `daily_flows` (Parquet files), `experiments` (tracked models), `forecast_archive` and
-`lab_experiments` (lab tries), the
-saved model `cash_forecast`, and the project variables `forecaster` (`quantile_boosting`), `lab_forecaster`
-(`recent_average_6m`), `inference_clients_per_chunk` (5000) and the promotion rules (`promotion_*`) if they are not
-set yet, in 5 zones. Training (folder
-`experiments`), the promotion log and the lab are only rebuilt when asked by name, so the nightly batch never
+CSV datasets, the folders `daily_flows` (Parquet files), `experiments` (tracked models) and `forecast_archive`, the
+saved model `cash_forecast`, and the project variables `forecaster` (`quantile_boosting`),
+`inference_clients_per_chunk` (5000) and the promotion rules (`promotion_*`) if they are not set yet, in 4 zones.
+Training (folder `experiments`) and the promotion log are only rebuilt when asked by name, so the nightly batch never
 retrains by accident.
 """),
     code(read("cells/create_flow.py")),
@@ -188,13 +185,13 @@ saved models or the production model.
 2. **Models to try**: several forecasters trained and tested side by side on the same test as champion / challenger
    (trained without the last 6 periods of 30 days before the cut-off, tested on them), next to the production model
    and the simple guess (the same as the 30 days before), with the decision champion / challenger would take for each.
-   Each try is recorded in Experiment Tracking, experiment `cashflow_lab` (Lab → Experiment tracking); lab tries
-   are never deployed.
+   Each try is recorded in Experiment Tracking, experiment `cashflow_lab` (same folder as the production models,
+   `experiments`, but its own experiment); lab tries are never deployed.
 3. **Put one in production.**
 
 **Kernel:** the code env `cashflow_forecast`. If it is not in the kernel list, ask whoever manages it to enable its
-Jupyter support; meanwhile, the recipe `try_forecaster` tries one forecaster without a notebook (set the project
-variable `lab_forecaster` and build `lab_results`, Lab zone).
+Jupyter support. Meanwhile a forecaster can be tried safely through **Retrain, test and promote**: it goes live
+only if it beats the production model.
 
 In the sandbox the data is simulated: there, the scores show that the code works, not which model is better.
 """),

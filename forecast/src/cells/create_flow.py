@@ -50,12 +50,13 @@ CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', 
 COMPRESSED = ["final_forecast"]       # the big one: compressed CSV (gz)
 
 # Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file (compressed for the big one); daily_flows
-# (Parquet files, read far faster than a dataset), experiments, forecast_archive and lab_experiments are folders;
+# (Parquet files, read far faster than a dataset), experiments and forecast_archive are folders;
 # cash_forecast is the saved model.
 # Each zone has an owner, and the zones only meet through three interfaces:
-#   1. the data: daily_flows and clients (Staging) -> Training, Lab and Inference
-#   2. the forecaster (models.py): lab -> training. The project variable forecaster names the one Retrain trains;
-#      the Lab (try_forecaster, and the notebook forecast_lab) compares one with the production model, untouched.
+#   1. the data: daily_flows and clients (Staging) -> Training and Inference (and the data scientist's lab notebook)
+#   2. the forecaster (models.py, forecasters.py): the project variable forecaster names the one Retrain trains. The
+#      data scientist tries forecasters first in the notebook forecast_lab, outside the flow, without touching
+#      production.
 #   3. the saved model's active version: training -> inference. Inference reads nothing else from training.
 DATA = ["daily_flows", "clients"]
 FLOW = {
@@ -64,12 +65,11 @@ FLOW = {
     "champion_challenger": (DATA + ["experiments"], ["promotion_log"], "Training"),
     "final_forecast": (DATA + [cashflow.SAVED_MODEL], ["final_forecast", "forecast_archive", "inference_log"],
                        "Inference"),
-    "try_forecaster": (DATA + ["experiments"], ["lab_experiments", "lab_results"], "Lab"),
 }
-FOLDERS = ["daily_flows", "experiments", "forecast_archive", "lab_experiments"]
+FOLDERS = ["daily_flows", "experiments", "forecast_archive"]
 # logs: each run adds rows
-APPENDED = ["staging_log", "promotion_log", "inference_log", "lab_results"]
-BUILT_BY_NAME = ["experiments", "promotion_log", "lab_experiments", "lab_results"]   # only built when asked by name
+APPENDED = ["staging_log", "promotion_log", "inference_log"]
+BUILT_BY_NAME = ["experiments", "promotion_log"]   # only built when asked by name
 
 try:                                                # needs the project's admin right
     metadata = project.get_metadata()
@@ -91,21 +91,28 @@ if not python_folder.get_file("forecasters.py"):
     python_folder.add_file("forecasters.py").write(FORECASTERS_CODE)
     print("forecasters.py created (the data scientist's forecasters)")
 
-# project variables, kept if they are already set: forecaster (the one Retrain trains), lab_forecaster (the one the
-# recipe try_forecaster tries), inference_clients_per_chunk (how many clients final_forecast forecasts at a time)
+# project variables, kept if they are already set: forecaster (the one Retrain trains), inference_clients_per_chunk
+# (how many clients final_forecast forecasts at a time)
 variables = project.get_variables()
-defaults = {"forecaster": "quantile_boosting", "lab_forecaster": "recent_average_6m",
+defaults = {"forecaster": "quantile_boosting",
             "inference_clients_per_chunk": 5000, **tracking.PROMOTION_RULES}
 missing = {k: v for k, v in defaults.items() if variables["standard"].get(k) in (None, "")}
 if missing:
     variables["standard"].update(missing)
     project.set_variables(variables)
-# history_years: always the setup's setting HISTORY_YEARS (staging's first read and the scenario Full rebuild)
-variables["standard"]["history_years"] = "" if cashflow.history_years(HISTORY_YEARS) is None else HISTORY_YEARS
+# history_months, clients_limit: always the setup's settings (what staging reads: the first time and Full rebuild)
+months = cashflow.whole_number("HISTORY_MONTHS", HISTORY_MONTHS)
+limit = cashflow.whole_number("CLIENTS_LIMIT", CLIENTS_LIMIT)
+variables["standard"].pop("history_years", None)                 # the older setting
+variables["standard"].update(history_months="" if months is None else months, clients_limit="" if limit is None else limit)
 project.set_variables(variables)
 print("History read the first time (and by Full rebuild):",
-      "the whole history" if HISTORY_YEARS is None else f"the last {HISTORY_YEARS} years up to the cut-off day")
-print("Forecasters: Retrain trains {forecaster}, the lab tries {lab_forecaster}; inference forecasts "
+      "the whole history" if months is None else f"the last {months} months up to the cut-off day",
+      "| clients:", "all the business clients" if limit is None else f"the first {limit:,} business clients")
+if months is not None and months < cashflow.MIN_TRAINING_MONTHS:
+    print(f"WARNING: with {months} months of history, the first run only stages the data: training, promotion and "
+          f"the forecast need at least {cashflow.MIN_TRAINING_MONTHS} months")
+print("Forecasters: Retrain trains {forecaster}; inference forecasts "
       "{inference_clients_per_chunk} clients at a time".format(**variables["standard"]))
 print("Promotion rules:", {k: variables["standard"][k] for k in tracking.PROMOTION_RULES})
 
@@ -203,7 +210,7 @@ for name, (inputs, outputs, _) in FLOW.items():
     settings.save()
     print("python recipe", name, "->", ", ".join(outputs))
 
-ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": [], "Lab": []}
+ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": []}
 for _, outputs, zone_name in FLOW.values():
     ZONES[zone_name] += [o for o in outputs if o not in ZONES[zone_name]]
 # the raw data goes in Dataiku's Default zone, renamed (so there is no empty zone). It exists once another zone does.

@@ -14,9 +14,10 @@
 #   new, daily_flows is not touched.
 #   staging_log: one row per run (appended), also when the run fails (status FAILED and the error): what was read,
 #   and the last day now in daily_flows.
-# A big read never sits in memory whole: the postings are spread over files on disk by TRNS_RFR (both sides of a
-# reversal or of an own-account transfer in the same file) and summed one file at a time; the new totals and the
-# rows already staged are then spread over files by client and written one file (a group of clients) at a time.
+# The warehouse does the heavy work (warehouse.daily_totals_query): it sums the postings into daily totals per client,
+# day and category, without reversals and own-account transfers, so only those totals travel, not every posting. A
+# big read never sits in memory whole: the totals read and the rows already staged are spread over files on disk by
+# client and written one file (a group of clients) at a time.
 import json
 import os
 import tempfile
@@ -25,33 +26,50 @@ import time
 import dataiku
 import pandas as pd
 
-from cashflow import (DAILY_COLUMNS, Progress, Spread, append_row, cutoff_date, history_start, iter_daily_parts,
-                      write_daily)
-from warehouse import TABLES, business_clients, daily_flows, table_query, to_standard, value_day
+from cashflow import (DAILY_COLUMNS, Progress, Spread, append_row, clients_limit, cutoff_date, history_start,
+                      iter_daily_parts, waiting, write_daily)
+import warehouse
+from warehouse import TABLES, daily_totals_query, one_row_per_client, standard_daily, table_query, to_standard
 
-CHUNK, FILES = 200_000, 128
+CHUNK = 200_000
+STEP = 10_000                       # rows: how often the reading progress is counted (CHUNK is a multiple of it)
 ROWS_PER_GROUP = 1_000_000          # about this many daily_flows rows per group of clients when rewriting
+GROUPS_FULL = 512                   # groups of clients when everything is read (its size is not known before)
 KEYS = ["client_no", "day", "category"]
 started = time.time()
 cutoff = cutoff_date()
 end = cutoff + pd.Timedelta(days=1)                # postings up to the cut-off day (included)
 
 
-def read_table(table, since=None):
-    """The table's chunks with the standard names, only the columns the project uses. Postings: only the value dates
-    from since (None: all) to the cut-off day. Read through the database connection with our own SELECT of those
-    columns (table_query: the warehouse filters the dates), which does not use the column list Dataiku keeps for the
-    dataset."""
-    dataset = dataiku.Dataset(TABLES[table][0])
-    reader = dataiku.SQLExecutor2(dataset=dataset).query_to_iter(table_query(table, sql_name(dataset), since, end))
-    names, rows = [c["name"] for c in reader.get_schema()], []
-    for row in reader.iter_tuples():
-        rows.append(row)
-        if len(rows) == CHUNK:
-            yield to_standard(pd.DataFrame(rows, columns=names), table)
-            rows = []
-    if rows:
-        yield to_standard(pd.DataFrame(rows, columns=names), table)
+def read(query, progress, convert):
+    """Runs a read-only query through the warehouse connection and yields its rows in chunks (DataFrames, converted
+    by convert). progress counts the rows as they arrive. The query is printed first, and until its first row
+    arrives a line says every minute that the warehouse is still running it."""
+    print(f"PROGRESS SQL: {query}", flush=True)
+    started, first = time.time(), waiting(progress.what)
+    try:
+        reader = dataiku.SQLExecutor2(dataset=dataiku.Dataset(TABLES["clients"][0])).query_to_iter(query)
+        names, rows = [c["name"] for c in reader.get_schema()], []
+        for row in reader.iter_tuples():
+            if not first.is_set():
+                first.set()
+                print(f"PROGRESS {progress.what}: first rows after {(time.time() - started) / 60:.1f} min",
+                      flush=True)
+            rows.append(row)
+            if len(rows) % STEP == 0:
+                progress.add(STEP)
+            if len(rows) == CHUNK:
+                yield convert(pd.DataFrame(rows, columns=names))
+                rows = []
+        progress.add(len(rows) % STEP)
+        if rows:
+            yield convert(pd.DataFrame(rows, columns=names))
+    finally:
+        first.set()
+
+
+def table_name(table):
+    return sql_name(dataiku.Dataset(TABLES[table][0]))
 
 
 def sql_name(dataset):
@@ -64,19 +82,6 @@ def sql_name(dataset):
         raise ValueError(f"{dataset.name} is not a database table: the project reads the warehouse through SQL only. "
                          "Run the setup notebook again (it links the warehouse tables)")
     return name
-
-
-def count_rows(table, since=None):
-    """How many rows read_table will read, for the progress lines: a read-only COUNT(*) with the same filter (None
-    if it fails: the progress lines then show no percentage)."""
-    dataset = dataiku.Dataset(TABLES[table][0])
-    print("PROGRESS counting the rows to read", flush=True)
-    try:
-        return int(dataiku.SQLExecutor2(dataset=dataset).query_to_df(
-            table_query(table, sql_name(dataset), since, end, count=True)).iloc[0, 0])
-    except Exception as e:                          # only the progress lines need it
-        print(f"Could not count the rows to read ({e}): progress without a percentage")
-        return None
 
 
 LOG = {"run_at": "string", "status": "string", "error": "string", "mode": "string", "cutoff_date": "string",
@@ -104,46 +109,50 @@ def stage():
     since = None if last_day is None else last_day + pd.Timedelta(days=1)
     mode = "FULL" if since is None else "NOTHING_NEW" if since >= end else "NEW_DAYS"
     if mode == "FULL":
-        since = history_start(cutoff)              # project variable history_years (None: the whole history)
+        since = history_start(cutoff)              # project variable history_months (None: the whole history)
     row.update(mode=mode, read_from=f"{since:%Y-%m-%d}" if since is not None and mode != "NOTHING_NEW" else "")
 
-    print(f"PROGRESS staging ({mode}): reading the clients", flush=True)
-    clients = business_clients(pd.concat([business_clients(chunk) for chunk in read_table("clients")],
-                                         ignore_index=True))
+    limit = clients_limit()                        # project variable clients_limit (None: all the business clients)
+    print(f"PROGRESS staging ({mode})" + (f", the first {limit:,} business clients only" if limit else ""), flush=True)
+    progress = Progress("reading the clients from the warehouse (rows)")
+    clients = one_row_per_client(pd.concat(
+        [one_row_per_client(chunk) for chunk in read(table_query("clients", table_name("clients"), limit=limit), progress,
+                                                   lambda df: to_standard(df, "clients"))], ignore_index=True))
+    progress.finish()
     print(f"PROGRESS {len(clients):,} business clients", flush=True)
+    if progress.done > len(clients):               # DIM_CUSTOMER keeps history: several rows per client
+        print(f"WARNING: DIM_CUSTOMER sent {progress.done:,} rows for {len(clients):,} business clients (several "
+              "rows per client). " + ("Its condition CLIENTS_CURRENT_ROW does not keep one row per client: check it"
+                                      if warehouse.CLIENTS_CURRENT_ROW.strip() else
+                                      "Fill in CLIENTS_CURRENT_ROW in warehouse.py (the notebook's WAREHOUSE_CODE "
+                                      "cell) to read only each client's current row")
+              + ". Until then, the last row received is kept, which may not be the newest.", flush=True)
     if clients.empty:
-        raise ValueError("No business client in DIM_CUSTOMER: check the codes RETAIL and BUSINESS_ID in "
-                         "warehouse.py")
+        raise ValueError("No business client in DIM_CUSTOMER: check CLIENTS_BUSINESS and CLIENTS_CURRENT_ROW in "
+                         "warehouse.py (the notebook's WAREHOUSE_CODE cell)")
     numbers = set(clients["client_no"])
     dataiku.Dataset("clients").write_with_schema(clients)
     row["clients"] = len(clients)
 
-    read_rows = kept = added = total = 0
+    read_rows = kept = added = total = 0          # postings in the daily totals read, and kept
     new = {}                                       # postings per month read now
     with tempfile.TemporaryDirectory() as spread:
         if mode != "NOTHING_NEW":
-            postings = Spread(os.path.join(spread, "postings"), FILES)
-            progress = Progress("reading the postings from the warehouse", count_rows("transactions", since))
-            for chunk in read_table("transactions", since):
-                read_rows += len(chunk)
-                progress.add(len(chunk))
+            groups = Spread(os.path.join(spread, "groups"),     # groups of clients
+                            GROUPS_FULL if mode == "FULL" else max(16, -(-staged_rows // ROWS_PER_GROUP) + 1))
+            query = daily_totals_query(table_name("transactions"), table_name("clients"), since, end, limit)
+            progress = Progress("reading the daily totals from the warehouse (rows: client x day x category)")
+            for chunk in read(query, progress, standard_daily):
+                read_rows += int(chunk["postings"].sum())
                 chunk = chunk[chunk["client_no"].isin(numbers)]
-                kept += len(chunk)
+                kept += int(chunk["postings"].sum())
                 if len(chunk):
-                    last_day = max(value_day(chunk["value_date"]).max(), last_day or pd.Timestamp.min)
-                    postings.add(chunk, chunk["txn_ref"].fillna(chunk["entry_id"].astype(str)))
+                    last_day = max(chunk["day"].max(), last_day or pd.Timestamp.min)
+                    for month, n in chunk.groupby(chunk["day"].dt.strftime("%Y-%m"))["postings"].sum().items():
+                        new[month] = new.get(month, 0) + int(n)
+                    groups.add(chunk[DAILY_COLUMNS], "client_no")
             progress.finish()
             row.update(postings_read=read_rows, postings_kept=kept)
-            groups = Spread(os.path.join(spread, "groups"),
-                            max(16, -(-(staged_rows + kept) // ROWS_PER_GROUP)))   # groups of clients
-            progress = Progress("summing the postings per client, day and category (files)", postings.n)
-            for part in postings.parts():
-                flows = daily_flows(part, numbers, cutoff)
-                for month, n in flows.groupby(flows["day"].dt.strftime("%Y-%m"))["postings"].sum().items():
-                    new[month] = new.get(month, 0) + int(n)
-                groups.add(flows, "client_no")
-                progress.add()
-            progress.finish()
 
         # the postings must reach the cut-off day (yesterday): otherwise the warehouse load looks late. Checked before
         # anything is written, so a failed run changes nothing and the next run reads the same days again.

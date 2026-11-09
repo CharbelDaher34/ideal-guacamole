@@ -160,7 +160,8 @@ def curate(t, day):
     clients = pd.DataFrame({
         "client_no": c["client_no"], "customer_type": np.where(sole, "Individual", "Corporate"),
         "line_of_business": "Business Banking", "legal_entity": legal.str[0], "sub_legal_entity": legal.str[1],
-        "id_type": "Commercial Registration", "segment": c["segment"], "sector": c["sector"],
+        "id_type": "Commercial Registration", "segment": c["segment"],
+        "sector": np.where(sole, "Sole Proprietorships", c["sector"]),
         "business_sector": c["sector"], "industry": c["industry"], "sub_industry": c["industry"], "city": c["city"],
         "status": np.where(c["status"] == "ACTIVE", "ACTIVE", "INACTIVE")})
     # retail customers (individuals), with a few postings: the forecast must leave them out
@@ -193,6 +194,10 @@ def load_warehouse(tables, day, connection, schema):
     tables = curate(as_of(tables, day), day)
     for table, (warehouse_table, _) in TABLES.items():
         rows = to_warehouse(tables[table], table)
+        if table == "clients":
+            rows = with_history(rows, day)
+        else:
+            rows = with_load_date(rows, day)
         write_table(warehouse_table, rows, connection, schema)
         print(f"{warehouse_table:22s} {len(rows):>9,} rows")
     cutoff = f"{pd.Timestamp(day):%Y-%m-%d}"
@@ -200,6 +205,28 @@ def load_warehouse(tables, day, connection, schema):
     variables["standard"]["cutoff_override"] = str(cutoff)
     project.set_variables(variables)
     return str(cutoff)
+
+
+def with_history(dim, day):
+    """DIM_CUSTOMER as the bank's warehouse keeps it: the relationship manager code PRIME_RM (starting with 12 for
+    business clients, retail's otherwise: sole proprietors are found by their sector), END_DT (2199-12-31 on each
+    customer's current row) and, for every business client, an older closed version (another city), written after
+    the current one: a read without the current-row condition would keep the wrong one."""
+    business = dim["LOB_DSC"].eq("Business Banking") & dim["SCTR_DSC"].ne("Sole Proprietorships")
+    dim = dim.assign(PRIME_RM=np.where(business, "1201001 - Corporate Relationship Manager",
+                                       "1109001 - Branch Manager Male"),
+                     END_DT=pd.Timestamp("2199-12-31"))
+    old = dim[dim["LOB_DSC"].eq("Business Banking")].assign(CITY="OLD CITY", END_DT=pd.Timestamp(day) - pd.DateOffset(years=1))
+    return pd.concat([dim, old], ignore_index=True)
+
+
+def with_load_date(fct, day):
+    """FCT_STATEMENT_ENTRY's load date AS_OF_DT, the column the bank's table is partitioned on: most postings are
+    loaded on their value date, about 1 in 20 up to 5 days before it (future-dated), never after the as-of day."""
+    rng = np.random.default_rng(3)
+    value = pd.to_datetime(fct["VAL_DT"])
+    early = pd.to_timedelta(np.where(rng.random(len(fct)) < 0.05, rng.integers(1, 6, len(fct)), 0), unit="D")
+    return fct.assign(AS_OF_DT=(value - early).clip(upper=pd.Timestamp(day)))
 
 
 def write_table(name, df, connection, schema):

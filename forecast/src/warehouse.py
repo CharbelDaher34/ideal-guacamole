@@ -7,7 +7,7 @@ The forecast reads 2 tables of the bank's warehouse, read-only, and creates or w
     FCT_STATEMENT_ENTRY   EDW.FCT_STATEMENT_ENTRY: the daily postings. The staging recipe sums them per client, day
                           and category (money in, money out) in Dataiku and adds the new days to daily_flows. Through
                           the database connection, the only query is a read-only SELECT of the columns below with a
-                          date filter on VAL_DT (table_query): the last HISTORY_YEARS years the first time (or after
+                          date filter on VAL_DT (table_query): the last HISTORY_MONTHS months the first time (or after
                           the scenario Full rebuild), then only the days after the last day already in daily_flows.
 Always through the database connection to the warehouse (the setup's EDW_CONNECTION: Oracle at the bank, read-only;
 a local PostgreSQL with fake data on the test machine): the same code, only the connection differs. If a name or a
@@ -45,11 +45,23 @@ COLUMNS = {
                      "value_date": "VAL_DT", "direction": "CRDT_DBT_FLG", "amount": "AMT_LCY", "txn_type": "TRNS_TYP",
                      "txn_ref": "TRNS_RFR", "reversal": "RVRSL_MRKR"},
 }
-# codes in DIM_CUSTOMER (from the bank's data profile; to confirm on business clients)
-ACTIVE_STATUS = ("ACTIVE", "A")               # STS_FLG of an active client (an inactive one shows INACTIVE)
-RETAIL = ("RETAIL",)                          # words of LOB_DSC for retail (individual) clients: left out...
-BUSINESS_ID = ("COMMERCIAL",)                 # ...unless their ID type (PRTY_ID_TYP_DSC) is a commercial registration
-SOLE_PROPRIETOR = ("SOLE", "ESTABLISHMENT")   # words of LGL_ENTY_DSC or PRTY_SUB_LGL_DSC for a business owned by 1 person
+# Which rows of DIM_CUSTOMER are read: 2 SQL conditions, applied in the warehouse (the bank's own query, checked on
+# 2026-11-08: about 420k rows, one per customer). Column names in double quotes, so they work as they are on Oracle.
+# The business clients: relationship manager code starting with 12, or the sector Sole Proprietorships
+CLIENTS_BUSINESS = """ "PRIME_RM" LIKE '12%' OR "SCTR_DSC" = 'Sole Proprietorships' """
+# DIM_CUSTOMER keeps history (about 520 million rows): each customer's current row is the one still open
+CLIENTS_CURRENT_ROW = """ "END_DT" = DATE '2199-12-31' """
+# FCT_STATEMENT_ENTRY is partitioned by month on its load date AS_OF_DT (not on the value date VAL_DT). Staging
+# filters on it too, so Oracle reads only the load partitions that can hold the days it needs, not the whole table:
+# AS_OF_DT from POSTINGS_LOAD_MARGIN_DAYS days before the first value day read. A posting loaded after its value
+# date is always read; only one loaded more than that many days BEFORE its value date would be missed.
+# None: no load-date filter (every partition is read).
+POSTINGS_LOAD_DATE = "AS_OF_DT"
+POSTINGS_LOAD_MARGIN_DAYS = 31
+ACTIVE_STATUS = ("ACTIVE", "A")               # STS_FLG of an active client; an empty STS_FLG counts as active too
+                                              # (an inactive one shows INACTIVE)
+SOLE_PROPRIETOR = ("SOLE", "ESTABLISHMENT")   # words of LGL_ENTY_DSC, PRTY_SUB_LGL_DSC or SCTR_DSC for a business owned by
+                                              # 1 person (the sector Sole Proprietorships, for example)
 
 
 def read_columns(table):
@@ -69,20 +81,19 @@ def to_standard(df, table):
     if "direction" in out:
         out["direction"] = out["direction"].astype(str).str.strip().str.upper().str[0].map({"C": "IN", "D": "OUT"})
     if table == "clients":
-        active = out["status"].astype(str).str.strip().str.upper().isin(ACTIVE_STATUS)
+        status_raw = out["status"].astype(str).str.strip().str.upper().replace(["NAN", "NONE", "NULL", ""], "")
+        active = status_raw.isin(ACTIVE_STATUS) | status_raw.eq("")      # no status at all: active too
         out["status"] = np.where(active, "ACTIVE", "CLOSED")
-        legal = (out["legal_entity"].fillna("").astype(str) + " " + out["sub_legal_entity"].fillna("").astype(str))
+        legal = (out["legal_entity"].fillna("").astype(str) + " " + out["sub_legal_entity"].fillna("").astype(str)
+                 + " " + out["sector"].fillna("").astype(str))
         out["sole_proprietor"] = legal.str.upper().str.contains("|".join(SOLE_PROPRIETOR))
     return out
 
 
-def business_clients(clients):
-    """The business clients (standard names): every client whose line of business does not contain RETAIL, plus the retail
-    ones registered with a commercial registration (sole proprietors). One row per client number."""
-    lob = clients["line_of_business"].fillna("").astype(str).str.upper()
-    id_type = clients["id_type"].fillna("").astype(str).str.upper()
-    business = ~lob.str.contains("|".join(RETAIL)) | id_type.str.contains("|".join(BUSINESS_ID))
-    return clients[business].drop_duplicates("client_no", keep="last").reset_index(drop=True)
+def one_row_per_client(clients):
+    """One row per client number (the last one received). The warehouse already sends one per client
+    (CLIENTS_CURRENT_ROW); staging warns if it did not."""
+    return clients.drop_duplicates("client_no", keep="last").reset_index(drop=True)
 
 
 def value_day(dates):
@@ -93,16 +104,21 @@ def value_day(dates):
     return d.dt.normalize()
 
 
-def table_query(table, name, since=None, end=None, count=False):
+def table_query(table, name, since=None, end=None, count=False, limit=None):
     """The read-only query staging runs through the database connection: only the columns read (COLUMNS) of a table,
     named in the query, so it never depends on the column list Dataiku keeps for the dataset. name: the table's full
     quoted name. For the postings, only the value dates from since (None: the whole history) to before end; the value
     date comes back as text YYYY-MM-DD (TO_CHAR: Oracle and PostgreSQL), so no time zone can move it. count: the
-    same rows counted (COUNT(*)), for the progress lines."""
+    same rows counted (COUNT(*)). For the clients, only the business clients' current rows (clients_filter): the
+    warehouse leaves the other customers and the old versions out, so far fewer rows travel."""
     date = COLUMNS["transactions"]["value_date"] if table == "transactions" else None
     columns = [f"TO_CHAR(\"{date}\", 'YYYY-MM-DD') AS \"{date}\"" if c == date else f'"{c}"'
                for c in COLUMNS[table].values()]
     query = f"SELECT {'COUNT(*) AS N' if count else ', '.join(columns)} FROM {name}"
+    if table == "clients":
+        query += f" WHERE {clients_filter()}"       # business clients' current rows only: the rest stays in Oracle
+        if limit:                                   # only the first `limit` business clients (CLIENTS_LIMIT)
+            query += f' ORDER BY "{COLUMNS["clients"]["client_no"]}" FETCH FIRST {int(limit)} ROWS ONLY'
     if date:
         where = [f"\"{date}\" < DATE '{end:%Y-%m-%d}'"]
         if since is not None:
@@ -111,31 +127,87 @@ def table_query(table, name, since=None, end=None, count=False):
     return query
 
 
-def category(txn_type):
-    """The category of each posting, from its transaction type (CATEGORY_OF_TYPE; OTHER if not listed)."""
-    return txn_type.fillna("").astype(str).str.strip().str.upper().map(CATEGORY_OF_TYPE).fillna(OTHER)
+def clients_filter():
+    """The SQL condition on DIM_CUSTOMER: the business clients (CLIENTS_BUSINESS), only each one's current row
+    (CLIENTS_CURRENT_ROW). Used for the clients and, as a subquery, for the postings."""
+    current = CLIENTS_CURRENT_ROW.strip()
+    return f"({CLIENTS_BUSINESS.strip()})" + (f" AND ({current})" if current else "")
 
 
-def daily_flows(entries, client_numbers, cutoff):
-    """The daily totals of postings (standard names): one row per client, day and category with money_in, money_out
-    (both positive, SAR) and the number of postings. Business clients only, every day up to the cut-off day,
-    without reversed postings (nor what they reverse) and without transfers between the client's own accounts
-    (a debit and a credit with the same TRNS_RFR on the same client, netting to zero). The staging recipe calls it on
-    postings grouped so that all the postings of a TRNS_RFR are together."""
-    e = entries[entries["client_no"].isin(set(client_numbers))].copy()
-    e["day"] = value_day(e["value_date"])
-    e = e[e["day"] <= cutoff]
-    marked = e["reversal"].notna() & ~e["reversal"].astype(str).str.strip().isin(["", "nan", "None"])
-    e = e[~e["txn_ref"].isin(set(e.loc[marked, "txn_ref"].dropna()))]
-    legs = e[e["txn_ref"].notna()].groupby(["txn_ref", "client_no"]).agg(sides=("direction", "nunique"),
-                                                                         net=("amount", "sum"))
-    own = legs[(legs["sides"] == 2) & (legs["net"].abs() < 0.005)].index
-    e = e[~pd.MultiIndex.from_frame(e[["txn_ref", "client_no"]]).isin(own)]
-    e = e.assign(category=category(e["txn_type"]), amount=e["amount"].abs(),
-                 money_in=lambda d: d["amount"].where(d["direction"] == "IN", 0.0),
-                 money_out=lambda d: d["amount"].where(d["direction"] == "OUT", 0.0))
-    return (e.groupby(["client_no", "day", "category"], as_index=False)
-            .agg(money_in=("money_in", "sum"), money_out=("money_out", "sum"), postings=("entry_id", "count")))
+def _text(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def daily_totals_query(postings, clients, since, end, limit=None):
+    """The read-only query staging runs for the postings: the warehouse itself sums them into daily totals, so only
+    one row per client, day and category comes back (columns client_no, day, category, money_in, money_out,
+    postings), not every posting. postings, clients: the 2 tables' full quoted names. The rules (Oracle and
+    PostgreSQL; NULL-safe, as Oracle treats '' as NULL):
+    - 3 steps: the selected customers (DIM_CUSTOMER with clients_filter, one row each), the postings of the
+      selected days (value dates from since, None: no lower bound, to before end), then the postings joined with
+      the customers; with since, also only the load dates from
+      POSTINGS_LOAD_MARGIN_DAYS before it (POSTINGS_LOAD_DATE: the partitions Oracle reads);
+    - without reversed postings: a posting with a reversal marker (RVRSL_MRKR) carries the reversed posting's
+      reference (TRNS_RFR), and every posting with that reference is left out;
+    - without transfers between the client's own accounts: on the same client and reference, a credit and a debit
+      that net to zero;
+    - category from the transaction type (CATEGORY_OF_TYPE, else OTHER); money_in, money_out: the credits and the
+      debits as positive SAR amounts (AMT_LCY); postings: how many.
+    Window functions (one pass, no NOT IN / NOT EXISTS lookups) keep it fast on a big table."""
+    c = COLUMNS["transactions"]
+    dates = [f"\"{c['value_date']}\" < DATE '{end:%Y-%m-%d}'"]
+    if since is not None:
+        dates.insert(0, f"\"{c['value_date']}\" >= DATE '{since:%Y-%m-%d}'")
+        if POSTINGS_LOAD_DATE and POSTINGS_LOAD_MARGIN_DAYS is not None:     # only the load partitions needed
+            loaded = since - pd.Timedelta(days=POSTINGS_LOAD_MARGIN_DAYS)
+            dates.append(f"\"{POSTINGS_LOAD_DATE}\" >= DATE '{loaded:%Y-%m-%d}'")
+    cif = COLUMNS["clients"]["client_no"]
+    # 1. the selected customers: one row per customer (DISTINCT), so the join below can never count a posting twice
+    customers = f"SELECT DISTINCT \"{cif}\" AS c_cif FROM {clients} WHERE {clients_filter()}"
+    if limit:                                       # the same first `limit` business clients as table_query
+        customers += f" ORDER BY c_cif FETCH FIRST {int(limit)} ROWS ONLY"
+    categories = " ".join(f"WHEN {_text(t)} THEN {_text(k)}" for t, k in CATEGORY_OF_TYPE.items())
+    category = f"CASE UPPER(TRIM(p_typ)) {categories} ELSE {_text(OTHER)} END"
+    return f"""WITH customers AS (
+  {customers}
+), postings AS (
+  SELECT "{c['client_no']}" AS p_cif, TO_CHAR("{c['value_date']}", 'YYYY-MM-DD') AS p_day,
+         UPPER(SUBSTR(TRIM("{c['direction']}"), 1, 1)) AS p_dir, "{c['amount']}" AS p_amt,
+         "{c['txn_type']}" AS p_typ, "{c['txn_ref']}" AS p_ref, "{c['reversal']}" AS p_rev, "{c['entry_id']}" AS p_id
+  FROM {postings}
+  WHERE {' AND '.join(dates)}
+), p AS (
+  SELECT postings.* FROM postings JOIN customers ON customers.c_cif = postings.p_cif
+), marked AS (
+  SELECT p.*, MAX(CASE WHEN p_ref IS NOT NULL AND LENGTH(TRIM(p_rev)) > 0 AND TRIM(p_rev) NOT IN ('nan', 'None')
+                       THEN 1 ELSE 0 END) OVER (PARTITION BY p_ref) AS reversed
+  FROM p
+), kept AS (
+  SELECT marked.*,
+         MAX(CASE WHEN p_dir = 'C' THEN 1 ELSE 0 END) OVER (PARTITION BY p_ref, p_cif)
+         + MAX(CASE WHEN p_dir = 'D' THEN 1 ELSE 0 END) OVER (PARTITION BY p_ref, p_cif) AS sides,
+         COALESCE(ABS(SUM(p_amt) OVER (PARTITION BY p_ref, p_cif)), 0) AS net
+  FROM marked WHERE reversed = 0
+)
+SELECT p_cif AS "client_no", p_day AS "day", {category} AS "category",
+       SUM(CASE WHEN p_dir = 'C' THEN ABS(p_amt) ELSE 0 END) AS "money_in",
+       SUM(CASE WHEN p_dir = 'D' THEN ABS(p_amt) ELSE 0 END) AS "money_out",
+       COUNT(p_id) AS "postings"
+FROM kept
+WHERE p_ref IS NULL OR NOT (sides = 2 AND net < 0.005)
+GROUP BY p_cif, p_day, {category}"""
+
+
+def standard_daily(df):
+    """The daily totals as the warehouse returns them, with the project's types: client numbers as text, the day as
+    a date, amounts and counts as numbers."""
+    out = pd.DataFrame({"client_no": df["client_no"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True),
+                        "day": pd.to_datetime(df["day"]),
+                        "category": df["category"].astype(str),
+                        "money_in": pd.to_numeric(df["money_in"]).astype(float).fillna(0.0),
+                        "money_out": pd.to_numeric(df["money_out"]).astype(float).fillna(0.0),
+                        "postings": pd.to_numeric(df["postings"]).astype("int64")})
+    return out
 
 
 def set_cutoff():

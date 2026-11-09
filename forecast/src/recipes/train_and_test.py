@@ -7,8 +7,9 @@
 import time
 
 import dataiku
+import pandas as pd
 
-from cashflow import cutoff_date, read_daily, read_dataset, until
+from cashflow import MIN_TRAINING_MONTHS, cutoff_date, read_daily, read_dataset, until
 from models import backtest, new_forecaster, run_metrics, test_results
 from tracking import log_model, new_model_id
 
@@ -23,6 +24,11 @@ def step(what):
 cutoff = cutoff_date()
 step("reading daily_flows and clients")
 daily, clients = until(read_daily(), cutoff), read_dataset("clients")
+first_day = pd.to_datetime(daily["day"]).min() if len(daily) else cutoff
+if first_day > cutoff - pd.DateOffset(months=MIN_TRAINING_MONTHS) + pd.Timedelta(days=1):
+    raise ValueError(f"Not enough history to train and test a model: daily_flows starts on {first_day:%Y-%m-%d}, and "
+                     f"a model needs at least {MIN_TRAINING_MONTHS} months up to the cut-off day ({cutoff:%Y-%m-%d}). "
+                     "Run the setup again with more HISTORY_MONTHS, then the scenario Full rebuild")
 backtested, final = new_forecaster(), new_forecaster()
 step(f"1/2 test: training without the last periods, then testing on them ({len(daily):,} daily rows)")
 tested = backtest(backtested, daily, clients, cutoff)

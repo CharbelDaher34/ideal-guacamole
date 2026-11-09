@@ -1,8 +1,7 @@
 """The data scientist's forecasters (project library: python/forecasters.py). The setup notebook creates this file once
 and never overwrites it: it is yours.
 
-Try a forecaster first: in the notebook forecast_lab, or set the project variable lab_forecaster to its name and
-build lab_results (Lab zone). To put one in production:
+Try a forecaster first in the notebook forecast_lab (it never touches production). To put one in production:
     1. add its class here and to FORECASTERS below,
     2. set the project variable forecaster to its name,
     3. run the scenario Retrain, test and promote: champion / challenger promotes it only if it passes the promotion

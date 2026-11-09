@@ -18,7 +18,8 @@ A forecaster is a class with:
                     client_no, category, window, p10, ev, p90 (the net cash flow of that window, SAR). forecast()
                     checks it and applies P10 <= EV <= P90.
 The data scientist's own forecasters go in forecasters.py: the setup notebook creates that file once and never
-overwrites it. lab_try and lab_compare try forecasters against the production model without touching production.
+overwrites it. lab_compare (notebook forecast_lab) tries forecasters against the production model without touching
+production.
 """
 import numpy as np
 import pandas as pd
@@ -284,31 +285,9 @@ def _record_try(forecaster, tested, production_id):
     return tracking.log_lab_run(run_name, params, run_metrics(test_results(tested)), forecaster)
 
 
-def lab_try(forecaster, record=True):
-    """Try a forecaster against the production model without touching production (the lab: recipe try_forecaster).
-    It is trained without the last 6 periods of 30 days and tested on them, the way champion / challenger tests a new model, and
-    the try is recorded in Experiment Tracking (experiment cashflow_lab, never deployed).
-    Returns: per window (1, 2, 3, ALL) the EV error of the simple guess, of the production model and of the
-    candidate, and their P10-P90 coverage; the decision champion / challenger would take and its reason; the lab run
-    ID (None if not recorded)."""
-    import tracking
-    daily, clients, production_id, production = _lab_test()
-    candidate = backtest(forecaster, daily, clients, cutoff_date())
-    mine = _by_window(candidate)
-    table = pd.DataFrame({"simple_guess_error": mine["wape_baseline"], "production_error": np.nan,
-                          "candidate_error": mine["wape_model"], "production_coverage": np.nan,
-                          "candidate_coverage": mine["coverage_p10_p90"]})
-    if production is not None:
-        theirs = _by_window(production)
-        table["production_error"], table["production_coverage"] = theirs["wape_model"], theirs["coverage_p10_p90"]
-    decision, reason = tracking.decide(scores(candidate), scores(production) if production is not None else None)
-    run_id = _record_try(forecaster, candidate, production_id) if record else None
-    return table.rename_axis("window"), decision, reason, run_id
-
-
 def lab_compare(forecasters, record=True):
-    """Try several forecasters at once against the production model, on the same test as lab_try and champion /
-    challenger, without touching production. Each forecaster is trained without the last 6 periods of 30 days; each try is
+    """Try several forecasters at once against the production model, on the same test as champion / challenger,
+    without touching production. Each forecaster is trained without the last 6 periods of 30 days; each try is
     recorded in Experiment Tracking (experiment cashflow_lab) unless record is False. Returns a dict:
         board       one row per model (production first, simple guess last): EV error, P10-P90 coverage, share below
                     P10 and above P90, the decision champion / challenger would take and its reason, the lab run ID

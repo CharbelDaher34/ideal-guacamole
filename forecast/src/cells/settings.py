@@ -5,9 +5,11 @@ PROJECT_NAME = "Digital Cash Management Forecast"
 EDW_CONNECTION = "YOUR_EDW_CONNECTION"   # the Dataiku connection to the warehouse (Administration > Connections).
                                          # At the bank, for example "EDW_AI"; on the test machine "EDW_LOCAL"
 EDW_SCHEMA = "EDW"                       # the schema that holds the 2 tables
-HISTORY_YEARS = 2                        # years of postings read the first time (and by the scenario Full rebuild),
-                                         # up to yesterday; at least 2. None: the whole history. Each night then adds
-                                         # the new days. To change it later: run the setup again, then Full rebuild
+HISTORY_MONTHS = 24                      # months of postings read the first time (and by the scenario Full rebuild),
+                                         # up to yesterday. -1: the whole history. Each night then adds the new days
+CLIENTS_LIMIT = -1                       # how many business clients to read (the lowest customer numbers): -1 all;
+                                         # for example 1000 to test fast. Both: to change them later, run the setup
+                                         # again, then the scenario Full rebuild
 
 # ── 2. OUTPUT: where the project writes its own results ─────────────────────────────────────────────────────────────
 OUTPUT_CONNECTION = "filesystem_managed"         # datasets (tables): clients, final_forecast, test_results, logs

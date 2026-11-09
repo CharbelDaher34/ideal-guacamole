@@ -10,8 +10,8 @@ try:
     import sklearn
 except ImportError:
     raise RuntimeError("Use the kernel of the code env cashflow_forecast (Kernel > Change kernel). If it is not in the "
-                       "list, ask whoever manages that code env to enable its Jupyter support; meanwhile, set the "
-                       "project variable lab_forecaster and build lab_results (Lab zone).")
+                       "list, ask whoever manages that code env to enable its Jupyter support. Meanwhile a forecaster "
+                       "can be tried safely through Retrain: it goes live only if it beats the production model.")
 import dataiku
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)    # third-party notices; after dataiku, which shows them

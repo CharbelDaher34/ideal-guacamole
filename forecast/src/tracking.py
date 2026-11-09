@@ -6,8 +6,8 @@ the managed folder "experiments"): its forecaster and settings, the cut-off, tes
 forecaster, which returns P10, EV and P90). It is deployed as a new version (version ID = model ID) of the saved model
 cash_forecast (interface 3, cashflow.SAVED_MODEL). The production model is the active version; promoting a model
 activates it, and the nightly forecast always uses the active version.
-Lab tries (notebook forecast_lab) go to their own experiment, cashflow_lab, in the folder lab_experiments. They are
-never deployed.
+Lab tries (notebook forecast_lab) go to their own experiment, cashflow_lab, in the same folder. They are never
+deployed.
 """
 import inspect
 import os
@@ -20,7 +20,7 @@ import pandas as pd
 from cashflow import SAVED_MODEL
 
 EXPERIMENT, FOLDER = "cashflow_forecast", "experiments"
-LAB_EXPERIMENT, LAB_FOLDER = "cashflow_lab", "lab_experiments"
+LAB_EXPERIMENT, LAB_FOLDER = "cashflow_lab", FOLDER        # lab tries: their own experiment, same folder
 # The promotion rules: project variables (change them in the project's variables, no code change), with these
 # defaults. A candidate is promoted only if all hold:
 PROMOTION_RULES = {
@@ -144,7 +144,7 @@ def log_model(model_id, params, metrics, backtest, final):
 
 
 def log_lab_run(run_name, params, metrics, backtest):
-    """Record a lab try in Experiment Tracking (experiment cashflow_lab, folder lab_experiments): its settings, test
+    """Record a lab try in Experiment Tracking (experiment cashflow_lab, folder experiments): its settings, test
     scores and forecaster. Never deployed. Returns the run ID."""
     _carry_code(backtest)
     with _mlflow(LAB_FOLDER) as mlflow:

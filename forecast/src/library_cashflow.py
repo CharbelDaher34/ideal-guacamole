@@ -18,6 +18,8 @@ TOTAL = "TOTAL"             # the category of a client's all-categories net cash
 SAVED_MODEL = "cash_forecast"
 MIN_HISTORY_DAYS = 360      # a client needs this many days of history up to the cut-off to get a forecast (else
                             # status NOT_ENOUGH_HISTORY in the final forecast)
+MIN_TRAINING_MONTHS = 18    # history needed to train and test a model: MIN_HISTORY_DAYS, plus the 6 periods of 30
+                            # days the test keeps aside (about 540 days). Less is fine to test staging only
 FORECAST_COLUMNS = ["client_no", "category", "window", "p10", "ev", "p90"]   # what a forecaster returns
 
 
@@ -211,6 +213,22 @@ class Progress:
         print(line, flush=True)
 
 
+def waiting(what, every=60):
+    """While the warehouse runs a query and no row has come back yet, a PROGRESS line every `every` seconds, so a
+    long query never looks stuck. Returns an Event: set it when the first row arrives (or the query ends)."""
+    import threading
+    import time
+    stop, started = threading.Event(), time.time()
+
+    def beat():
+        while not stop.wait(every):
+            print(f"PROGRESS {what}: no row yet, the warehouse is still running the query "
+                  f"({(time.time() - started) / 60:.0f} min)", flush=True)
+
+    threading.Thread(target=beat, daemon=True).start()
+    return stop
+
+
 class Spread:
     """Rows spread over n files on local disk by the hash of a column, then read back one file at a time: all the
     rows with the same value of that column end up in the same file, and memory holds one file, not the whole table.
@@ -263,33 +281,35 @@ def cutoff_date():
     return pd.Timestamp(dataiku.get_custom_variables()["cutoff_date"])
 
 
-MIN_HISTORY_YEARS = 2       # history_years can't be less: a client needs MIN_HISTORY_DAYS of history, and the test
-                            # keeps the last 6 periods of 30 days aside
-
-
-def history_years(value):
-    """The number of years of history to read (project variable history_years): None for the whole history. Stops
-    with a clear message if it is not a whole number of at least MIN_HISTORY_YEARS."""
+def whole_number(name, value):
+    """A setting that is a whole number, or None for "all" (empty, None, -1 or "all"). Stops with a clear message
+    otherwise."""
     value = "" if value is None else str(value).strip()
-    if value in ("", "None", "none", "ALL", "all"):
+    if value.lower() in ("", "none", "all", "-1"):
         return None
     try:
-        years = int(float(value))
+        number = float(value)
     except ValueError:
-        years = None
-    if years is None or years != float(value) or years < MIN_HISTORY_YEARS:
-        raise ValueError(f"history_years is {value!r}: it must be a whole number of years, at least "
-                         f"{MIN_HISTORY_YEARS} (a client needs {MIN_HISTORY_DAYS} days of history and the test keeps "
-                         "the last 180 days aside), or empty for the whole history")
-    return years
+        number = 0.5
+    if number != int(number) or number < 1:
+        raise ValueError(f"{name} is {value!r}: it must be a whole number (1 or more), or -1 / None for all")
+    return int(number)
 
 
 def history_start(cutoff):
     """The first day staging reads when it reads everything (the first run, or the scenario Full rebuild): the
-    project variable history_years years before the cut-off day, or None for the whole history."""
+    project variable history_months months before the cut-off day, or None for the whole history. With less than
+    about 18 months, few clients reach the history a forecast and the model test need (MIN_HISTORY_DAYS, and the
+    last 6 periods of 30 days kept aside): fine to test the pipeline, not to judge a model."""
     import dataiku
-    years = history_years(dataiku.get_custom_variables().get("history_years"))
-    return None if years is None else cutoff - pd.DateOffset(years=years) + pd.Timedelta(days=1)
+    months = whole_number("history_months", dataiku.get_custom_variables().get("history_months"))
+    return None if months is None else cutoff - pd.DateOffset(months=months) + pd.Timedelta(days=1)
+
+
+def clients_limit():
+    """How many business clients staging reads (project variable clients_limit): None for all of them."""
+    import dataiku
+    return whole_number("clients_limit", dataiku.get_custom_variables().get("clients_limit"))
 
 
 def until(daily, cutoff):

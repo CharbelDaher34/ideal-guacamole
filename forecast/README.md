@@ -21,7 +21,15 @@ You only need `build_forecast_project.ipynb`: it holds all the code and creates 
 1. **Import** `build_forecast_project.ipynb` into a new, empty project (Notebooks → New notebook → Import).
 2. **Put the bank's codes in its cell `WAREHOUSE_CODE = r'''`** (section 2, Code):
    - `CATEGORY_OF_TYPE`: the real transaction types (`TRNS_TYP`) and their category. Today it's a mock list.
-   - Check `ACTIVE_STATUS`, `RETAIL`, `BUSINESS_ID`, `SOLE_PROPRIETOR` against `DIM_CUSTOMER`.
+   - `CLIENTS_BUSINESS` and `CLIENTS_CURRENT_ROW`: which rows of `DIM_CUSTOMER` are read, as SQL conditions. Already
+     set to the bank's query: business clients = `PRIME_RM LIKE '12%' OR SCTR_DSC = 'Sole Proprietorships'`, current
+     row = `END_DT = DATE '2199-12-31'` (about 420k rows, one per customer). If staging warns that `DIM_CUSTOMER` sent
+     several rows per client, check them.
+   - `POSTINGS_LOAD_DATE` / `POSTINGS_LOAD_MARGIN_DAYS`: `FCT_STATEMENT_ENTRY` is partitioned by month on its load
+     date `AS_OF_DT`, so staging also filters on it and Oracle reads only the partitions needed (each night: the
+     latest one or two instead of the whole table). Margin: 31 days; a posting loaded more than that many days
+     *before* its value date would be missed.
+   - Check `ACTIVE_STATUS` and `SOLE_PROPRIETOR` against `DIM_CUSTOMER`.
    - `check_warehouse_loaded`: today a mock that always passes. Replace it with the bank's check that the
      warehouse's load of yesterday is finished (for example a query on its load-control table).
 
@@ -33,7 +41,8 @@ You only need `build_forecast_project.ipynb`: it holds all the code and creates 
    |---|---|---|
    | `EDW_CONNECTION` | **input**: the Dataiku connection to the warehouse (read-only) | for example `"EDW_AI"` |
    | `EDW_SCHEMA` | **input**: the schema of `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` | `"EDW"` |
-   | `HISTORY_YEARS` | **input**: years of postings read the first time, up to yesterday (at least 2); `None` reads everything | for example `2` |
+   | `HISTORY_MONTHS` | **input**: months of postings read the first time, up to yesterday; `-1` reads everything. Under 18 months, the setup only stages the data (training needs 18) | for example `24`, or `3` to test fast |
+   | `CLIENTS_LIMIT` | **input**: how many business clients to read (the lowest customer numbers); `-1` all | `-1`, or for example `1000` to test fast |
    | `OUTPUT_CONNECTION` | **output**: where the project writes its datasets (tables) | `"filesystem_managed"` |
    | `OUTPUT_FOLDER_CONNECTION` | **output**: where it writes its folders (files: `daily_flows`, models, archive) | `"filesystem_folders"` |
    | `CODE_ENV` | the Python code env | for example `"cashflow_forecast"` |
@@ -41,7 +50,7 @@ You only need `build_forecast_project.ipynb`: it holds all the code and creates 
    The project reads the warehouse through SQL only: there is no CSV input.
 
 4. **Run All.** It first checks it can read both warehouse tables (it stops with a clear message if not). Then it
-   builds the flow, reads the history once (the last `HISTORY_YEARS` years), trains and promotes a first model, and
+   builds the flow, reads the history once (the last `HISTORY_MONTHS` months), trains and promotes a first model, and
    runs the first forecast. This first read is the long part. Check it printed `DIM_CUSTOMER: linked to EDW.DIM_CUSTOMER
    of <your connection>` (and the same for `FCT_STATEMENT_ENTRY`).
 5. **Check the last cell:** the production model, its test scores, `final_forecast` (one row per active client)
@@ -57,7 +66,7 @@ package: they use fake data.
 |---|---|---|
 | **Nightly batch** | daily, 06:00 | reads the new days, forecasts every active client with the production model |
 | **Retrain, test and promote** | monthly, on the 5th | trains a new model and activates it only if it passes the promotion rules |
-| **Full rebuild of the daily flows** | by hand | reads the history again (the last `HISTORY_YEARS` years) |
+| **Full rebuild of the daily flows** | by hand | reads the history again (the last `HISTORY_MONTHS` months) |
 
 **To follow a long run:** the setup notebook prints progress lines while it runs (rows read of the total, %, about how long is left). For a scenario, open its job (Jobs) → Log and search `PROGRESS`.
 
@@ -73,6 +82,7 @@ package: they use fake data.
 |---|---|
 | `staging_log` FAILED: "the warehouse load of <day> looks late" | wait for the warehouse load, then run the Nightly batch again |
 | "run the scenario Full rebuild" | run **Full rebuild of the daily flows**, then the Nightly batch |
+| Staging looks stuck | Jobs → the job → Log, search `PROGRESS`. `no row yet, the warehouse is still running the query` = Oracle is still working on it: the line above shows the exact SQL, to give the DBA. The row count going up slowly = rows are arriving, it's just long |
 | `inference_log` FAILED | read its `error`; `final_forecast` still holds the previous forecast |
 | "No production model yet" | run **Retrain, test and promote** |
 | The setup stops on the code env | send the admin the request it printed |
@@ -90,7 +100,7 @@ package: they use fake data.
 | `promotion_beat_simple_guess` | true | promotion rule: must beat "same as the last 30 days" |
 | `promotion_min_gain` | 0.0 | promotion rule: how much better than production |
 | `inference_clients_per_chunk` | 5000 | clients forecast at a time: bigger is faster but needs more memory |
-| `history_years` | from `HISTORY_YEARS` | set by the setup; to change it, run the setup again with a new `HISTORY_YEARS`, then **Full rebuild** |
+| `history_months`, `clients_limit` | from `HISTORY_MONTHS`, `CLIENTS_LIMIT` | set by the setup; to change them, run the setup again, then **Full rebuild** |
 | `cutoff_override` | empty | forecast from another day's data (YYYY-MM-DD) instead of yesterday |
 
 
@@ -101,7 +111,7 @@ The bank's package is `build_forecast_project.ipynb` and this README. The rest s
 | File | What it is |
 |---|---|
 | `src/` | the code the notebooks are built from; edit it, then run `python make_notebook.py` |
-| `forecast_lab.ipynb` | the data scientist's lab: EDA and model comparison |
+| `forecast_lab.ipynb` | the data scientist's lab (outside the flow): EDA and model comparison; then set `forecaster` and run Retrain |
 | `warehouse_simulator.ipynb` | test machine only: fake warehouse tables in a local test database |
 | `inference_load_test.ipynb` | test machine only: the 420k-client benchmark |
 | `alerts_plan.md` | planned email / Teams alerts (not built) |
