@@ -10,3 +10,6 @@ pg_data/
 
 __pycache__/
 *.pyc
+
+# sandbox: the saved Free Edition licence (make wipe)
+sandbox/keep/

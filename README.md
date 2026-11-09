@@ -29,8 +29,7 @@ It is **not exposed to the server** — only reachable on the Docker network as 
 
 - Credentials: `.env` (`POSTGRES_USER` / `POSTGRES_DB` / `POSTGRES_PASSWORD`, file is mode 600, not in git).
   On a fresh clone: `cp .env.example .env`, set a password, `chmod 600 .env`
-- DSS connection: `postgres_local` (pre-created in `dss_data/config/connections.json`).
-  After logging in, check it under **Administration → Connections → postgres_local → Test**.
+- DSS connection: `EDW_LOCAL` (created by `make rebuild`).
 - psql shell: `docker exec -it dataiku-postgres psql -U dataiku -d dataiku`
 
 ### Start / stop
@@ -67,11 +66,20 @@ Snowflake/BigQuery/Oracle/etc. connectors, partitioning. Use the 14-day Dataiku 
 
 ### Reset from scratch
 
+Everything of the sandbox is rebuilt from nothing by scripts in `sandbox/` (run from this server, not from
+Dataiku; nothing of it is in the forecast notebooks):
+
 ```bash
-docker compose down
-docker run --rm -u 0 -v "$PWD/dss_data:/d" -v "$PWD/pg_data:/p" --entrypoint sh dataiku/dss:14.2.0 -c 'rm -rf /d/* /d/.[!.]* /p/* /p/.[!.]*'
-docker compose up -d
+make reset     # = make wipe, then make rebuild
+make wipe      # delete the 2 containers, their network, dss_data, pg_data and the 2 images; the Free Edition
+               # licence is saved first in sandbox/keep/license.json (not in git)
+make rebuild   # pull the images, start, put the licence back, create the schema EDW in PostgreSQL, the connection
+               # EDW_LOCAL, the code env cashflow_forecast (scikit-learn, mlflow 2.22.0, polars, catboost) with its
+               # Jupyter kernel, the project DCM_FORECAST, then run warehouse_simulator.ipynb and
+               # build_forecast_project.ipynb (local settings) and import forecast_lab.ipynb and daily_flows_viewer.ipynb
 ```
 
-This also wipes the `postgres_local` connection; re-add it in the DSS UI afterwards
-(host `postgres`, port `5432`, credentials from `.env`).
+`make rebuild` takes about 15 minutes the first time (the DSS image is 12.7 GB, the code env a few minutes).
+Without `sandbox/keep/license.json`, register the Free Edition in the browser first, then `python3 sandbox/rebuild.py`.
+`sandbox/dss.py` also runs a notebook or a scenario from the server:
+`python3 sandbox/dss.py run-scenario DCM_FORECAST Load_test`.

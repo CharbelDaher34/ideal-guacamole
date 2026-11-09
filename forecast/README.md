@@ -117,12 +117,15 @@ clients only, since only the forecast's time is measured. It never reads or writ
    | `loadtest_months` | 24 | months of history per client |
    | `loadtest_postings_per_month` | 40 | average postings (transactions) per client and month |
    | `loadtest_clients_per_chunk` | 5000 | clients forecast at a time |
-   | `loadtest_model` | dummy | `dummy`, or a real forecaster's name (`quantile_boosting`) to time it |
+   | `loadtest_model` | catboost | `catboost`: real CatBoost trained on 2 clients only (real prediction time, meaningless forecasts); `dummy`: no model; or a forecaster's name (`quantile_boosting`) |
+   | `loadtest_engine` | pandas | `pandas` or `polars`, to sum the days into 30-day periods (polars: an admin adds the package `polars` to the code env) |
 
 2. **Run** the scenario. Progress: the job's log (Jobs → the last job → the recipe → lines starting with `PROGRESS`).
-3. **Results:** `load_test_log`, one row per run: the data size (clients, postings, daily rows, Parquet MB), the
-   seconds of each step (generating, reading, forecasting, writing, total), clients per second
-   and the most memory used (`peak_memory_mb`). Compare runs with different numbers.
+3. **Results:** the dashboard **Load test** (Dashboards → Load test), updated after each run: seconds per step of
+   each run, speed and memory by number of clients, CSV vs Parquet (seconds to write and read back the forecast), and
+   the last runs. The numbers are in `load_test_log`, one row per run (also the failed ones, with the error): the
+   data size, the seconds of each step, clients per second and the most memory used (`peak_memory_mb`).
+   The dashboard is made again after each run: to change it, copy it first.
 
 Running the setup again keeps the numbers set in step 1.
 

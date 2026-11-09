@@ -1,0 +1,190 @@
+<title>Forecast Load Test</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one readable column; the answer first, then the numbers behind it, then how it was measured */
+:root {
+  --bg: #f7f8f6; --surface: #ffffff; --fg: #1d2421; --muted: #5d6863; --line: #dde2de;
+  --accent: #1f6f5c; --accent-soft: #e2f0eb; --warn: #9a5b13;
+  --s-read: #8aa39b; --s-prep: #1f6f5c; --s-model: #d08a2c; --s-format: #6f7fb3; --s-write: #3a3f3d;
+  --body: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121614; --surface: #1a201d; --fg: #e6ebe8; --muted: #9aa6a0; --line: #2d3531;
+  --accent: #5cc0a2; --accent-soft: #1c3029; --warn: #e0a560;
+  --s-read: #6f8a82; --s-prep: #5cc0a2; --s-model: #e0a560; --s-format: #94a3d6; --s-write: #c9d0cc;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121614; --surface: #1a201d; --fg: #e6ebe8; --muted: #9aa6a0; --line: #2d3531;
+  --accent: #5cc0a2; --accent-soft: #1c3029; --warn: #e0a560;
+  --s-read: #6f8a82; --s-prep: #5cc0a2; --s-model: #e0a560; --s-format: #94a3d6; --s-write: #c9d0cc;
+  color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.55; }
+.page { max-width: 880px; margin: 0 auto; padding-block: 40px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 40px; }
+h1 { font-size: 30px; line-height: 1.2; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { font-size: 19px; margin: 0 0 12px; text-wrap: balance; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+header { display: grid; gap: 8px; }
+header p { color: var(--muted); }
+.answer { background: var(--accent-soft); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; display: grid; gap: 14px; }
+.picks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.pick { display: grid; gap: 2px; }
+.pick b { font-size: 20px; color: var(--accent); }
+.pick span { color: var(--muted); font-size: 13px; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 24px; color: var(--fg); }
+.facts div { font-family: var(--mono); font-size: 13px; }
+section { display: grid; gap: 12px; min-width: 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; min-width: 560px; }
+th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
+td { font-family: var(--mono); font-size: 13.5px; }
+tr.best td { background: var(--accent-soft); }
+.tag { font-family: var(--body); font-size: 11px; font-weight: 600; color: var(--accent); margin-left: 6px; letter-spacing: 0.04em; text-transform: uppercase; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+svg text { fill: var(--muted); font-family: var(--mono); font-size: 11px; }
+svg .label { fill: var(--fg); font-family: var(--body); font-size: 12px; }
+.grid line { stroke: var(--line); }
+.pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.stat { border: 1px solid var(--line); border-radius: 10px; padding: 16px; background: var(--surface); display: grid; gap: 6px; }
+.stat .big { font-family: var(--mono); font-size: 22px; }
+.stat .big em { font-style: normal; color: var(--muted); font-size: 14px; }
+ul.notes { margin: 0; padding-left: 20px; display: grid; gap: 6px; max-width: 72ch; }
+.muted { color: var(--muted); }
+@media (max-width: 640px) { .picks, .pair { grid-template-columns: 1fr; } h1 { font-size: 25px; } }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">Digital Cash Management Forecast · load test · 9 Nov 2026</div>
+    <h1>How to run the nightly forecast for 400,000 clients</h1>
+    <p>The nightly forecast was timed on fake data the size of the bank's (400,000 clients, 24 months of history) with 6 setups: pandas or Polars, and 2,000, 5,000 or 20,000 clients per chunk.</p>
+  </header>
+
+  <div class="answer">
+    <div class="eyebrow">What to use</div>
+    <div class="picks">
+      <div class="pick"><b>pandas</b><span>Polars saves 10–20 s at most, uses more memory and needs an admin to install it</span></div>
+      <div class="pick"><b>2,000–5,000</b><span>clients per chunk: the fastest and the lightest on memory</span></div>
+      <div class="pick"><b>Parquet</b><span>for the data kept between steps: about 40× faster to write than CSV</span></div>
+    </div>
+    <div class="facts">
+      <div>≈ 4.2 min for 400,000 clients</div>
+      <div>≈ 3 GB of memory</div>
+      <div>the model is ≈ 2% of the time</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>The 6 runs, fastest first</h2>
+    <p class="muted">Each run forecasts all 400,000 clients. The chunk size only says how many clients are handled at once. Minutes = reading + preparing + model + formatting + writing Parquet.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Engine</th><th>Per chunk</th><th>Chunks</th><th>Minutes</th><th>Memory</th><th>Clients / s</th></tr></thead>
+        <tbody id="runs"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where the time goes</h2>
+    <p class="muted">Seconds per step, for all 400,000 clients. Preparing (summing each client's days into 30-day periods) is the only step the engine changes, and it is the step that grows with bigger chunks.</p>
+    <div class="legend" id="legend"></div>
+    <div class="scroll"><svg id="bars" role="img" aria-label="Seconds per step for each run"></svg></div>
+  </section>
+
+  <section>
+    <h2>CSV or Parquet</h2>
+    <p class="muted">The whole forecast (400,000 rows, 112 columns), written and read back each way. Average of the 6 runs.</p>
+    <div class="pair">
+      <div class="stat"><div class="eyebrow">Write</div><div class="big" id="write"></div><div class="muted">CSV dataset vs Parquet files</div></div>
+      <div class="stat"><div class="eyebrow">Read back</div><div class="big" id="readback"></div><div class="muted">CSV dataset vs Parquet files</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why</h2>
+    <ul class="notes">
+      <li><b>Bigger chunks are slower.</b> Preparing a chunk (one table per client and category, one column per 30-day period) takes longer than in proportion to its size, so many small chunks beat a few big ones. At 20,000 per chunk preparing took 308 s with pandas against 121 s at 5,000, and memory rose from 3.4 to 8.3 GB.</li>
+      <li><b>The engine matters little with small chunks.</b> Polars only speeds up preparing (−15% at 2,000 to 5,000 per chunk, −42% at 20,000). Reading, the model and formatting are the same code for both.</li>
+      <li><b>The model is not the bottleneck.</b> Real CatBoost (3 models: P10, EV, P90) takes 5–9 s for 400,000 clients. A heavier model would add to that, not change the other steps.</li>
+      <li><b>It grows in a straight line.</b> In earlier runs (without a model), 800,000 clients took about twice as long as 400,000, with the same memory: memory depends on the chunk size, not on the number of clients.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>How it was measured</h2>
+    <ul class="notes muted">
+      <li>Scenario <b>Load test</b> (zone Load test, apart from the real data), on the local sandbox: Dataiku 14.2 Free Edition, 48 cores, 125 GB of memory, shared with other projects.</li>
+      <li>Fake data: 400,000 clients, 24 months, about 40 postings a month each: 332 million daily rows, 3.2 GB of Parquet. 10% of clients have a shorter history, so 19,244 get NOT_ENOUGH_HISTORY.</li>
+      <li>Model: real CatBoost with quantile_boosting's inputs, trained on 2 clients only, so its forecasts mean nothing and its prediction time is real.</li>
+      <li>Not included: the warehouse read (staging) and training. Run the same scenario on the bank's server before relying on these numbers there.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+const RUNS = [ // from load_test_log; seconds for all 400,000 clients
+  {engine: "pandas", chunk: 2000, chunks: 200, read: 65.8, prep: 121.3, model: 8.4, format: 54.4, wcsv: 43.95, wpq: 0.96, rcsv: 19.96, rpq: 1.83, mem: 2798},
+  {engine: "polars", chunk: 2000, chunks: 200, read: 66.1, prep: 103.5, model: 8.6, format: 55.1, wcsv: 41.33, wpq: 1.40, rcsv: 20.35, rpq: 1.96, mem: 3778},
+  {engine: "pandas", chunk: 5000, chunks: 80, read: 68.9, prep: 121.6, model: 5.1, format: 56.7, wcsv: 41.74, wpq: 1.13, rcsv: 20.08, rpq: 1.02, mem: 3521},
+  {engine: "polars", chunk: 5000, chunks: 80, read: 64.4, prep: 113.6, model: 5.2, format: 56.6, wcsv: 41.48, wpq: 0.95, rcsv: 20.09, rpq: 1.10, mem: 4981},
+  {engine: "pandas", chunk: 20000, chunks: 20, read: 89.9, prep: 307.8, model: 3.0, format: 70.6, wcsv: 42.23, wpq: 0.82, rcsv: 19.68, rpq: 0.56, mem: 8542},
+  {engine: "polars", chunk: 20000, chunks: 20, read: 96.1, prep: 177.9, model: 2.9, format: 85.7, wcsv: 40.87, wpq: 0.69, rcsv: 20.06, rpq: 0.57, mem: 11229},
+];
+const CLIENTS = 400000;
+const STEPS = [["read", "Reading", "--s-read"], ["prep", "Preparing", "--s-prep"], ["model", "Model (CatBoost)", "--s-model"],
+               ["format", "Formatting", "--s-format"], ["wpq", "Writing (Parquet)", "--s-write"]];
+const total = r => STEPS.reduce((s, [k]) => s + r[k], 0);
+const runs = RUNS.map(r => ({...r, total: total(r)})).sort((a, b) => a.total - b.total);
+const fmt = (n, d = 0) => n.toLocaleString("en-US", {minimumFractionDigits: d, maximumFractionDigits: d});
+const recommended = r => r.engine === "pandas" && r.chunk <= 5000;
+
+document.getElementById("runs").innerHTML = runs.map(r => `
+  <tr class="${recommended(r) ? "best" : ""}">
+    <td>${r.engine}${recommended(r) ? '<span class="tag">use</span>' : ""}</td>
+    <td>${fmt(r.chunk)}</td><td>${r.chunks}</td><td>${fmt(r.total / 60, 1)}</td>
+    <td>${fmt(r.mem / 1024, 1)} GB</td><td>${fmt(CLIENTS / r.total)}</td></tr>`).join("");
+
+document.getElementById("legend").innerHTML = STEPS.map(([, name, color]) =>
+  `<span><i style="background: var(${color})"></i>${name}</span>`).join("");
+
+// stacked bars, one per run, drawn to one scale (seconds)
+const svg = document.getElementById("bars");
+const W = 820, left = 150, right = 56, rowH = 34, top = 8, axisH = 26;
+const H = top + runs.length * rowH + axisH;
+const max = Math.ceil(Math.max(...runs.map(r => r.total)) / 100) * 100;
+const x = s => left + (s / max) * (W - left - right);
+svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+svg.setAttribute("width", W); svg.style.maxWidth = "none"; svg.style.display = "block";
+let out = '<g class="grid">';
+for (let t = 0; t <= max; t += 100) {
+  out += `<line x1="${x(t)}" x2="${x(t)}" y1="${top}" y2="${top + runs.length * rowH}"/>`;
+  out += `<text x="${x(t)}" y="${H - 8}" text-anchor="middle">${t} s</text>`;
+}
+out += "</g>";
+runs.forEach((r, i) => {
+  const y = top + i * rowH + 6, h = rowH - 12;
+  out += `<text class="label" x="${left - 10}" y="${y + h / 2 + 4}" text-anchor="end">${r.engine}, ${fmt(r.chunk)}</text>`;
+  let at = 0;
+  STEPS.forEach(([k, name, color]) => {
+    const w = x(at + r[k]) - x(at);
+    out += `<rect x="${x(at)}" y="${y}" width="${Math.max(w, 0.5)}" height="${h}" style="fill: var(${color})"><title>${name}: ${fmt(r[k], 1)} s</title></rect>`;
+    at += r[k];
+  });
+  out += `<text x="${x(at) + 6}" y="${y + h / 2 + 4}">${fmt(at)} s</text>`;
+});
+svg.innerHTML = out;
+
+const avg = k => RUNS.reduce((s, r) => s + r[k], 0) / RUNS.length;
+document.getElementById("write").innerHTML = `${fmt(avg("wcsv"))} s <em>vs</em> ${fmt(avg("wpq"), 1)} s`;
+document.getElementById("readback").innerHTML = `${fmt(avg("rcsv"))} s <em>vs</em> ${fmt(avg("rpq"), 1)} s`;
+</script>

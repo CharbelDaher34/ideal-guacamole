@@ -8,7 +8,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 SRC = HERE / "src"
 RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast", "load_test_data",
-           "load_test_run"]
+           "load_test_run", "load_test_charts"]
 
 
 def code(text):

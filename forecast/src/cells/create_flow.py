@@ -68,9 +68,11 @@ FLOW = {
     "final_forecast": (DATA + [cashflow.SAVED_MODEL], ["final_forecast", "forecast_archive", "inference_log"],
                        "Inference"),
     "load_test_data": ([], ["load_test_clients", "load_test_flows"], "Load test"),
-    "load_test_run": (["load_test_clients", "load_test_flows"], ["load_test_forecast", "load_test_log"], "Load test"),
+    "load_test_run": (["load_test_clients", "load_test_flows"], ["load_test_forecast", "load_test_output", "load_test_log"],
+                      "Load test"),
+    "load_test_charts": (["load_test_log"], ["load_test_charts"], "Load test"),
 }
-FOLDERS = ["daily_flows", "experiments", "forecast_archive", "load_test_flows"]
+FOLDERS = ["daily_flows", "experiments", "forecast_archive", "load_test_flows", "load_test_output", "load_test_charts"]
 # logs: each run adds rows
 APPENDED = ["staging_log", "promotion_log", "inference_log", "load_test_log"]
 BUILT_BY_NAME = ["experiments", "promotion_log"]   # only built when asked by name

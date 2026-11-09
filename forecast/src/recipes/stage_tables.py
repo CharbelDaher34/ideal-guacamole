@@ -203,7 +203,11 @@ except Exception as e:
     write_log("FAILED", f"{type(e).__name__}: {e}")
     raise
 write_log("SUCCESS")
-print(f"{row['mode']}: {row['clients']:,} business clients; {row['postings_read']:,} postings read"
-      + (f" from {row['read_from']}" if row["read_from"] else "") + f", {row['postings_kept']:,} kept; "
-      f"{row['daily_rows_added']:,} daily totals added, {row['daily_rows_total']:,} in daily_flows; last day staged "
-      f"{row['last_day']}")
+print(f"Staging done ({row['mode']}), last day staged {row['last_day']}:\n"
+      f"- clients: {row['clients']:,} business clients\n"
+      f"- postings read" + (f" since {row['read_from']}" if row["read_from"] else "") + f": {row['postings_read']:,} "
+      "(a posting = one debit or credit line of FCT_STATEMENT_ENTRY, reversals and own-account transfers left out)"
+      + (f", {row['postings_kept']:,} of them for the clients above" if row["postings_kept"] != row["postings_read"]
+         else "") + "\n"
+      f"- daily_flows: {row['daily_rows_added']:,} rows added, {row['daily_rows_total']:,} in all (a row = one "
+      "client, one day, one category: money in, money out and how many postings, the postings summed)")

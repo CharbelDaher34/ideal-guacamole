@@ -23,10 +23,11 @@ def step(n, label, what, mode=None):
 
 # the load test's numbers, in step 1 of the scenario Load test (kept when the setup runs again):
 #   loadtest_clients: fake clients; loadtest_months: months of history; loadtest_postings_per_month: average postings
-#   per client and month; loadtest_clients_per_chunk: clients forecast at a time; loadtest_model: dummy, or a
-#   forecaster's name (quantile_boosting, ...) to time a real model
+#   per client and month; loadtest_clients_per_chunk: clients forecast at a time; loadtest_model: catboost (real
+#   CatBoost trained on 2 clients), dummy (no model), or a forecaster's name (quantile_boosting, ...); loadtest_engine: pandas or polars (polars needs
+#   the package polars in the code env)
 LOAD_TEST = {"loadtest_clients": 1000, "loadtest_months": 24, "loadtest_postings_per_month": 40,
-             "loadtest_clients_per_chunk": 5000, "loadtest_model": "dummy"}
+             "loadtest_clients_per_chunk": 5000, "loadtest_model": "catboost", "loadtest_engine": "pandas"}
 START = [("Set the cut-off day (yesterday)", "set_cutoff"),
          ("Check the warehouse load is finished", "check_warehouse_loaded")]
 NIGHTLY = [
@@ -57,9 +58,10 @@ SCENARIOS = {
     "Load test": (
         "Run by hand: times the nightly forecast (read in chunks, forecast, write; no real training: the model is "
         "fitted on 2 clients) on fake data with a dummy model, in the Load test zone only (it never touches the real data, models or logs). Set the numbers "
-        "in step 1 (Steps > Set the load test numbers), run it, then read load_test_log (one row per run)", None, [
+        "in step 1 (Steps > Set the load test numbers), run it, then look at the dashboard Load test (and load_test_log: one "
+        "row per run)", None, [
             ("Set the load test numbers", LOAD_TEST),
-            ("Fake data, forecast, log", ["load_test_log"], "RECURSIVE_FORCED_BUILD"),
+            ("Fake data, forecast, log, dashboard", ["load_test_charts"], "RECURSIVE_FORCED_BUILD"),
         ]),
 }
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}
@@ -71,7 +73,9 @@ for name, (description, schedule, steps) in SCENARIOS.items():
         new_steps = [step(n, *s) for n, s in enumerate(steps)]
         for s in new_steps:              # numbers already set on the scenario's page are kept
             if s["type"] == "define_vars" and before.get(s["id"], {}).get("type") == "define_vars":
-                s["params"] = before[s["id"]]["params"]
+                kept = before[s["id"]]["params"]       # and a new variable is added with its default
+                kept["variables"] = {**s["params"]["variables"], **kept.get("variables", {})}
+                s["params"] = kept
         settings.get_raw()["params"]["steps"] = new_steps
         settings.save()
         print(f"Scenario updated: {name}")

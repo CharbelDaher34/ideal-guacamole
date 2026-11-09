@@ -81,7 +81,7 @@ def run():
         with dataiku.Folder("forecast_archive").get_writer(name) as archive_file, \
                 gzip.GzipFile(fileobj=archive_file, mode="wb") as archive:
             for path in done:
-                frame = pd.read_pickle(path)
+                frame = pd.read_parquet(path)
                 frame["model_id"], frame["forecaster"] = model_id, log["forecaster"]
                 frame["load_id"] = variables.get("load_id", "")
                 frame = frame.round(2)
@@ -101,8 +101,8 @@ def run():
 
 def keep(frame, folder, n):
     """A chunk's forecast, kept on local disk until every chunk is done. Returns its path."""
-    path = os.path.join(folder, f"forecast_{n}.pkl")
-    frame.to_pickle(path)
+    path = os.path.join(folder, f"forecast_{n}.parquet")
+    frame.to_parquet(path, index=False)
     return path
 
 

@@ -98,7 +98,6 @@ class QuantileBoosting:
 
     def fit_periods(self, wide):
         """fit, from the net cash flow per 30-day period (cashflow.period_matrix)."""
-        from sklearn.ensemble import HistGradientBoostingRegressor
         self.categories = sorted(set(wide.index.get_level_values("category")))
         n = wide.shape[1]
         blocks = [(p, h) for p in range(max(0, n - 1 - self.params["cutoffs"]), n - 1) for h in HORIZONS if p + h < n]
@@ -111,11 +110,16 @@ class QuantileBoosting:
             Xs.append(X[ok])
             ys.append(y[ok])
         X, y = pd.concat(Xs), pd.concat(ys)
-        settings = {"max_iter": self.params["max_iter"], "learning_rate": self.params["learning_rate"],
-                    "categorical_features": ["category"], "random_state": 0}
-        self.models = {column: HistGradientBoostingRegressor(loss="quantile", quantile=q, **settings).fit(X, y)
-                       for column, q in self.QUANTILES.items()}
+        self.models = {column: self.new_model(q).fit(X, y) for column, q in self.QUANTILES.items()}
         return self
+
+    def new_model(self, quantile):
+        """One of the 3 models (EV, P10, P90): scikit-learn gradient boosting with the quantile loss. A subclass can
+        use another algorithm with the same features (the load test's CatBoost, for example)."""
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        return HistGradientBoostingRegressor(loss="quantile", quantile=quantile, max_iter=self.params["max_iter"],
+                                             learning_rate=self.params["learning_rate"],
+                                             categorical_features=["category"], random_state=0)
 
     def predict_periods(self, wide):
         """predict, from the net cash flow per 30-day period (cashflow.period_matrix)."""

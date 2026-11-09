@@ -9,8 +9,19 @@ interfaces between the zones:
 The forecast: per client, per category and in TOTAL (all categories together), the net cash flow (money in minus
 money out) of each of the next 3 windows of 30 days after the cut-off day (the last day of data: yesterday): days
 1-30, 31-60 and 61-90, as P10, EV and P90 in SAR."""
+import logging
+import warnings
+
 import numpy as np
 import pandas as pd
+
+# Quieter job logs, for every recipe (they all import this file): Dataiku's own writer prints, for each block it
+# writes, pandas warnings about its own code (DataFrame is highly fragmented, is_datetime64tz_dtype is deprecated),
+# and an INFO line every 10 s while it waits for the next chunk (No data to send, waiting more...). Harmless: hidden.
+# Our own warnings and Dataiku's real warnings and errors still show.
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning, module=r"dataiku\.")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"dataiku\.")
+logging.getLogger("dataiku.core.dataset_write").setLevel(logging.WARNING)
 
 PERIOD_DAYS = 30            # the forecast's windows, and the periods the models work with, are 30 days long
 HORIZONS = (1, 2, 3)        # the windows forecast: 1 = days 1-30 after the cut-off day, 2 = days 31-60, 3 = 61-90
@@ -122,7 +133,7 @@ def iter_clients(name=DAILY_FLOWS, clients=5000, keep=None, **kwargs):
     holds one chunk of clients, never the whole table. Staging keeps daily_flows grouped by client, so it is read
     straight through, one Parquet file at a time. keep: a function applied to each file's rows first (a filter).
     Stops with an error if a client's rows are not together (then run the scenario Full rebuild)."""
-    done, pending, tail = set(), None, None
+    done, buffer, runs = set(), [], 0
 
     def batch(out):
         ids = set(out["client_no"])
@@ -132,42 +143,59 @@ def iter_clients(name=DAILY_FLOWS, clients=5000, keep=None, **kwargs):
         done.update(ids)
         return out.reset_index(drop=True)
 
-    for chunk in iter_daily_parts(name, **kwargs):
-        chunk = keep(chunk) if keep else chunk
-        if tail is not None:
-            chunk = pd.concat([tail, chunk], ignore_index=True)
-        if chunk.empty:
-            tail = None
+    def starts(frame):
+        """The first row of each client (the rows of a client are together)."""
+        ids = frame["client_no"].to_numpy()
+        return np.flatnonzero(np.r_[True, ids[1:] != ids[:-1]]) if len(ids) else np.array([], dtype=int)
+
+    def cut(frame, last):
+        """Full chunks of clients from frame; returns the rest. last: no more rows to come, so the last client is
+        complete too."""
+        first = starts(frame)
+        complete = len(first) if last else len(first) - 1      # the last client may go on in the next file
+        while complete >= clients:
+            end = first[clients] if clients < len(first) else len(frame)
+            yield batch(frame.iloc[:end])
+            frame, first, complete = frame.iloc[end:], first[clients:] - end, complete - clients
+        if last and len(frame):
+            yield batch(frame)
+        return frame
+
+    # files are joined only when they hold more than a chunk of clients (one join per chunk, not one per file)
+    for part in iter_daily_parts(name, **kwargs):
+        part = keep(part) if keep else part
+        if part.empty:
             continue
-        last = chunk["client_no"].iloc[-1]          # its rows may go on in the next chunk: kept for then
-        at_end = chunk["client_no"].eq(last)
-        tail = chunk[at_end]
-        pending = chunk[~at_end] if pending is None else pd.concat([pending, chunk[~at_end]], ignore_index=True)
-        ids = pending["client_no"].unique()
-        while len(ids) >= clients:                  # every full chunk of clients
-            first = pending["client_no"].isin(set(ids[:clients]))
-            yield batch(pending[first])
-            pending, ids = pending[~first], ids[clients:]
-    rest = [f for f in (pending, tail) if f is not None and len(f)]
-    if rest:
-        rest = pd.concat(rest, ignore_index=True)
-        ids = rest["client_no"].unique()
-        for i in range(0, len(ids), clients):
-            yield batch(rest[rest["client_no"].isin(set(ids[i:i + clients]))])
+        buffer.append(part)
+        runs += len(starts(part))
+        if runs > clients:
+            rest = yield from cut(pd.concat(buffer, ignore_index=True), last=False)
+            buffer, runs = [rest], len(starts(rest))
+    if buffer:
+        yield from cut(pd.concat(buffer, ignore_index=True), last=True)
 
 
 def append_row(name, columns, row):
     """Add one row to a log dataset (an appended output of the recipe) with fixed column types, so that rows of
     failed runs (with empty values) never change how the earlier rows are read. columns: {name: Dataiku type}, one of
-    string, bigint, double, boolean."""
+    string, bigint, double, boolean. When the columns changed since the last row (a new version of the code), the
+    earlier rows are first read with the old columns and written again with the new ones, by name (a new column is
+    empty in them), so they never end up under the wrong column."""
     import dataiku
     kinds = {"string": "string", "bigint": "Int64", "double": "float64", "boolean": "boolean"}
     frame = pd.DataFrame([{c: row.get(c) for c in columns}])
-    for c, kind in columns.items():
-        frame[c] = (frame[c].fillna("").astype(str) if kind == "string"
-                    else pd.to_numeric(frame[c]).astype(kinds[kind]) if kind != "boolean"
-                    else frame[c].astype("boolean"))
     dataset = dataiku.Dataset(name)
+    before = [c["name"] for c in dataset.read_schema(raise_if_empty=False)]
+    if before and before != list(columns):
+        earlier = dataiku.Dataset(name, ignore_flow=True).get_dataframe()      # read with the old columns
+        print(f"{name}: its columns changed; its {len(earlier)} earlier rows are written again with the new columns")
+        frame = pd.concat([earlier.reindex(columns=list(columns)), frame], ignore_index=True)
+        dataset.spec_item["appendMode"] = False                                 # this time: all the rows again
+    for c, kind in columns.items():
+        frame[c] = (frame[c].where(frame[c].notna(), "").astype(str) if kind == "string"
+                    else pd.to_numeric(frame[c], errors="coerce").round().astype(kinds[kind]) if kind == "bigint"
+                    else pd.to_numeric(frame[c], errors="coerce").astype(kinds[kind]) if kind == "double"
+                    else frame[c].astype("boolean"))
     dataset.write_schema([{"name": c, "type": kind} for c, kind in columns.items()])
     with dataset.get_writer() as writer:
         writer.write_dataframe(frame)
@@ -345,11 +373,53 @@ def _wide(sums, columns):
     return wide.fillna(0.0).where(started).sort_index()
 
 
+ENGINE = {"name": "pandas"}    # how period_matrix sums the days: pandas (default) or polars (faster; needs the package
+                               # polars in the code env). use_engine changes it
+
+
+def use_engine(name):
+    """Sum the days with pandas or polars in period_matrix (same result). Stops with a clear message if polars is
+    asked for and not in the code env."""
+    name = (name or "pandas").strip().lower()
+    if name not in ("pandas", "polars"):
+        raise ValueError(f"Unknown engine {name!r}: pandas or polars")
+    if name == "polars":
+        try:
+            import polars  # noqa: F401
+        except ImportError:
+            raise ValueError("The engine polars needs the package polars in the code env: ask the admin to add it "
+                             "(Administration > Code envs > the env > Packages to install: polars > Update)") from None
+    ENGINE["name"] = name
+
+
+def _period_sums_polars(daily, cutoff):
+    """_sums(d, "period") of period_matrix, computed with polars, and how many periods back the oldest one is."""
+    import polars as pl
+    d = pl.from_pandas(daily[["client_no", "day", "category", "money_in", "money_out"]])
+    d = d.with_columns(pl.col("day").cast(pl.Datetime("ns"))).filter(pl.col("day") <= cutoff.to_pydatetime())
+    if d.height == 0:
+        return pd.Series(dtype=float), None
+    d = d.with_columns(back=(pl.lit(cutoff.to_pydatetime()) - pl.col("day")).dt.total_days() // PERIOD_DAYS,
+                       net=pl.col("money_in") - pl.col("money_out"))
+    by_category = d.group_by(["client_no", "category", "back"]).agg(pl.col("net").sum())
+    total = (by_category.group_by(["client_no", "back"]).agg(pl.col("net").sum())
+             .with_columns(category=pl.lit(TOTAL)).select(by_category.columns))
+    sums = pl.concat([by_category, total]).to_pandas()
+    sums["period"] = cutoff - pd.to_timedelta(sums["back"] * PERIOD_DAYS, unit="D")
+    return sums.set_index(["client_no", "category", "period"])["net"], int(sums["back"].max())
+
+
 def period_matrix(daily, cutoff):
     """The net cash flow (money in minus money out) per 30-day period ending at the cut-off day: one row per client
     and category (and per client in TOTAL), one column per period, named by its last day (the last column is the 30
     days up to the cut-off, the one before the 30 days before, ...). 0 for a period with no posting after the
-    series' first period, empty before it. The window forecast h is the period ending cutoff + 30 x h days."""
+    series' first period, empty before it. The window forecast h is the period ending cutoff + 30 x h days.
+    The days are summed with ENGINE (pandas, or polars: use_engine)."""
+    if ENGINE["name"] == "polars":
+        sums, oldest = _period_sums_polars(daily, cutoff)
+        if oldest is None:
+            return _wide(pd.Series(dtype=float), [])
+        return _wide(sums, [cutoff - pd.Timedelta(days=PERIOD_DAYS * k) for k in range(oldest, -1, -1)])
     d = until(daily, cutoff)
     back = (cutoff - pd.to_datetime(d["day"])).dt.days // PERIOD_DAYS
     d = d.assign(period=(cutoff - pd.to_timedelta(back * PERIOD_DAYS, unit="D")).values,
