@@ -21,7 +21,7 @@ FORECAST = os.path.join(ROOT, "forecast")
 sys.path.insert(0, HERE)
 import dss  # noqa: E402
 
-PACKAGES = ["scikit-learn", "mlflow==2.22.0", "polars", "catboost==1.2.7"]   # the code env cashflow_forecast
+PACKAGES = ["scikit-learn", "mlflow==2.22.0", "catboost==1.2.7"]   # the code env cashflow_forecast
 LOCAL_SETTINGS = {"YOUR_EDW_CONNECTION": "EDW_LOCAL", "YOUR_CODE_ENV": "cashflow_forecast"}
 
 

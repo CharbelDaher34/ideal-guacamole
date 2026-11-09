@@ -118,7 +118,6 @@ clients only, since only the forecast's time is measured. It never reads or writ
    | `loadtest_postings_per_month` | 40 | average postings (transactions) per client and month |
    | `loadtest_clients_per_chunk` | 5000 | clients forecast at a time |
    | `loadtest_model` | catboost | `catboost`: real CatBoost trained on 2 clients only (real prediction time, meaningless forecasts); `dummy`: no model; or a forecaster's name (`quantile_boosting`) |
-   | `loadtest_engine` | pandas | `pandas` or `polars`, to sum the days into 30-day periods (polars: an admin adds the package `polars` to the code env) |
 
 2. **Run** the scenario. Progress: the job's log (Jobs → the last job → the recipe → lines starting with `PROGRESS`).
 3. **Results:** the dashboard **Load test** (Dashboards → Load test), updated after each run: seconds per step of

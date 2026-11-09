@@ -24,10 +24,9 @@ def step(n, label, what, mode=None):
 # the load test's numbers, in step 1 of the scenario Load test (kept when the setup runs again):
 #   loadtest_clients: fake clients; loadtest_months: months of history; loadtest_postings_per_month: average postings
 #   per client and month; loadtest_clients_per_chunk: clients forecast at a time; loadtest_model: catboost (real
-#   CatBoost trained on 2 clients), dummy (no model), or a forecaster's name (quantile_boosting, ...); loadtest_engine: pandas or polars (polars needs
-#   the package polars in the code env)
+#   CatBoost trained on 2 clients), dummy (no model), or a forecaster's name (quantile_boosting, ...)
 LOAD_TEST = {"loadtest_clients": 1000, "loadtest_months": 24, "loadtest_postings_per_month": 40,
-             "loadtest_clients_per_chunk": 5000, "loadtest_model": "catboost", "loadtest_engine": "pandas"}
+             "loadtest_clients_per_chunk": 5000, "loadtest_model": "catboost"}
 START = [("Set the cut-off day (yesterday)", "set_cutoff"),
          ("Check the warehouse load is finished", "check_warehouse_loaded")]
 NIGHTLY = [
@@ -73,8 +72,9 @@ for name, (description, schedule, steps) in SCENARIOS.items():
         new_steps = [step(n, *s) for n, s in enumerate(steps)]
         for s in new_steps:              # numbers already set on the scenario's page are kept
             if s["type"] == "define_vars" and before.get(s["id"], {}).get("type") == "define_vars":
-                kept = before[s["id"]]["params"]       # and a new variable is added with its default
-                kept["variables"] = {**s["params"]["variables"], **kept.get("variables", {})}
+                kept = before[s["id"]]["params"]       # a new variable is added with its default,
+                old = kept.get("variables", {})        # a variable no longer used is dropped
+                kept["variables"] = {k: old.get(k, v) for k, v in s["params"]["variables"].items()}
                 s["params"] = kept
         settings.get_raw()["params"]["steps"] = new_steps
         settings.save()

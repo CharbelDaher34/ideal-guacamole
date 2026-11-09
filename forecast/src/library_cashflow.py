@@ -373,53 +373,11 @@ def _wide(sums, columns):
     return wide.fillna(0.0).where(started).sort_index()
 
 
-ENGINE = {"name": "pandas"}    # how period_matrix sums the days: pandas (default) or polars (faster; needs the package
-                               # polars in the code env). use_engine changes it
-
-
-def use_engine(name):
-    """Sum the days with pandas or polars in period_matrix (same result). Stops with a clear message if polars is
-    asked for and not in the code env."""
-    name = (name or "pandas").strip().lower()
-    if name not in ("pandas", "polars"):
-        raise ValueError(f"Unknown engine {name!r}: pandas or polars")
-    if name == "polars":
-        try:
-            import polars  # noqa: F401
-        except ImportError:
-            raise ValueError("The engine polars needs the package polars in the code env: ask the admin to add it "
-                             "(Administration > Code envs > the env > Packages to install: polars > Update)") from None
-    ENGINE["name"] = name
-
-
-def _period_sums_polars(daily, cutoff):
-    """_sums(d, "period") of period_matrix, computed with polars, and how many periods back the oldest one is."""
-    import polars as pl
-    d = pl.from_pandas(daily[["client_no", "day", "category", "money_in", "money_out"]])
-    d = d.with_columns(pl.col("day").cast(pl.Datetime("ns"))).filter(pl.col("day") <= cutoff.to_pydatetime())
-    if d.height == 0:
-        return pd.Series(dtype=float), None
-    d = d.with_columns(back=(pl.lit(cutoff.to_pydatetime()) - pl.col("day")).dt.total_days() // PERIOD_DAYS,
-                       net=pl.col("money_in") - pl.col("money_out"))
-    by_category = d.group_by(["client_no", "category", "back"]).agg(pl.col("net").sum())
-    total = (by_category.group_by(["client_no", "back"]).agg(pl.col("net").sum())
-             .with_columns(category=pl.lit(TOTAL)).select(by_category.columns))
-    sums = pl.concat([by_category, total]).to_pandas()
-    sums["period"] = cutoff - pd.to_timedelta(sums["back"] * PERIOD_DAYS, unit="D")
-    return sums.set_index(["client_no", "category", "period"])["net"], int(sums["back"].max())
-
-
 def period_matrix(daily, cutoff):
     """The net cash flow (money in minus money out) per 30-day period ending at the cut-off day: one row per client
     and category (and per client in TOTAL), one column per period, named by its last day (the last column is the 30
     days up to the cut-off, the one before the 30 days before, ...). 0 for a period with no posting after the
-    series' first period, empty before it. The window forecast h is the period ending cutoff + 30 x h days.
-    The days are summed with ENGINE (pandas, or polars: use_engine)."""
-    if ENGINE["name"] == "polars":
-        sums, oldest = _period_sums_polars(daily, cutoff)
-        if oldest is None:
-            return _wide(pd.Series(dtype=float), [])
-        return _wide(sums, [cutoff - pd.Timedelta(days=PERIOD_DAYS * k) for k in range(oldest, -1, -1)])
+    series' first period, empty before it. The window forecast h is the period ending cutoff + 30 x h days."""
     d = until(daily, cutoff)
     back = (cutoff - pd.to_datetime(d["day"])).dt.days // PERIOD_DAYS
     d = d.assign(period=(cutoff - pd.to_timedelta(back * PERIOD_DAYS, unit="D")).values,

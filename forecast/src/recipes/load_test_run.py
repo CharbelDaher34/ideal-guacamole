@@ -2,7 +2,7 @@
 # never reads or writes the real data, the real models or their logs. The model is real CatBoost (by default) but
 # trained on 2 clients only: its forecasts mean nothing, its prediction time is real. Each chunk's time is split:
 #   reading      the daily flows, in chunks of complete clients
-#   preparing    each client's days summed into 30-day periods (the engine: pandas or polars) and the model's inputs
+#   preparing    each client's days summed into 30-day periods, and the model's inputs
 #   model        the model's predictions (CatBoost: 3 models, P10, EV, P90)
 #   formatting   one row per client (final_forecast's columns)
 #   1. read, forecast each chunk and keep it as a Parquet file on local disk (as final_forecast does)
@@ -13,8 +13,7 @@
 # data, the seconds of each step, the speed, the most memory used.
 # Variables (scenario Load test, step 1): loadtest_clients_per_chunk (clients forecast at a time, like the project
 # variable inference_clients_per_chunk); loadtest_model: catboost (default: CatBoost trained on 2 clients), dummy
-# (no model: the last period again), or a forecaster's name (quantile_boosting, ...); loadtest_engine: pandas (default) or polars, to sum the days into
-# 30-day periods (cashflow.use_engine; polars needs the package polars in the code env).
+# (no model: the last period again), or a forecaster's name (quantile_boosting, ...).
 import io
 import json
 import os
@@ -26,11 +25,11 @@ import dataiku
 import pandas as pd
 
 from cashflow import (FORECAST_COLUMNS, HORIZONS, Progress, append_row, history_days, iter_clients, period_matrix,
-                      read_dataset, use_engine, whole_number)
+                      read_dataset, whole_number)
 from forecast import forecast_table, one_row_per_client
 from models import QuantileBoosting, forecast, new_forecaster
 
-LOG = {"run_at": "string", "status": "string", "error": "string", "model": "string", "engine": "string",
+LOG = {"run_at": "string", "status": "string", "error": "string", "model": "string",
        "cutoff_date": "string", "clients": "bigint", "months": "bigint", "postings_per_month": "bigint",
        "postings": "bigint", "daily_rows": "bigint", "parquet_files": "bigint", "parquet_mb": "double",
        "clients_per_chunk": "bigint", "chunks": "bigint", "clients_ok": "bigint",
@@ -121,13 +120,11 @@ def run(local):
                                      "parquet_files", "parquet_mb", "seconds_generating")}, cutoff_date=info["cutoff"])
     cutoff = pd.Timestamp(info["cutoff"])
     name = variables.get("loadtest_model") or "catboost"
-    engine = (variables.get("loadtest_engine") or "pandas").strip().lower()
-    use_engine(engine)
     make = MODELS.get(name) or (lambda: new_forecaster(name))
     per_chunk = whole_number("loadtest_clients_per_chunk", variables.get("loadtest_clients_per_chunk", 5000)) or 5000
-    log.update(model=name, engine=engine, clients_per_chunk=per_chunk)
+    log.update(model=name, clients_per_chunk=per_chunk)
 
-    step(f"fitting {name} on 2 clients only (no real training: only the forecast is timed); engine {engine}")
+    step(f"fitting {name} on 2 clients only (no real training: only the forecast is timed)")
     ticked = time.time()
     clients = read_dataset("load_test_clients")
     first = next(iter_clients("load_test_flows", 2))
@@ -212,7 +209,7 @@ except Exception as e:
     raise
 write_log("SUCCESS")
 print("PROGRESS load test 2/2: done. Summary (also in load_test_log and the dashboard Load test):", flush=True)
-for key in ("model", "engine", "clients", "daily_rows", "chunks", "seconds_generating", "seconds_reading",
+for key in ("model", "clients", "daily_rows", "chunks", "seconds_generating", "seconds_reading",
             "seconds_preparing", "seconds_model", "seconds_formatting", "seconds_writing_csv", "seconds_writing_parquet", "seconds_reading_back_csv",
             "seconds_reading_back_parquet", "output_parquet_mb", "seconds_total",
             "clients_per_second", "peak_memory_mb"):

@@ -74,7 +74,7 @@ make reset     # = make wipe, then make rebuild
 make wipe      # delete the 2 containers, their network, dss_data, pg_data and the 2 images; the Free Edition
                # licence is saved first in sandbox/keep/license.json (not in git)
 make rebuild   # pull the images, start, put the licence back, create the schema EDW in PostgreSQL, the connection
-               # EDW_LOCAL, the code env cashflow_forecast (scikit-learn, mlflow 2.22.0, polars, catboost) with its
+               # EDW_LOCAL, the code env cashflow_forecast (scikit-learn, mlflow 2.22.0, catboost) with its
                # Jupyter kernel, the project DCM_FORECAST, then run warehouse_simulator.ipynb and
                # build_forecast_project.ipynb (local settings) and import forecast_lab.ipynb and daily_flows_viewer.ipynb
 ```

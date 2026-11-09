@@ -18,7 +18,7 @@ import dss  # noqa: E402
 PROJECT, SCENARIO = "DCM_FORECAST", "Load_test"
 SIZE = {"loadtest_months": 24, "loadtest_postings_per_month": 40, "loadtest_model": "catboost"}
 # one size is enough: the time grows in a straight line with the clients. 400,000: about the bank's ~420,000
-RUNS = [(400_000, e, k) for k in (2_000, 5_000, 20_000) for e in ("pandas", "polars")]  # clients, engine, per chunk
+RUNS = [(400_000, k) for k in (2_000, 5_000, 20_000)]  # clients, clients per chunk
 READ_LOG = r"""
 import glob, pandas as pd
 d = pd.concat([pd.read_csv(f) for f in glob.glob("*.csv*")], ignore_index=True)
@@ -53,11 +53,11 @@ def run_all():
     before = dict(scenario()["params"]["steps"][0]["params"]["variables"])
     started = time.time()
     try:
-        for i, (clients, engine, chunk) in enumerate(RUNS, 1):
+        for i, (clients, chunk) in enumerate(RUNS, 1):
             dss.login()                                       # long runs: a fresh session each time
-            set_variables(scenario(), {**SIZE, "loadtest_clients": clients, "loadtest_engine": engine,
+            set_variables(scenario(), {**SIZE, "loadtest_clients": clients,
                                        "loadtest_clients_per_chunk": chunk})
-            print(f"\n[{i}/{len(RUNS)}] {clients:,} clients, {engine}, {chunk:,} per chunk "
+            print(f"\n[{i}/{len(RUNS)}] {clients:,} clients, {chunk:,} per chunk "
                   f"({(time.time() - started) / 60:.0f} min so far)", flush=True)
             dss.run_scenario(PROJECT, SCENARIO)
     finally:
@@ -77,11 +77,11 @@ def report(since=None):
     d = d[(d["status"] == "SUCCESS") & (d["model"] == SIZE["loadtest_model"])]
     if since:
         d = d[d["run_at"] >= since]
-    d = d.sort_values("run_at").drop_duplicates(["clients", "engine", "clients_per_chunk"], keep="last")
+    d = d.sort_values("run_at").drop_duplicates(["clients", "clients_per_chunk"], keep="last")
     d["minutes"] = ((d["seconds_reading"] + d["seconds_preparing"] + d["seconds_model"] + d["seconds_formatting"]
                      + d["seconds_writing_parquet"]) / 60).round(1)
     d["memory_gb"] = (d["peak_memory_mb"] / 1024).round(1)
-    columns = {"engine": "engine", "clients_per_chunk": "per chunk", "minutes": "minutes", "memory_gb": "memory GB",
+    columns = {"clients_per_chunk": "per chunk", "minutes": "minutes", "memory_gb": "memory GB",
                "seconds_reading": "reading s", "seconds_preparing": "preparing s", "seconds_model": "model s",
                "seconds_formatting": "formatting s", "seconds_writing_csv": "write CSV s",
                "seconds_writing_parquet": "write Parquet s"}

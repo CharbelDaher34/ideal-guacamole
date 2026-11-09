@@ -2,7 +2,7 @@
 # every run of the scenario Load test. Only reads load_test_log; the charts are also saved as files in the folder
 # load_test_charts. The dashboard is made again each time (do not edit it by hand: copy it first).
 #   1. seconds per step of each run (the last 15)
-#   2. speed: clients forecast per second, by number of clients (each engine and model its own colour and mark)
+#   2. speed: clients forecast per second, by number of clients (each model and chunk size its own colour)
 #   3. memory: the most memory used, by number of clients
 #   4. CSV or Parquet: seconds to write and to read back the forecast, each format (the last 15 runs)
 #   5. the last 20 runs, as a table
@@ -25,13 +25,12 @@ FORMATS = {"seconds_writing_csv": "write CSV", "seconds_writing_parquet": "write
            "seconds_reading_back_csv": "read back CSV", "seconds_reading_back_parquet": "read back Parquet"}
 
 log = dataiku.Dataset("load_test_log").get_dataframe()
-for column in set(STEPS) | set(FORMATS) | {"clients", "clients_per_second", "peak_memory_mb"}:
+for column in set(STEPS) | set(FORMATS) | {"clients", "clients_per_chunk", "clients_per_second", "peak_memory_mb"}:
     log[column] = pd.to_numeric(log.get(column), errors="coerce")
-log["engine"] = log.get("engine", pd.Series(index=log.index, dtype=object)).fillna("pandas").replace("", "pandas")
 log = log.sort_values("run_at")
 done = log[log["status"] == "SUCCESS"]
 last = done.tail(15)
-label = lambda r: f"{r.run_at[5:16]} | {int(r.clients):,} clients | {r.model} | {r.engine}"
+label = lambda r: f"{r.run_at[5:16]} | {int(r.clients):,} clients | {r.model} | {int(r.clients_per_chunk):,} per chunk"
 folder = dataiku.Folder("load_test_charts")
 print(f"PROGRESS load test charts: {len(log)} runs in load_test_log, {len(done)} successful", flush=True)
 
@@ -71,9 +70,9 @@ for insight_id, column, title, unit in (
         ("load_test_memory", "peak_memory_mb", "Memory: the most used by the forecast step", "MB")):
     fig, ax = plt.subplots(figsize=(8, 5))
     if len(done):
-        for (engine, model), runs in done.groupby(["engine", "model"]):
-            ax.plot(runs["clients"], runs[column], marker="o" if engine == "pandas" else "s", linestyle="",
-                    markersize=8, label=f"{model}, {engine}")
+        for (model, chunk), runs in done.groupby(["model", "clients_per_chunk"]):
+            ax.plot(runs["clients"], runs[column], marker="o", linestyle="", markersize=8,
+                    label=f"{model}, {int(chunk):,} per chunk")
         ax.set_xlabel("clients")
         ax.set_ylabel(unit)
         ax.grid(alpha=0.3)
@@ -96,7 +95,7 @@ else:
 publish("load_test_formats", "CSV or Parquet: seconds to write and read back the forecast", fig)
 
 # 5. the last runs, as a table
-shown = ["run_at", "status", "model", "engine", "clients", "months", "postings_per_month", "daily_rows",
+shown = ["run_at", "status", "model", "clients", "months", "postings_per_month", "daily_rows",
          "clients_per_chunk", "seconds_reading", "seconds_preparing", "seconds_model", "seconds_formatting",
          "seconds_writing_csv",
          "seconds_writing_parquet", "seconds_total", "clients_per_second", "peak_memory_mb", "error"]
