@@ -89,7 +89,14 @@ ul.notes { margin: 0; padding-left: 20px; display: grid; gap: 6px; max-width: 72
     <div class="scroll">
       <table>
         <thead><tr><th>Engine</th><th>Per chunk</th><th>Chunks</th><th>Minutes</th><th>Memory</th><th>Clients / s</th></tr></thead>
-        <tbody id="runs"></tbody>
+        <tbody>
+          <tr><td>polars</td><td>2,000</td><td>200</td><td>3.9</td><td>3.7 GB</td><td>1,704</td></tr>
+          <tr><td>polars</td><td>5,000</td><td>80</td><td>4.0</td><td>4.9 GB</td><td>1,661</td></tr>
+          <tr class="best"><td>pandas<span class="tag">use</span></td><td>2,000</td><td>200</td><td>4.2</td><td>2.7 GB</td><td>1,595</td></tr>
+          <tr class="best"><td>pandas<span class="tag">use</span></td><td>5,000</td><td>80</td><td>4.2</td><td>3.4 GB</td><td>1,578</td></tr>
+          <tr><td>polars</td><td>20,000</td><td>20</td><td>6.1</td><td>11.0 GB</td><td>1,101</td></tr>
+          <tr><td>pandas</td><td>20,000</td><td>20</td><td>7.9</td><td>8.3 GB</td><td>847</td></tr>
+        </tbody>
       </table>
     </div>
   </section>
@@ -97,16 +104,16 @@ ul.notes { margin: 0; padding-left: 20px; display: grid; gap: 6px; max-width: 72
   <section>
     <h2>Where the time goes</h2>
     <p class="muted">Seconds per step, for all 400,000 clients. Preparing (summing each client's days into 30-day periods) is the only step the engine changes, and it is the step that grows with bigger chunks.</p>
-    <div class="legend" id="legend"></div>
-    <div class="scroll"><svg id="bars" role="img" aria-label="Seconds per step for each run"></svg></div>
+    <div class="legend"><span><i style="background: var(--s-read)"></i>Reading</span><span><i style="background: var(--s-prep)"></i>Preparing</span><span><i style="background: var(--s-model)"></i>Model (CatBoost)</span><span><i style="background: var(--s-format)"></i>Formatting</span><span><i style="background: var(--s-write)"></i>Writing (Parquet)</span></div>
+    <div class="scroll"><svg viewBox="0 0 820 238" width="820" style="display:block;max-width:none" role="img" aria-label="Seconds per step for each run"><g class="grid"><line x1="150.0" x2="150.0" y1="8" y2="212"/><text x="150.0" y="230" text-anchor="middle">0 s</text><line x1="272.8" x2="272.8" y1="8" y2="212"/><text x="272.8" y="230" text-anchor="middle">100 s</text><line x1="395.6" x2="395.6" y1="8" y2="212"/><text x="395.6" y="230" text-anchor="middle">200 s</text><line x1="518.4" x2="518.4" y1="8" y2="212"/><text x="518.4" y="230" text-anchor="middle">300 s</text><line x1="641.2" x2="641.2" y1="8" y2="212"/><text x="641.2" y="230" text-anchor="middle">400 s</text><line x1="764.0" x2="764.0" y1="8" y2="212"/><text x="764.0" y="230" text-anchor="middle">500 s</text></g><text class="label" x="140" y="29" text-anchor="end">polars, 2,000</text><rect x="150.0" y="14" width="81.2" height="22" style="fill: var(--s-read)"><title>Reading: 66.1 s</title></rect><rect x="231.2" y="14" width="127.1" height="22" style="fill: var(--s-prep)"><title>Preparing: 103.5 s</title></rect><rect x="358.3" y="14" width="10.6" height="22" style="fill: var(--s-model)"><title>Model (CatBoost): 8.6 s</title></rect><rect x="368.8" y="14" width="67.7" height="22" style="fill: var(--s-format)"><title>Formatting: 55.1 s</title></rect><rect x="436.5" y="14" width="1.7" height="22" style="fill: var(--s-write)"><title>Writing (Parquet): 1.4 s</title></rect><text x="444.2" y="29">235 s</text><text class="label" x="140" y="63" text-anchor="end">polars, 5,000</text><rect x="150.0" y="48" width="79.1" height="22" style="fill: var(--s-read)"><title>Reading: 64.4 s</title></rect><rect x="229.1" y="48" width="139.5" height="22" style="fill: var(--s-prep)"><title>Preparing: 113.6 s</title></rect><rect x="368.6" y="48" width="6.4" height="22" style="fill: var(--s-model)"><title>Model (CatBoost): 5.2 s</title></rect><rect x="375.0" y="48" width="69.5" height="22" style="fill: var(--s-format)"><title>Formatting: 56.6 s</title></rect><rect x="444.5" y="48" width="1.2" height="22" style="fill: var(--s-write)"><title>Writing (Parquet): 0.9 s</title></rect><text x="451.6" y="63">241 s</text><text class="label" x="140" y="97" text-anchor="end">pandas, 2,000</text><rect x="150.0" y="82" width="80.8" height="22" style="fill: var(--s-read)"><title>Reading: 65.8 s</title></rect><rect x="230.8" y="82" width="149.0" height="22" style="fill: var(--s-prep)"><title>Preparing: 121.3 s</title></rect><rect x="379.8" y="82" width="10.3" height="22" style="fill: var(--s-model)"><title>Model (CatBoost): 8.4 s</title></rect><rect x="390.1" y="82" width="66.8" height="22" style="fill: var(--s-format)"><title>Formatting: 54.4 s</title></rect><rect x="456.9" y="82" width="1.2" height="22" style="fill: var(--s-write)"><title>Writing (Parquet): 1.0 s</title></rect><text x="464.1" y="97">251 s</text><text class="label" x="140" y="131" text-anchor="end">pandas, 5,000</text><rect x="150.0" y="116" width="84.6" height="22" style="fill: var(--s-read)"><title>Reading: 68.9 s</title></rect><rect x="234.6" y="116" width="149.3" height="22" style="fill: var(--s-prep)"><title>Preparing: 121.6 s</title></rect><rect x="383.9" y="116" width="6.3" height="22" style="fill: var(--s-model)"><title>Model (CatBoost): 5.1 s</title></rect><rect x="390.2" y="116" width="69.6" height="22" style="fill: var(--s-format)"><title>Formatting: 56.7 s</title></rect><rect x="459.8" y="116" width="1.4" height="22" style="fill: var(--s-write)"><title>Writing (Parquet): 1.1 s</title></rect><text x="467.2" y="131">253 s</text><text class="label" x="140" y="165" text-anchor="end">polars, 20,000</text><rect x="150.0" y="150" width="118.0" height="22" style="fill: var(--s-read)"><title>Reading: 96.1 s</title></rect><rect x="268.0" y="150" width="218.5" height="22" style="fill: var(--s-prep)"><title>Preparing: 177.9 s</title></rect><rect x="486.5" y="150" width="3.6" height="22" style="fill: var(--s-model)"><title>Model (CatBoost): 2.9 s</title></rect><rect x="490.0" y="150" width="105.2" height="22" style="fill: var(--s-format)"><title>Formatting: 85.7 s</title></rect><rect x="595.3" y="150" width="0.8" height="22" style="fill: var(--s-write)"><title>Writing (Parquet): 0.7 s</title></rect><text x="602.1" y="165">363 s</text><text class="label" x="140" y="199" text-anchor="end">pandas, 20,000</text><rect x="150.0" y="184" width="110.4" height="22" style="fill: var(--s-read)"><title>Reading: 89.9 s</title></rect><rect x="260.4" y="184" width="378.0" height="22" style="fill: var(--s-prep)"><title>Preparing: 307.8 s</title></rect><rect x="638.4" y="184" width="3.7" height="22" style="fill: var(--s-model)"><title>Model (CatBoost): 3.0 s</title></rect><rect x="642.1" y="184" width="86.7" height="22" style="fill: var(--s-format)"><title>Formatting: 70.6 s</title></rect><rect x="728.8" y="184" width="1.0" height="22" style="fill: var(--s-write)"><title>Writing (Parquet): 0.8 s</title></rect><text x="735.8" y="199">472 s</text></svg></div>
   </section>
 
   <section>
     <h2>CSV or Parquet</h2>
     <p class="muted">The whole forecast (400,000 rows, 112 columns), written and read back each way. Average of the 6 runs.</p>
     <div class="pair">
-      <div class="stat"><div class="eyebrow">Write</div><div class="big" id="write"></div><div class="muted">CSV dataset vs Parquet files</div></div>
-      <div class="stat"><div class="eyebrow">Read back</div><div class="big" id="readback"></div><div class="muted">CSV dataset vs Parquet files</div></div>
+      <div class="stat"><div class="eyebrow">Write</div><div class="big">42 s <em>vs</em> 1.0 s</div><div class="muted">CSV dataset vs Parquet files</div></div>
+      <div class="stat"><div class="eyebrow">Read back</div><div class="big">20 s <em>vs</em> 1.2 s</div><div class="muted">CSV dataset vs Parquet files</div></div>
     </div>
   </section>
 
@@ -130,61 +137,3 @@ ul.notes { margin: 0; padding-left: 20px; display: grid; gap: 6px; max-width: 72
     </ul>
   </section>
 </div>
-
-<script>
-const RUNS = [ // from load_test_log; seconds for all 400,000 clients
-  {engine: "pandas", chunk: 2000, chunks: 200, read: 65.8, prep: 121.3, model: 8.4, format: 54.4, wcsv: 43.95, wpq: 0.96, rcsv: 19.96, rpq: 1.83, mem: 2798},
-  {engine: "polars", chunk: 2000, chunks: 200, read: 66.1, prep: 103.5, model: 8.6, format: 55.1, wcsv: 41.33, wpq: 1.40, rcsv: 20.35, rpq: 1.96, mem: 3778},
-  {engine: "pandas", chunk: 5000, chunks: 80, read: 68.9, prep: 121.6, model: 5.1, format: 56.7, wcsv: 41.74, wpq: 1.13, rcsv: 20.08, rpq: 1.02, mem: 3521},
-  {engine: "polars", chunk: 5000, chunks: 80, read: 64.4, prep: 113.6, model: 5.2, format: 56.6, wcsv: 41.48, wpq: 0.95, rcsv: 20.09, rpq: 1.10, mem: 4981},
-  {engine: "pandas", chunk: 20000, chunks: 20, read: 89.9, prep: 307.8, model: 3.0, format: 70.6, wcsv: 42.23, wpq: 0.82, rcsv: 19.68, rpq: 0.56, mem: 8542},
-  {engine: "polars", chunk: 20000, chunks: 20, read: 96.1, prep: 177.9, model: 2.9, format: 85.7, wcsv: 40.87, wpq: 0.69, rcsv: 20.06, rpq: 0.57, mem: 11229},
-];
-const CLIENTS = 400000;
-const STEPS = [["read", "Reading", "--s-read"], ["prep", "Preparing", "--s-prep"], ["model", "Model (CatBoost)", "--s-model"],
-               ["format", "Formatting", "--s-format"], ["wpq", "Writing (Parquet)", "--s-write"]];
-const total = r => STEPS.reduce((s, [k]) => s + r[k], 0);
-const runs = RUNS.map(r => ({...r, total: total(r)})).sort((a, b) => a.total - b.total);
-const fmt = (n, d = 0) => n.toLocaleString("en-US", {minimumFractionDigits: d, maximumFractionDigits: d});
-const recommended = r => r.engine === "pandas" && r.chunk <= 5000;
-
-document.getElementById("runs").innerHTML = runs.map(r => `
-  <tr class="${recommended(r) ? "best" : ""}">
-    <td>${r.engine}${recommended(r) ? '<span class="tag">use</span>' : ""}</td>
-    <td>${fmt(r.chunk)}</td><td>${r.chunks}</td><td>${fmt(r.total / 60, 1)}</td>
-    <td>${fmt(r.mem / 1024, 1)} GB</td><td>${fmt(CLIENTS / r.total)}</td></tr>`).join("");
-
-document.getElementById("legend").innerHTML = STEPS.map(([, name, color]) =>
-  `<span><i style="background: var(${color})"></i>${name}</span>`).join("");
-
-// stacked bars, one per run, drawn to one scale (seconds)
-const svg = document.getElementById("bars");
-const W = 820, left = 150, right = 56, rowH = 34, top = 8, axisH = 26;
-const H = top + runs.length * rowH + axisH;
-const max = Math.ceil(Math.max(...runs.map(r => r.total)) / 100) * 100;
-const x = s => left + (s / max) * (W - left - right);
-svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-svg.setAttribute("width", W); svg.style.maxWidth = "none"; svg.style.display = "block";
-let out = '<g class="grid">';
-for (let t = 0; t <= max; t += 100) {
-  out += `<line x1="${x(t)}" x2="${x(t)}" y1="${top}" y2="${top + runs.length * rowH}"/>`;
-  out += `<text x="${x(t)}" y="${H - 8}" text-anchor="middle">${t} s</text>`;
-}
-out += "</g>";
-runs.forEach((r, i) => {
-  const y = top + i * rowH + 6, h = rowH - 12;
-  out += `<text class="label" x="${left - 10}" y="${y + h / 2 + 4}" text-anchor="end">${r.engine}, ${fmt(r.chunk)}</text>`;
-  let at = 0;
-  STEPS.forEach(([k, name, color]) => {
-    const w = x(at + r[k]) - x(at);
-    out += `<rect x="${x(at)}" y="${y}" width="${Math.max(w, 0.5)}" height="${h}" style="fill: var(${color})"><title>${name}: ${fmt(r[k], 1)} s</title></rect>`;
-    at += r[k];
-  });
-  out += `<text x="${x(at) + 6}" y="${y + h / 2 + 4}">${fmt(at)} s</text>`;
-});
-svg.innerHTML = out;
-
-const avg = k => RUNS.reduce((s, r) => s + r[k], 0) / RUNS.length;
-document.getElementById("write").innerHTML = `${fmt(avg("wcsv"))} s <em>vs</em> ${fmt(avg("wpq"), 1)} s`;
-document.getElementById("readback").innerHTML = `${fmt(avg("rcsv"))} s <em>vs</em> ${fmt(avg("rpq"), 1)} s`;
-</script>
