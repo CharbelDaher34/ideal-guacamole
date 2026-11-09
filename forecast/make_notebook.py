@@ -80,8 +80,8 @@ P10, EV and P90. It builds 4 flow zones, each with an owner (and a 5th, Load tes
 The data scientist tries new forecasters outside the flow, in the notebook `forecast_lab.ipynb` (it never touches
 production), then sets the project variable `forecaster` and runs **Retrain, test and promote**.
 
-- **Load test** (apart from everything else): the scenario **Load test** times the main flow's steps on fake data of
-  the same shape (clients, months, postings per month: set in its step 1) with a dummy model, and logs each run in
+- **Load test** (apart from everything else): the scenario **Load test** times the nightly forecast (no real
+  training) on fake data of the same shape (clients, months, postings per month: set in its step 1) with a dummy model, and logs each run in
   `load_test_log`. It never reads or writes the real data, models or logs.
 
 The zones only meet through three interfaces: **1. the data** (`daily_flows` and `clients`: staging → training, lab

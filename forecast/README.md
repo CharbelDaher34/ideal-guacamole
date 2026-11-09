@@ -66,7 +66,7 @@ The test-machine notebook `warehouse_simulator.ipynb` is not part of the bank's 
 | **Nightly batch** | daily, 06:00 | reads the new days, forecasts every active client with the production model |
 | **Retrain, test and promote** | monthly, on the 5th | trains a new model and activates it only if it passes the promotion rules |
 | **Full rebuild of the daily flows** | by hand | reads the history again (the last `HISTORY_MONTHS` months) |
-| **Load test** | by hand | times the flow on fake data (zone Load test only, never the real data); see below |
+| **Load test** | by hand | times the nightly forecast on fake data (zone Load test only, never the real data); see below |
 
 **To follow a long run:** the setup notebook prints progress lines while it runs (rows read of the total, %, about how long is left). For a scenario, open its job (Jobs) → Log and search `PROGRESS`.
 
@@ -106,7 +106,8 @@ The test-machine notebook `warehouse_simulator.ipynb` is not part of the bank's 
 
 ## Load test
 
-Times the flow on fake data in its own zone, **Load test**. It never reads or writes the real data, models or logs.
+Times the nightly forecast on fake data in its own zone, **Load test**. No real training: the model is fitted on 2
+clients only, since only the forecast's time is measured. It never reads or writes the real data, models or logs.
 
 1. **Scenarios → Load test → Steps → 1. Set the load test numbers**, change the values, Save:
 
@@ -120,7 +121,7 @@ Times the flow on fake data in its own zone, **Load test**. It never reads or wr
 
 2. **Run** the scenario. Progress: the job's log (Jobs → the last job → the recipe → lines starting with `PROGRESS`).
 3. **Results:** `load_test_log`, one row per run: the data size (clients, postings, daily rows, Parquet MB), the
-   seconds of each step (generating, reading, training and testing, forecasting, writing, total), clients per second
+   seconds of each step (generating, reading, forecasting, writing, total), clients per second
    and the most memory used (`peak_memory_mb`). Compare runs with different numbers.
 
 Running the setup again keeps the numbers set in step 1.

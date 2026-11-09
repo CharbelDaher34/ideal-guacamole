@@ -55,11 +55,11 @@ SCENARIOS = {
             ("Read the whole history again", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
         ]),
     "Load test": (
-        "Run by hand: times the main flow's steps (train and test, forecast in chunks, write) on fake data with a "
-        "dummy model, in the Load test zone only (it never touches the real data, models or logs). Set the numbers "
+        "Run by hand: times the nightly forecast (read in chunks, forecast, write; no real training: the model is "
+        "fitted on 2 clients) on fake data with a dummy model, in the Load test zone only (it never touches the real data, models or logs). Set the numbers "
         "in step 1 (Steps > Set the load test numbers), run it, then read load_test_log (one row per run)", None, [
             ("Set the load test numbers", LOAD_TEST),
-            ("Fake data, train and test, forecast, log", ["load_test_log"], "RECURSIVE_FORCED_BUILD"),
+            ("Fake data, forecast, log", ["load_test_log"], "RECURSIVE_FORCED_BUILD"),
         ]),
 }
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}

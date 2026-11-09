@@ -1,11 +1,10 @@
-# Load test, step 2 of 2: the main flow's steps on the fake data of load_test_data, with a dummy model by default,
-# timed. It never reads or writes the real data, the real models or their logs.
-#   1. train and test: like train_and_test (all the daily flows in memory, the model trained without the last 6
-#      periods of 30 days and tested on them, then trained on everything)
-#   2. forecast: like final_forecast (the daily flows read in chunks of complete clients, each chunk forecast, one
-#      row per client) and write each chunk to load_test_forecast (the columns of final_forecast)
+# Load test, step 2 of 2: times the nightly forecast (like final_forecast) on the fake data of load_test_data, with
+# a dummy model by default. It never reads or writes the real data, the real models or their logs. No real training:
+# the model is fitted on 2 clients only (a few seconds), since only the forecast's time is measured:
+#   the daily flows read in chunks of complete clients, each chunk forecast (one row per client), and each chunk
+#   written to load_test_forecast (the columns of final_forecast)
 # load_test_log: one row per run (appended), also when the run fails (status FAILED and the error): the size of the
-# data, the seconds of each step, the speed, the most memory used.
+# data, the seconds of each step (reading, forecasting, writing), the speed, the most memory used.
 # Variables (scenario Load test, step 1): loadtest_clients_per_chunk (clients forecast at a time, like the project
 # variable inference_clients_per_chunk), loadtest_model: dummy (default), or the name of a real forecaster
 # (quantile_boosting, ...) to time it instead.
@@ -17,18 +16,17 @@ import dataiku
 import pandas as pd
 
 from cashflow import (FORECAST_COLUMNS, HORIZONS, Progress, append_row, history_days, iter_clients, period_matrix,
-                      read_daily, read_dataset, whole_number)
+                      read_dataset, whole_number)
 from forecast import forecast_table, one_row_per_client
-from models import backtest, forecast, new_forecaster, scores
+from models import forecast, new_forecaster
 
 LOG = {"run_at": "string", "status": "string", "error": "string", "model": "string", "cutoff_date": "string",
        "clients": "bigint", "months": "bigint", "postings_per_month": "bigint", "postings": "bigint",
        "daily_rows": "bigint", "parquet_files": "bigint", "parquet_mb": "double", "clients_per_chunk": "bigint",
        "chunks": "bigint", "clients_ok": "bigint", "clients_not_enough_history": "bigint",
-       "seconds_generating": "double", "seconds_reading_all": "double", "seconds_training_and_testing": "double",
+       "seconds_generating": "double", "seconds_training_2_clients": "double", "seconds_reading": "double",
        "seconds_forecasting": "double", "seconds_writing": "double", "seconds_total": "double",
-       "clients_per_second": "double", "daily_rows_per_second": "double", "peak_memory_mb": "bigint",
-       "test_ev_error": "double", "test_coverage_p10_p90": "double"}
+       "clients_per_second": "double", "daily_rows_per_second": "double", "peak_memory_mb": "bigint"}
 started = time.time()
 variables = dataiku.get_custom_variables()
 log = {"run_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -72,23 +70,16 @@ def run():
     per_chunk = whole_number("loadtest_clients_per_chunk", variables.get("loadtest_clients_per_chunk", 5000)) or 5000
     log.update(model=name, clients_per_chunk=per_chunk)
 
-    step(f"train and test, 1/3 reading all the daily flows ({info['daily_rows']:,} rows)")
+    step(f"fitting {name} on 2 clients only (no real training: only the forecast is timed)")
     ticked = time.time()
-    daily, clients = read_daily("load_test_flows"), read_dataset("load_test_clients")
-    log["seconds_reading_all"] = round(time.time() - ticked, 1)
-    step(f"train and test, 2/3 testing {name} (trained without the last 6 periods; memory so far {memory():,} MB)")
-    ticked = time.time()
-    tested = backtest(make(), daily, clients, cutoff)
-    step("train and test, 3/3 training on everything")
-    model = make().fit(daily, clients, cutoff)
-    log["seconds_training_and_testing"] = round(time.time() - ticked, 1)
-    found = scores(tested)
-    log.update(test_ev_error=found["wape_model"], test_coverage_p10_p90=found["coverage_p10_p90"])
-    del daily, tested
-    step(f"train and test done (memory so far {memory():,} MB)")
+    clients = read_dataset("load_test_clients")
+    first = next(iter_clients("load_test_flows", 2))
+    model = make().fit(first, clients[clients["client_no"].isin(set(first["client_no"]))], cutoff)
+    log["seconds_training_2_clients"] = round(time.time() - ticked, 1)
+    del first
 
     forecasting, writing, chunks, counts, writer = 0.0, 0.0, 0, {}, None
-    out = dataiku.Dataset("load_test_forecast")
+    out, looping = dataiku.Dataset("load_test_forecast"), time.time()
     progress = Progress(f"load test 2/2, forecasting and writing load_test_forecast ({per_chunk:,} clients per "
                         "chunk)", len(clients))
     for daily in iter_clients("load_test_flows", per_chunk):
@@ -111,9 +102,10 @@ def run():
     if writer is not None:
         writer.close()
     progress.finish()
-    log.update(seconds_forecasting=round(forecasting, 1), seconds_writing=round(writing, 1), chunks=chunks,
+    log.update(seconds_reading=round(time.time() - looping - forecasting - writing, 1),
+               seconds_forecasting=round(forecasting, 1), seconds_writing=round(writing, 1), chunks=chunks,
                clients_ok=counts.get("OK", 0), clients_not_enough_history=counts.get("NOT_ENOUGH_HISTORY", 0))
-    seconds = max(log["seconds_forecasting"], 0.1)
+    seconds = max(time.time() - looping, 0.1)                   # reading, forecasting and writing
     log.update(clients_per_second=round(sum(counts.values()) / seconds, 1),
                daily_rows_per_second=round(log["daily_rows"] / seconds, 1))
 
@@ -131,7 +123,7 @@ except Exception as e:
     raise
 write_log("SUCCESS")
 print("PROGRESS load test 2/2: done. Summary (also in load_test_log):", flush=True)
-for key in ("model", "clients", "daily_rows", "parquet_mb", "chunks", "seconds_generating", "seconds_reading_all",
-            "seconds_training_and_testing", "seconds_forecasting", "seconds_writing", "seconds_total",
+for key in ("model", "clients", "daily_rows", "parquet_mb", "chunks", "seconds_generating", "seconds_reading",
+            "seconds_forecasting", "seconds_writing", "seconds_total",
             "clients_per_second", "peak_memory_mb"):
     print(f"PROGRESS    {key:<30} {log.get(key)}", flush=True)
