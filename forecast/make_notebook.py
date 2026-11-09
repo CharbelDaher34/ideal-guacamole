@@ -1,13 +1,14 @@
 """Assemble the notebooks from the files in src/ (edit those, then run: python make_notebook.py):
 build_forecast_project.ipynb (sets up the forecast project), forecast_lab.ipynb (the data scientist's lab),
-warehouse_simulator.ipynb and inference_load_test.ipynb (test machine only). A notebook whose files are not in src/
+daily_flows_viewer.ipynb (reads the daily flows), warehouse_simulator.ipynb (test machine only). A notebook whose files are not in src/
 is skipped: the bank's package has only what build_forecast_project.ipynb needs."""
 import json
 from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast"]
+RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast", "load_test_data",
+           "load_test_run"]
 
 
 def code(text):
@@ -64,7 +65,7 @@ connection differs. Names, codes and the categories (a mock list until the bank'
 
 It forecasts, per client, per category and in TOTAL (all categories together), the net cash flow (money in minus
 money out) of each of the next 30, 60 and 90 days after the cut-off day (yesterday: days 1-30, 31-60, 61-90), as
-P10, EV and P90. It builds 4 flow zones, each with an owner:
+P10, EV and P90. It builds 4 flow zones, each with an owner (and a 5th, Load test, apart):
 
 - **Raw data** and **Staging** (shared): the 2 warehouse tables, read-only, then `clients` (the business clients)
   and `daily_flows` (money in and out per client, day and category): what every model gets. `staging_log` records
@@ -78,6 +79,10 @@ P10, EV and P90. It builds 4 flow zones, each with an owner:
   produced it), the forecast archive, and the inference log (one row per run, with timings and memory).
 The data scientist tries new forecasters outside the flow, in the notebook `forecast_lab.ipynb` (it never touches
 production), then sets the project variable `forecaster` and runs **Retrain, test and promote**.
+
+- **Load test** (apart from everything else): the scenario **Load test** times the main flow's steps on fake data of
+  the same shape (clients, months, postings per month: set in its step 1) with a dummy model, and logs each run in
+  `load_test_log`. It never reads or writes the real data, models or logs.
 
 The zones only meet through three interfaces: **1. the data** (`daily_flows` and `clients`: staging → training, lab
 and inference), **2. the forecaster** (`models.py`: lab → training), **3. the active version of the saved model**
@@ -136,7 +141,7 @@ Each recipe below becomes a Python recipe in the flow.
 Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the Python recipes and their
 CSV datasets, the folders `daily_flows` (Parquet files), `experiments` (tracked models) and `forecast_archive`, the
 saved model `cash_forecast`, and the project variables `forecaster` (`quantile_boosting`),
-`inference_clients_per_chunk` (5000) and the promotion rules (`promotion_*`) if they are not set yet, in 4 zones.
+`inference_clients_per_chunk` (5000) and the promotion rules (`promotion_*`) if they are not set yet, in 4 zones, and the Load test zone.
 Training (folder `experiments`) and the promotion log are only rebuilt when asked by name, so the nightly batch never
 retrains by accident.
 """),
@@ -160,6 +165,7 @@ forecast, archive, log.
 
 - **Full rebuild of the daily flows** (run by hand, no trigger): empty `daily_flows` and `staging_log`, then read the
   whole history again. For example after a reversal cancels a posting from a day already staged.
+- **Load test** (run by hand, no trigger): set the numbers in its step 1, run it, read `load_test_log`.
 
 Their triggers (daily at 06:00 and monthly on the 5th, Riyadh time) are created switched off; switch them on
 in production.
@@ -287,30 +293,25 @@ Generates the data (about 2 minutes), publishes it as of `AS_OF` and sets the pr
     code(read("sim_cells/load.py")),
 ])
 
-write_if_present("inference_load_test.ipynb", "load_cells", lambda: [
+write_if_present("daily_flows_viewer.ipynb", "viewer_cells", lambda: [
     md("""
-# Digital Cash Management Forecast: inference load test (sandbox only)
+# Digital Cash Management Forecast: daily flows viewer
 
-Checks that the forecast scales to the bank's number of clients, and measures it: the benchmark of a Dataiku
-server. **Never in the production project**: it replaces `clients` and `daily_flows` with fake data.
+Reads the Parquet files of `daily_flows` (what staging writes and every model gets: one row per client, day and
+category with `money_in`, `money_out` and `postings`) and shows them. It only reads: nothing here changes the
+project. Set `FOLDER` to `load_test_flows` to look at the load test's fake data instead.
 
-Run it in a sandbox project where the forecast is set up (`build_forecast_project.ipynb` done, so there is a
-production model). It:
-
-1. writes fake `clients` and `daily_flows` for `N_CLIENTS` clients (random amounts, the real columns);
-2. runs the recipe `final_forecast` alone and shows its row of `inference_log`: rows, chunks of clients, seconds
-   reading and forecasting, and the most memory it used (`peak_memory_mb`);
-3. puts the real data back (scenario **Full rebuild of the daily flows**, then **Nightly batch**).
-
-Inference forecasts `CLIENTS_PER_CHUNK` clients at a time (project variable `inference_clients_per_chunk`): a
-bigger chunk is faster but needs more memory. Try a few values on the bank's server and keep the best one.
+**Kernel:** the project's code env (the setup's `CODE_ENV`, which has pyarrow), like `forecast_lab.ipynb`.
 """),
-    code(read("load_cells/settings.py")),
-    code(read("load_cells/setup.py")),
-    md("## 1. Fake data"),
-    code(read("load_cells/make_data.py")),
-    md("## 2. Forecast and measure"),
-    code(read("load_cells/run.py")),
-    md("## 3. Put the real data back"),
-    code(read("load_cells/restore.py")),
-])
+    code(read("viewer_cells/settings.py")),
+    code(read("viewer_cells/setup.py")),
+    md("## 1. Files\n\nEach Parquet file of the current version and its size."),
+    code(read("viewer_cells/files.py")),
+    md("## 2. Summary\n\nRows, clients, postings and money per category, over the first `SUMMARY_FILES` files."),
+    code(read("viewer_cells/summary.py")),
+    md("## 3. Sample rows\n\nThe columns and the first rows of the first file."),
+    code(read("viewer_cells/sample.py")),
+    md("## 4. One client\n\n`CLIENT_NO` day by day, and per month."),
+    code(read("viewer_cells/client.py")),
+], kernel={"display_name": "Python (env cashflow_forecast)", "language": "python",
+           "name": "py-dku-venv-cashflow_forecast"})

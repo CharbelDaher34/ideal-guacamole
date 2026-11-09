@@ -254,8 +254,9 @@ fake clients, the 3-model placeholder and chunks of 5,000 clients:
 - Reading `daily_flows` as Parquet files cut the total from 8.5 to 4.7 min at 400k (from 19.2 to 10.4 min at 800k)
   compared with a Dataiku dataset.
 - Memory barely moves when the clients double: it holds one chunk of clients at a time.
-- The notebook `inference_load_test.ipynb` (sandbox only) repeats this test on the bank's server. If it is still too
-  slow there: forecast chunks in parallel.
+- The scenario **Load test** (zone Load test, apart from everything else) repeats this test on the bank's server:
+  fake data of the size set in its step 1, a dummy model, the time of each step in `load_test_log`. If it is still
+  too slow there: forecast chunks in parallel.
 - Not tested yet: training on all clients (it still loads all of `daily_flows`); train on a sample of clients, or
   read it with `iter_clients`, if it gets too heavy.
 
@@ -276,5 +277,5 @@ fake clients, the 3-model placeholder and chunks of 5,000 clients:
 - The real transaction type codes (`TRNS_TYP`) and their categories, to replace the mock list in `warehouse.py`.
 - The codes in `DIM_CUSTOMER` the project relies on: status values, retail line of business, commercial
   registration, sole-proprietor legal entities. If they differ, only `warehouse.py` changes.
-- How long the first full read of `FCT_STATEMENT_ENTRY` takes, and the benchmark of `inference_load_test.ipynb`.
+- How long the first full read of `FCT_STATEMENT_ENTRY` takes, and the scenario **Load test** on the bank's server.
 - Alerts: email, Teams or both, and the channel name.

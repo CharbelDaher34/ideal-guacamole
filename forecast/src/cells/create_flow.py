@@ -47,7 +47,7 @@ for table, (name, _) in warehouse.TABLES.items():
 print(f"Output: datasets on {OUTPUT_CONNECTION}, folders on {OUTPUT_FOLDER_CONNECTION}")
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
-COMPRESSED = ["final_forecast"]       # the big one: compressed CSV (gz)
+COMPRESSED = ["final_forecast", "load_test_forecast"]       # the big ones: compressed CSV (gz)
 
 # Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file (compressed for the big one); daily_flows
 # (Parquet files, read far faster than a dataset), experiments and forecast_archive are folders;
@@ -58,6 +58,8 @@ COMPRESSED = ["final_forecast"]       # the big one: compressed CSV (gz)
 #      data scientist tries forecasters first in the notebook forecast_lab, outside the flow, without touching
 #      production.
 #   3. the saved model's active version: training -> inference. Inference reads nothing else from training.
+# The Load test zone is apart: fake data of the same shape and a dummy model, run by the scenario Load test; it never
+# reads or writes the real data, models or logs.
 DATA = ["daily_flows", "clients"]
 FLOW = {
     "stage_tables": (RAW, warehouse.STAGED, "Staging"),
@@ -65,10 +67,12 @@ FLOW = {
     "champion_challenger": (DATA + ["experiments"], ["promotion_log"], "Training"),
     "final_forecast": (DATA + [cashflow.SAVED_MODEL], ["final_forecast", "forecast_archive", "inference_log"],
                        "Inference"),
+    "load_test_data": ([], ["load_test_clients", "load_test_flows"], "Load test"),
+    "load_test_run": (["load_test_clients", "load_test_flows"], ["load_test_forecast", "load_test_log"], "Load test"),
 }
-FOLDERS = ["daily_flows", "experiments", "forecast_archive"]
+FOLDERS = ["daily_flows", "experiments", "forecast_archive", "load_test_flows"]
 # logs: each run adds rows
-APPENDED = ["staging_log", "promotion_log", "inference_log"]
+APPENDED = ["staging_log", "promotion_log", "inference_log", "load_test_log"]
 BUILT_BY_NAME = ["experiments", "promotion_log"]   # only built when asked by name
 
 try:                                                # needs the project's admin right
@@ -210,7 +214,7 @@ for name, (inputs, outputs, _) in FLOW.items():
     settings.save()
     print("python recipe", name, "->", ", ".join(outputs))
 
-ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": []}
+ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": [], "Load test": []}
 for _, outputs, zone_name in FLOW.values():
     ZONES[zone_name] += [o for o in outputs if o not in ZONES[zone_name]]
 # the raw data goes in Dataiku's Default zone, renamed (so there is no empty zone). It exists once another zone does.

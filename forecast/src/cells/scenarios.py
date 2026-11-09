@@ -8,6 +8,8 @@
 def step(n, label, what, mode=None):
     common = {"id": f"step_{n}", "name": label, "enabled": True, "runConditionType": "RUN_IF_STATUS_MATCH",
               "runConditionStatuses": ["SUCCESS", "WARNING"]}
+    if isinstance(what, dict):          # variables for the next steps, edited on the scenario's page
+        return {**common, "type": "define_vars", "params": {"variables": what, "definitions": []}}
     if isinstance(what, str):           # a Python step: library function to call
         module = "warehouse" if what in ("set_cutoff", "check_warehouse_loaded", "clear_daily_flows") else "tracking"
         return {**common, "type": "custom_python", "params": {
@@ -19,6 +21,12 @@ def step(n, label, what, mode=None):
         "builds": builds, "jobType": mode, "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
 
 
+# the load test's numbers, in step 1 of the scenario Load test (kept when the setup runs again):
+#   loadtest_clients: fake clients; loadtest_months: months of history; loadtest_postings_per_month: average postings
+#   per client and month; loadtest_clients_per_chunk: clients forecast at a time; loadtest_model: dummy, or a
+#   forecaster's name (quantile_boosting, ...) to time a real model
+LOAD_TEST = {"loadtest_clients": 1000, "loadtest_months": 24, "loadtest_postings_per_month": 40,
+             "loadtest_clients_per_chunk": 5000, "loadtest_model": "dummy"}
 START = [("Set the cut-off day (yesterday)", "set_cutoff"),
          ("Check the warehouse load is finished", "check_warehouse_loaded")]
 NIGHTLY = [
@@ -46,13 +54,25 @@ SCENARIOS = {
             ("Empty the daily flows", "clear_daily_flows"),
             ("Read the whole history again", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
         ]),
+    "Load test": (
+        "Run by hand: times the main flow's steps (train and test, forecast in chunks, write) on fake data with a "
+        "dummy model, in the Load test zone only (it never touches the real data, models or logs). Set the numbers "
+        "in step 1 (Steps > Set the load test numbers), run it, then read load_test_log (one row per run)", None, [
+            ("Set the load test numbers", LOAD_TEST),
+            ("Fake data, train and test, forecast, log", ["load_test_log"], "RECURSIVE_FORCED_BUILD"),
+        ]),
 }
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}
 for name, (description, schedule, steps) in SCENARIOS.items():
     if name in existing_scenarios:     # run again: update its steps, keep its triggers and run history
         settings = project.get_scenario(existing_scenarios[name]).get_settings()
         settings.get_raw()["description"] = description
-        settings.get_raw()["params"]["steps"] = [step(n, *s) for n, s in enumerate(steps)]
+        before = {s["id"]: s for s in settings.get_raw()["params"].get("steps", [])}
+        new_steps = [step(n, *s) for n, s in enumerate(steps)]
+        for s in new_steps:              # numbers already set on the scenario's page are kept
+            if s["type"] == "define_vars" and before.get(s["id"], {}).get("type") == "define_vars":
+                s["params"] = before[s["id"]]["params"]
+        settings.get_raw()["params"]["steps"] = new_steps
         settings.save()
         print(f"Scenario updated: {name}")
         continue

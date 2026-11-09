@@ -57,8 +57,7 @@ You only need `build_forecast_project.ipynb`: it holds all the code and creates 
    and the logs.
 6. **Switch on the scenario triggers** (Scenarios → each scenario → Settings): they are created switched off.
 
-The test-machine notebooks (`warehouse_simulator.ipynb`, `inference_load_test.ipynb`) are not part of the bank's
-package: they use fake data.
+The test-machine notebook `warehouse_simulator.ipynb` is not part of the bank's package: it uses fake data.
 
 ## Every day and every month
 
@@ -67,6 +66,7 @@ package: they use fake data.
 | **Nightly batch** | daily, 06:00 | reads the new days, forecasts every active client with the production model |
 | **Retrain, test and promote** | monthly, on the 5th | trains a new model and activates it only if it passes the promotion rules |
 | **Full rebuild of the daily flows** | by hand | reads the history again (the last `HISTORY_MONTHS` months) |
+| **Load test** | by hand | times the flow on fake data (zone Load test only, never the real data); see below |
 
 **To follow a long run:** the setup notebook prints progress lines while it runs (rows read of the total, %, about how long is left). For a scenario, open its job (Jobs) → Log and search `PROGRESS`.
 
@@ -104,14 +104,35 @@ package: they use fake data.
 | `cutoff_override` | empty | forecast from another day's data (YYYY-MM-DD) instead of yesterday |
 
 
+## Load test
+
+Times the flow on fake data in its own zone, **Load test**. It never reads or writes the real data, models or logs.
+
+1. **Scenarios → Load test → Steps → 1. Set the load test numbers**, change the values, Save:
+
+   | Variable | Default | What it is |
+   |---|---|---|
+   | `loadtest_clients` | 1000 | fake clients (for example 420000 for the bank's size) |
+   | `loadtest_months` | 24 | months of history per client |
+   | `loadtest_postings_per_month` | 40 | average postings (transactions) per client and month |
+   | `loadtest_clients_per_chunk` | 5000 | clients forecast at a time |
+   | `loadtest_model` | dummy | `dummy`, or a real forecaster's name (`quantile_boosting`) to time it |
+
+2. **Run** the scenario. Progress: the job's log (Jobs → the last job → the recipe → lines starting with `PROGRESS`).
+3. **Results:** `load_test_log`, one row per run: the data size (clients, postings, daily rows, Parquet MB), the
+   seconds of each step (generating, reading, training and testing, forecasting, writing, total), clients per second
+   and the most memory used (`peak_memory_mb`). Compare runs with different numbers.
+
+Running the setup again keeps the numbers set in step 1.
+
 ## Files
 
-The bank's package is `build_forecast_project.ipynb` and this README. The rest stays in the code repository:
+The bank's package is `build_forecast_project.ipynb`, `forecast_lab.ipynb`, `daily_flows_viewer.ipynb` and this README. The rest stays in the code repository:
 
 | File | What it is |
 |---|---|
 | `src/` | the code the notebooks are built from; edit it, then run `python make_notebook.py` |
 | `forecast_lab.ipynb` | the data scientist's lab (outside the flow): EDA and model comparison; then set `forecaster` and run Retrain |
 | `warehouse_simulator.ipynb` | test machine only: fake warehouse tables in a local test database |
-| `inference_load_test.ipynb` | test machine only: the 420k-client benchmark |
+| `daily_flows_viewer.ipynb` | reads and shows the Parquet files of `daily_flows` (or `load_test_flows`); only reads |
 | `alerts_plan.md` | planned email / Teams alerts (not built) |
