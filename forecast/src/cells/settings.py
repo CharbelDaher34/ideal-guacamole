@@ -12,9 +12,12 @@ CLIENTS_LIMIT = -1                       # how many business clients to read (th
                                          # again, then the scenario Full rebuild
 
 # ── 2. OUTPUT: where the project writes its own results ─────────────────────────────────────────────────────────────
-OUTPUT_CONNECTION = "filesystem_managed"         # datasets (tables): clients, final_forecast, test_results, logs
-OUTPUT_FOLDER_CONNECTION = "filesystem_folders"  # folders (files): daily_flows (Parquet), models, forecast archive
+OUTPUT_SQL_CONNECTION = "YOUR_SQL_CONNECTION"   # the database the forecast goes to (a connection you may write
+                                                 # into, never the warehouse): the table final_forecast
+OUTPUT_CONNECTION = "filesystem_managed"         # datasets (CSV files): clients, test_results, logs
+OUTPUT_FOLDER_CONNECTION = "filesystem_folders"  # folders: daily_flows (Parquet), models, forecast (Parquet, by night)
 
 # ── 3. PYTHON ───────────────────────────────────────────────────────────────────────────────────────────────────────
-CODE_ENV = "YOUR_CODE_ENV"               # an existing Python code env with scikit-learn and mlflow==2.22.0 (an admin
+CODE_ENV = "YOUR_CODE_ENV"               # an existing Python code env with polars, catboost, scikit-learn and
+                                         # mlflow==2.22.0 (an admin
                                          # creates it once), for example "cashflow_forecast"

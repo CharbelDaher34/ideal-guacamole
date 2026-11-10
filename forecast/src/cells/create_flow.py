@@ -44,37 +44,37 @@ for table, (name, _) in warehouse.TABLES.items():
                            f"that the table exists with the columns {', '.join(columns)}, and that the connection's "
                            "user may read it.") from None
     print(f"   {EDW_SCHEMA}.{name}: can be read ({len(columns)} columns used)")
-print(f"Output: datasets on {OUTPUT_CONNECTION}, folders on {OUTPUT_FOLDER_CONNECTION}")
+try:
+    client.get_connection(OUTPUT_SQL_CONNECTION).get_info()
+except Exception as e:
+    raise RuntimeError(f"Cannot use the connection {OUTPUT_SQL_CONNECTION!r} ({e}). Check OUTPUT_SQL_CONNECTION: a "
+                       "database connection your group may write into (never the warehouse).") from None
+print(f"Output: the table final_forecast on {OUTPUT_SQL_CONNECTION}, datasets on {OUTPUT_CONNECTION}, folders on "
+      f"{OUTPUT_FOLDER_CONNECTION}")
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
-COMPRESSED = ["final_forecast", "load_test_forecast"]       # the big ones: compressed CSV (gz)
+SQL = ["final_forecast"]              # a table on OUTPUT_SQL_CONNECTION; every other dataset is a CSV file
 
-# Python recipes: (inputs, outputs, flow zone). Every dataset is a CSV file (compressed for the big one); daily_flows
-# (Parquet files, read far faster than a dataset), experiments and forecast_archive are folders;
-# cash_forecast is the saved model.
+# Python recipes: (inputs, outputs, flow zone). daily_flows (Parquet files, read far faster than a dataset),
+# experiments and forecast (Parquet, one subfolder per night) are folders; cash_forecast is the saved model.
 # Each zone has an owner, and the zones only meet through three interfaces:
 #   1. the data: daily_flows and clients (Staging) -> Training and Inference (and the data scientist's lab notebook)
 #   2. the forecaster (models.py, forecasters.py): the project variable forecaster names the one Retrain trains. The
 #      data scientist tries forecasters first in the notebook forecast_lab, outside the flow, without touching
 #      production.
 #   3. the saved model's active version: training -> inference. Inference reads nothing else from training.
-# The Load test zone is apart: fake data of the same shape and a dummy model, run by the scenario Load test; it never
-# reads or writes the real data, models or logs.
+# The load test is a project of its own (build_load_test_project.ipynb): nothing of it is in this project.
 DATA = ["daily_flows", "clients"]
 FLOW = {
     "stage_tables": (RAW, warehouse.STAGED, "Staging"),
     "train_and_test": (DATA, ["experiments", "test_results"], "Training"),
     "champion_challenger": (DATA + ["experiments"], ["promotion_log"], "Training"),
-    "final_forecast": (DATA + [cashflow.SAVED_MODEL], ["final_forecast", "forecast_archive", "inference_log"],
-                       "Inference"),
-    "load_test_data": ([], ["load_test_clients", "load_test_flows"], "Load test"),
-    "load_test_run": (["load_test_clients", "load_test_flows"], ["load_test_forecast", "load_test_output", "load_test_log"],
-                      "Load test"),
-    "load_test_charts": (["load_test_log"], ["load_test_charts"], "Load test"),
+    "nightly_forecast": (DATA + [cashflow.SAVED_MODEL], ["forecast", "inference_log"], "Inference"),
+    "load_forecast_sql": (["forecast"], ["final_forecast"], "Inference"),
 }
-FOLDERS = ["daily_flows", "experiments", "forecast_archive", "load_test_flows", "load_test_output", "load_test_charts"]
+FOLDERS = ["daily_flows", "experiments", "forecast"]
 # logs: each run adds rows
-APPENDED = ["staging_log", "promotion_log", "inference_log", "load_test_log"]
+APPENDED = ["staging_log", "promotion_log", "inference_log"]
 BUILT_BY_NAME = ["experiments", "promotion_log"]   # only built when asked by name
 
 try:                                                # needs the project's admin right
@@ -97,12 +97,15 @@ if not python_folder.get_file("forecasters.py"):
     python_folder.add_file("forecasters.py").write(FORECASTERS_CODE)
     print("forecasters.py created (the data scientist's forecasters)")
 
-# project variables, kept if they are already set: forecaster (the one Retrain trains), inference_clients_per_chunk
-# (how many clients final_forecast forecasts at a time)
+# project variables, kept if they are already set: forecaster (the one Retrain trains), inference_workers (how many
+# groups of clients the nightly forecast runs at a time)
 variables = project.get_variables()
-defaults = {"forecaster": "quantile_boosting",
-            "inference_clients_per_chunk": 5000, **tracking.PROMOTION_RULES}
+variables["standard"].pop("inference_clients_per_chunk", None)   # the older setting
+defaults = {"forecaster": "daily_catboost", "inference_workers": 4, **tracking.PROMOTION_RULES}
 missing = {k: v for k, v in defaults.items() if variables["standard"].get(k) in (None, "")}
+if variables["standard"].get("forecaster") == "quantile_boosting":          # the earlier placeholder, removed
+    missing["forecaster"] = "daily_catboost"
+    print("Project variable forecaster: quantile_boosting (removed) replaced by daily_catboost")
 if missing:
     variables["standard"].update(missing)
     project.set_variables(variables)
@@ -118,8 +121,8 @@ print("History read the first time (and by Full rebuild):",
 if months is not None and months < cashflow.MIN_TRAINING_MONTHS:
     print(f"WARNING: with {months} months of history, the first run only stages the data: training, promotion and "
           f"the forecast need at least {cashflow.MIN_TRAINING_MONTHS} months")
-print("Forecasters: Retrain trains {forecaster}; inference forecasts "
-      "{inference_clients_per_chunk} clients at a time".format(**variables["standard"]))
+print("Models: Retrain trains {forecaster}; the nightly forecast runs {inference_workers} groups of clients at a "
+      "time".format(**variables["standard"]))
 print("Promotion rules:", {k: variables["standard"][k] for k in tracking.PROMOTION_RULES})
 
 
@@ -130,15 +133,17 @@ recipes = {r["name"] for r in project.list_recipes()}
 
 
 def new_dataset(name):
-    """Managed dataset of the project: a CSV file (comma-separated, with a header row) on OUTPUT_CONNECTION. Kept if it
-    exists."""
+    """Managed dataset of the project: a table on OUTPUT_SQL_CONNECTION (SQL), else a CSV file (comma-separated, with a
+    header row) on OUTPUT_CONNECTION. Kept if it exists."""
     if name in datasets:
         return name
     datasets.add(name)
-    dataset = project.new_managed_dataset(name).with_store_into(OUTPUT_CONNECTION).create()
+    dataset = project.new_managed_dataset(name).with_store_into(
+        OUTPUT_SQL_CONNECTION if name in SQL else OUTPUT_CONNECTION).create()
     settings = dataset.get_settings()
-    settings.get_raw()["formatType"] = "csv"
-    settings.get_raw()["formatParams"].update(CSV, compress="gz" if name in COMPRESSED else "")
+    if name not in SQL:
+        settings.get_raw()["formatType"] = "csv"
+        settings.get_raw()["formatParams"].update(CSV)
     if name in BUILT_BY_NAME:
         settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
     settings.save()
@@ -216,7 +221,7 @@ for name, (inputs, outputs, _) in FLOW.items():
     settings.save()
     print("python recipe", name, "->", ", ".join(outputs))
 
-ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": [], "Load test": []}
+ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": []}
 for _, outputs, zone_name in FLOW.values():
     ZONES[zone_name] += [o for o in outputs if o not in ZONES[zone_name]]
 # the raw data goes in Dataiku's Default zone, renamed (so there is no empty zone). It exists once another zone does.

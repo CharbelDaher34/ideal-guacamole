@@ -76,10 +76,11 @@ make wipe      # delete the 2 containers, their network, dss_data, pg_data and t
 make rebuild   # pull the images, start, put the licence back, create the schema EDW in PostgreSQL, the connection
                # EDW_LOCAL, the code env cashflow_forecast (scikit-learn, mlflow 2.22.0, catboost) with its
                # Jupyter kernel, the project DCM_FORECAST, then run warehouse_simulator.ipynb and
-               # build_forecast_project.ipynb (local settings) and import forecast_lab.ipynb and daily_flows_viewer.ipynb
+               # build_forecast_project.ipynb (local settings) and import forecast_lab.ipynb and daily_flows_viewer.ipynb,
+               # then the load test project DCM_LOAD_TEST (build_load_test_project.ipynb, small numbers)
 ```
 
 `make rebuild` takes about 15 minutes the first time (the DSS image is 12.7 GB, the code env a few minutes).
 Without `sandbox/keep/license.json`, register the Free Edition in the browser first, then `python3 sandbox/rebuild.py`.
 `sandbox/dss.py` also runs a notebook or a scenario from the server:
-`python3 sandbox/dss.py run-scenario DCM_FORECAST Load_test`.
+`python3 sandbox/dss.py run-scenario DCM_LOAD_TEST Run_the_load_test`.

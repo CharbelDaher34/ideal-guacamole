@@ -1,25 +1,17 @@
 # Reads only: nothing in this notebook changes the project.
-import io
 import time
 
-import dataiku
 import pandas as pd
-import pyarrow.parquet as pq
+import polars as pl
 
-from cashflow import CURRENT, _daily_files, _plain
+from cashflow import client_groups, read_group, read_manifest, read_parquet
 
-folder, paths = _daily_files(FOLDER)
-if not paths:
-    raise RuntimeError(f"No Parquet file in the folder {FOLDER}: run staging (or the scenario Load test) first")
-with folder.get_download_stream(CURRENT) as stream:
-    version = stream.read().decode().strip()
-
-
-def read_file(path, columns=None, filters=None):
-    """One Parquet file of the folder as a DataFrame."""
-    with folder.get_download_stream(path) as stream:
-        data = stream.read()
-    return _plain(pq.read_table(io.BytesIO(data), columns=columns, filters=filters).to_pandas())
-
-
-print(f"{FOLDER}: current version {version}, {len(paths)} Parquet files")
+folder, manifest = read_manifest(FOLDER)
+if manifest is None:
+    raise RuntimeError(f"Nothing in the folder {FOLDER}: run staging (or, in the load test project, the scenario Create "
+                       "the fake data) first")
+files = pd.DataFrame([(int(g), month, path, rows) for g, months in manifest["files"].items()
+                      for month, (path, rows) in months.items()],
+                     columns=["group", "month", "file", "rows"]).sort_values(["group", "month"]).reset_index(drop=True)
+print(f"{FOLDER}: {manifest['rows']:,} rows in {len(files):,} files: {manifest['groups']:,} groups of clients (a client "
+      f"never changes group), one file per group and month, {files['month'].min()} to {files['month'].max()}")

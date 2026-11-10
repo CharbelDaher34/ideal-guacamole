@@ -21,21 +21,17 @@ def step(n, label, what, mode=None):
         "builds": builds, "jobType": mode, "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
 
 
-# the load test's numbers, in step 1 of the scenario Load test (kept when the setup runs again):
-#   loadtest_clients: fake clients; loadtest_months: months of history; loadtest_postings_per_month: average postings
-#   per client and month; loadtest_clients_per_chunk: clients forecast at a time; loadtest_model: catboost (real
-#   CatBoost trained on 2 clients), dummy (no model), or a forecaster's name (quantile_boosting, ...)
-LOAD_TEST = {"loadtest_clients": 1000, "loadtest_months": 24, "loadtest_postings_per_month": 40,
-             "loadtest_clients_per_chunk": 5000, "loadtest_model": "catboost"}
 START = [("Set the cut-off day (yesterday)", "set_cutoff"),
          ("Check the warehouse load is finished", "check_warehouse_loaded")]
 NIGHTLY = [
     *START,
-    ("Forecast with the production model, archive and log it", ["inference_log"], "RECURSIVE_FORCED_BUILD"),
+    ("Forecast with the production model and log it", ["inference_log"], "RECURSIVE_FORCED_BUILD"),
+    ("Load the forecast into SQL", ["final_forecast"], "NON_RECURSIVE_FORCED_BUILD"),
 ]
 SCENARIOS = {
     "Nightly batch": ("After each warehouse load: forecast the next 30, 60 and 90 days with the production model (the active "
-                      "version of the saved models), archive it and log the run", "daily", NIGHTLY),
+                      "version of the saved model) into the folder forecast, log the run, then load it into the SQL "
+                      "table final_forecast", "daily", NIGHTLY),
     "Retrain, test and promote": (
         "Train and test a new model with the forecaster the project variable forecaster names (tracked in Experiment "
         "Tracking, deployed as a saved model version), and activate it if it beats the production model. It does not "
@@ -53,14 +49,6 @@ SCENARIOS = {
             *START,
             ("Empty the daily flows", "clear_daily_flows"),
             ("Read the whole history again", ["daily_flows"], "RECURSIVE_FORCED_BUILD"),
-        ]),
-    "Load test": (
-        "Run by hand: times the nightly forecast (read in chunks, forecast, write; no real training: the model is "
-        "fitted on 2 clients) on fake data with a dummy model, in the Load test zone only (it never touches the real data, models or logs). Set the numbers "
-        "in step 1 (Steps > Set the load test numbers), run it, then look at the dashboard Load test (and load_test_log: one "
-        "row per run)", None, [
-            ("Set the load test numbers", LOAD_TEST),
-            ("Fake data, forecast, log, dashboard", ["load_test_charts"], "RECURSIVE_FORCED_BUILD"),
         ]),
 }
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}

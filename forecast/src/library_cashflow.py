@@ -1,10 +1,11 @@
 """Shared by every zone (project library: python/cashflow.py): dates, the business rule on amounts, and the
 interfaces between the zones:
     1. the data (staging -> training, lab and inference): daily_flows (one row per client, day and category:
-       money_in, money_out, postings, over each client's whole history; a folder of Parquet files, read with
-       read_daily or iter_clients) and the dataset clients (one row per business client). Every model gets these
-       and nothing else; period_matrix below turns the days into 30-day periods for the models that work that way.
-    2. the forecaster (lab -> training): models.py.
+       money_in, money_out, postings, over each client's whole history; a folder of Parquet files, one per group of
+       clients and month, see write_daily) and the dataset clients (one row per business client). Every model gets
+       these and nothing else. Inference gives each model the last INPUT_DAYS days of each client (the last year),
+       laid out by model_rows: one row per client, category and window, one column per day.
+    2. the model (lab -> training): models.py.
     3. the saved model (training -> inference): SAVED_MODEL; inference uses its active version.
 The forecast: per client, per category and in TOTAL (all categories together), the net cash flow (money in minus
 money out) of each of the next 3 windows of 30 days after the cut-off day (the last day of data: yesterday): days
@@ -15,6 +16,11 @@ import warnings
 import numpy as np
 import pandas as pd
 
+try:
+    import polars as pl
+except ImportError:         # the setup notebooks run on Dataiku's built-in Python: they only use this file's settings
+    pl = None
+
 # Quieter job logs, for every recipe (they all import this file): Dataiku's own writer prints, for each block it
 # writes, pandas warnings about its own code (DataFrame is highly fragmented, is_datetime64tz_dtype is deprecated),
 # and an INFO line every 10 s while it waits for the next chunk (No data to send, waiting more...). Harmless: hidden.
@@ -22,15 +28,25 @@ import pandas as pd
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning, module=r"dataiku\.")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"dataiku\.")
 logging.getLogger("dataiku.core.dataset_write").setLevel(logging.WARNING)
+# The same for each file written to a folder (Initializing folder writer, Pipe to generator thread, Sending data, Got
+# end mark, ...: several lines per file, hundreds of files): Dataiku logs them on the root logger, so they are dropped
+# by where they come from. Only their INFO lines: warnings and errors still show.
+_CHATTY = ("dkuio.py", "write_base.py", "managed_folder.py")
+logging.getLogger().addFilter(
+    lambda record: record.levelno >= logging.WARNING
+    or not record.pathname.replace("\\", "/").endswith(tuple(f"dataiku/core/{f}" for f in _CHATTY)))
 
 PERIOD_DAYS = 30            # the forecast's windows, and the periods the models work with, are 30 days long
 HORIZONS = (1, 2, 3)        # the windows forecast: 1 = days 1-30 after the cut-off day, 2 = days 31-60, 3 = 61-90
 TOTAL = "TOTAL"             # the category of a client's all-categories net cash flow
 SAVED_MODEL = "cash_forecast"
-MIN_HISTORY_DAYS = 360      # a client needs this many days of history up to the cut-off to get a forecast (else
+INPUT_DAYS = 365            # what a model gets for each client: its daily flows of the last 365 days up to the
+                            # cut-off day (a forecaster can ask for another number: its params["input_days"])
+MIN_HISTORY_DAYS = INPUT_DAYS   # a client needs this many days of history up to the cut-off to get a forecast (else
                             # status NOT_ENOUGH_HISTORY in the final forecast)
-MIN_TRAINING_MONTHS = 18    # history needed to train and test a model: MIN_HISTORY_DAYS, plus the 6 periods of 30
-                            # days the test keeps aside (about 540 days). Less is fine to test staging only
+MIN_TRAINING_MONTHS = 21    # history needed to train and test a model: a year of input, the 3 windows after it, and
+                            # the 6 periods of 30 days the test keeps aside (about 635 days). Less is fine to test
+                            # staging only
 FORECAST_COLUMNS = ["client_no", "category", "window", "p10", "ev", "p90"]   # what a forecaster returns
 
 
@@ -52,72 +68,114 @@ def read_dataset(name, columns=None):
 
 DAILY_FLOWS = "daily_flows"     # interface 1: a managed folder of Parquet files, written by staging
 DAILY_COLUMNS = ["client_no", "day", "category", "money_in", "money_out", "postings"]
-CURRENT = "/current.txt"        # in the folder: which version of the files is the current one
+DAILY_SCHEMA = dict(zip(DAILY_COLUMNS, [pl.Utf8, pl.Datetime("us"), pl.Utf8, pl.Float64, pl.Float64, pl.Int64])) if pl \
+    else {}
+MANIFEST = "/manifest.json"     # in the folder: the current files (which group of clients and month each holds)
+CLIENTS_PER_GROUP = 5000        # clients per group when the daily flows are written from nothing
 
 
-def empty_daily():
-    """daily_flows with no row, with its column types."""
-    return pd.DataFrame({"client_no": pd.Series(dtype=str), "day": pd.Series(dtype="datetime64[ns]"),
-                         "category": pd.Series(dtype=str), "money_in": pd.Series(dtype=float),
-                         "money_out": pd.Series(dtype=float), "postings": pd.Series(dtype="int64")})
+def client_groups(clients, groups):
+    """The group of each client number (a Polars Series of numbers 0 .. groups - 1): a client never changes group
+    (CRC32 of its number), so its rows are always in the files of the same group."""
+    import zlib
+    numbers = pl.Series(clients, dtype=pl.Utf8)
+    unique = numbers.unique()
+    group_of = dict(zip(unique.to_list(), (zlib.crc32(n.encode()) % groups for n in unique.to_list())))
+    return numbers.replace_strict(group_of, return_dtype=pl.Int64)
 
 
-def _daily_files(name=DAILY_FLOWS, **kwargs):
-    """The folder and the current version's Parquet files, in order ([] when nothing is staged yet).
-    kwargs: for dataiku.Folder (ignore_flow=True to read it in the recipe that writes it)."""
+def read_manifest(name=DAILY_FLOWS, **kwargs):
+    """The folder and its manifest (None when nothing is written yet): {"groups": number of groups, "files":
+    {group: {month: [path, rows]}}, "first_days": path, "rows": rows in all}. kwargs: for dataiku.Folder."""
+    import json
     import dataiku
     folder = dataiku.Folder(name, **kwargs)
-    paths = folder.list_paths_in_partition()
-    if CURRENT not in paths:
-        return folder, []
-    with folder.get_download_stream(CURRENT) as stream:
-        version = stream.read().decode().strip()
-    return folder, sorted(p for p in paths if p.startswith(f"/{version}/") and p.endswith(".parquet"))
+    if MANIFEST not in folder.list_paths_in_partition():
+        return folder, None
+    with folder.get_download_stream(MANIFEST) as stream:
+        return folder, json.loads(stream.read())
 
 
-def iter_daily_parts(name=DAILY_FLOWS, columns=None, **kwargs):
-    """daily_flows one Parquet file at a time (DataFrames). Each file holds complete clients."""
+def read_parquet(folder, path, columns=None):
+    """One Parquet file of a folder, as a Polars DataFrame."""
     import io
-    import pyarrow.parquet as pq
-    folder, paths = _daily_files(name, **kwargs)
-    for path in paths:
-        with folder.get_download_stream(path) as stream:
-            data = stream.read()
-        yield _plain(pq.read_table(io.BytesIO(data), columns=columns).to_pandas())
+    with folder.get_download_stream(path) as stream:
+        return pl.read_parquet(io.BytesIO(stream.read()), columns=columns)
+
+
+def read_group(folder, manifest, group, since=None):
+    """The daily flows of a group of clients (Polars), from the day `since` on (only the files of its months are
+    read), or all of them."""
+    months = (manifest["files"].get(str(group)) or {})
+    first = None if since is None else f"{since:%Y-%m}"
+    parts = [read_parquet(folder, path) for month, (path, _) in sorted(months.items()) if first is None or month >= first]
+    daily = pl.concat(parts) if parts else pl.DataFrame(schema=DAILY_SCHEMA)
+    return daily if since is None else daily.filter(pl.col("day") >= since)
+
+
+def read_first_days(folder, manifest):
+    """Each client's first posting day: client_no, first_day (Polars)."""
+    return read_parquet(folder, manifest["first_days"])
 
 
 def read_daily(name=DAILY_FLOWS, columns=None, **kwargs):
-    """All of daily_flows as one DataFrame (for the sample data or a training set that fits in memory; for all the
-    bank's clients, use iter_clients)."""
-    parts = list(iter_daily_parts(name, columns, **kwargs))
-    return pd.concat(parts, ignore_index=True) if parts else empty_daily()
+    """All of daily_flows as one pandas DataFrame (for training, the lab, the sample data; the nightly forecast reads
+    one group of clients at a time, read_group)."""
+    folder, manifest = read_manifest(name, **kwargs)
+    files = [path for months in (manifest or {}).get("files", {}).values() for path, _ in months.values()]
+    daily = pl.concat([read_parquet(folder, p, columns) for p in files]) if files else pl.DataFrame(schema=DAILY_SCHEMA)
+    return _plain(daily.to_pandas())
 
 
-def write_daily(parts, name=DAILY_FLOWS):
-    """Write daily_flows again: each part (a DataFrame of complete clients, each client's rows together) becomes one
-    Parquet file of a new version; only once all are written does the new version become the current one, and the
-    older versions are removed. So a run that fails half way leaves the current version as it was. Returns the rows
-    written."""
+def write_daily(parts, groups, name=DAILY_FLOWS, base=None):
+    """Write daily flows: each part (pandas or Polars, DAILY_COLUMNS) holds rows of some groups of clients; its rows of
+    each group and calendar month go to one Parquet file, group_0007/2026-11_<run>.parquet, added to the rows already
+    in that file (base: the current manifest, when adding new days; None: from nothing). Files are never changed in
+    place: new ones are written, then the manifest points to them (a failed run leaves the daily flows as they
+    were), then the files it no longer lists are removed. Also each client's first posting day (first_days). Returns
+    the new manifest."""
     import io
+    import json
     import uuid
     import dataiku
-    import pyarrow as pa
-    import pyarrow.parquet as pq
     folder = dataiku.Folder(name)
-    version = f"v{pd.Timestamp.now():%Y%m%dT%H%M%S}_{uuid.uuid4().hex[:6]}"
-    rows = 0
-    for i, part in enumerate(parts):
+    run = f"{pd.Timestamp.now():%Y%m%dT%H%M%S}_{uuid.uuid4().hex[:6]}"
+    files = {g: dict(months) for g, months in (base or {}).get("files", {}).items()}
+    firsts = [read_first_days(folder, base)] if base else []
+
+    def write(path, frame):
         buffer = io.BytesIO()
-        pq.write_table(pa.Table.from_pandas(part[DAILY_COLUMNS], preserve_index=False), buffer)
-        with folder.get_writer(f"/{version}/part_{i:05d}.parquet") as writer:
+        frame.write_parquet(buffer)
+        with folder.get_writer(path) as writer:
             writer.write(buffer.getvalue())
-        rows += len(part)
-    with folder.get_writer(CURRENT) as writer:
-        writer.write(version.encode())
+
+    for part in parts:
+        part = (part if isinstance(part, pl.DataFrame) else pl.from_pandas(part[DAILY_COLUMNS])).select(
+            [pl.col(c).cast(k) for c, k in DAILY_SCHEMA.items()])
+        if part.is_empty():
+            continue
+        firsts.append(part.group_by("client_no").agg(first_day=pl.col("day").min()))
+        part = part.with_columns(group=client_groups(part["client_no"], groups), month=pl.col("day").dt.strftime("%Y-%m"))
+        for (group, month), rows in part.group_by(["group", "month"]):
+            group, rows = str(group), rows.drop(["group", "month"])
+            before = files.get(group, {}).get(month)
+            if before:
+                rows = pl.concat([read_parquet(folder, before[0]), rows])
+            path = f"/group_{int(group):04d}/{month}_{run}.parquet"
+            write(path, rows.sort(["client_no", "day", "category"]))
+            files.setdefault(group, {})[month] = [path, len(rows)]
+    first_days = f"/first_days_{run}.parquet"
+    write(first_days, pl.concat(firsts).group_by("client_no").agg(pl.col("first_day").min()).sort("client_no")
+          if firsts else pl.DataFrame(schema={"client_no": pl.Utf8, "first_day": pl.Datetime("us")}))
+    manifest = {"groups": groups, "files": files, "first_days": first_days,
+                "rows": sum(rows for months in files.values() for _, rows in months.values())}
+    with folder.get_writer(MANIFEST) as writer:
+        writer.write(json.dumps(manifest).encode())
+    kept = {first_days, MANIFEST} | {path for months in files.values() for path, _ in months.values()}
     for path in folder.list_paths_in_partition():
-        if path != CURRENT and not path.startswith(f"/{version}/"):
+        if path not in kept:
             folder.delete_path(path)
-    return rows
+    return manifest
 
 
 def clear_daily(name=DAILY_FLOWS):
@@ -128,51 +186,17 @@ def clear_daily(name=DAILY_FLOWS):
         folder.delete_path(path)
 
 
-def iter_clients(name=DAILY_FLOWS, clients=5000, keep=None, **kwargs):
-    """daily_flows read in chunks of `clients` COMPLETE clients: every row of a client is in the same chunk, so memory
-    holds one chunk of clients, never the whole table. Staging keeps daily_flows grouped by client, so it is read
-    straight through, one Parquet file at a time. keep: a function applied to each file's rows first (a filter).
-    Stops with an error if a client's rows are not together (then run the scenario Full rebuild)."""
-    done, buffer, runs = set(), [], 0
-
-    def batch(out):
-        ids = set(out["client_no"])
-        if ids & done:
-            raise ValueError(f"{name} is not grouped by client (client {next(iter(ids & done))} is in two places): "
-                             "run the scenario Full rebuild of the daily flows")
-        done.update(ids)
-        return out.reset_index(drop=True)
-
-    def starts(frame):
-        """The first row of each client (the rows of a client are together)."""
-        ids = frame["client_no"].to_numpy()
-        return np.flatnonzero(np.r_[True, ids[1:] != ids[:-1]]) if len(ids) else np.array([], dtype=int)
-
-    def cut(frame, last):
-        """Full chunks of clients from frame; returns the rest. last: no more rows to come, so the last client is
-        complete too."""
-        first = starts(frame)
-        complete = len(first) if last else len(first) - 1      # the last client may go on in the next file
-        while complete >= clients:
-            end = first[clients] if clients < len(first) else len(frame)
-            yield batch(frame.iloc[:end])
-            frame, first, complete = frame.iloc[end:], first[clients:] - end, complete - clients
-        if last and len(frame):
-            yield batch(frame)
-        return frame
-
-    # files are joined only when they hold more than a chunk of clients (one join per chunk, not one per file)
-    for part in iter_daily_parts(name, **kwargs):
-        part = keep(part) if keep else part
-        if part.empty:
-            continue
-        buffer.append(part)
-        runs += len(starts(part))
-        if runs > clients:
-            rest = yield from cut(pd.concat(buffer, ignore_index=True), last=False)
-            buffer, runs = [rest], len(starts(rest))
-    if buffer:
-        yield from cut(pd.concat(buffer, ignore_index=True), last=True)
+def peak_memory_mb():
+    """The most memory this process used, MB (Linux: VmHWM)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return round(int(line.split()[1]) / 1024)
+    except OSError:
+        pass
+    import resource
+    return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
 
 
 def append_row(name, columns, row):
@@ -410,7 +434,38 @@ def monthly_series(daily, cutoff):
     return long.dropna(subset=["net"]).sort_values(["client_no", "category", "month"]).reset_index(drop=True)
 
 
-def history_days(daily, cutoff):
-    """Per client: the days from its first posting to the cut-off day (both counted)."""
-    first = pd.to_datetime(until(daily, cutoff).groupby("client_no")["day"].min())
-    return ((cutoff - first).dt.days + 1).rename("history_days")
+def input_days(model=None):
+    """How many days of daily flows a model gets for each client: its params["input_days"], else INPUT_DAYS."""
+    return int((getattr(model, "params", None) or {}).get("input_days") or INPUT_DAYS)
+
+
+def day_columns(days=INPUT_DAYS):
+    """The names of the model's day columns, the oldest first: day_365, ..., day_1 (day_1: the cut-off day)."""
+    return [f"day_{days - i}" for i in range(days)]
+
+
+def day_matrix(daily, cutoff, days=INPUT_DAYS):
+    """The net cash flow (money in minus money out) of each of the last `days` days up to the cut-off day, per client
+    and category (and per client in TOTAL: all its categories together); 0 for a day with no posting. Returns the
+    keys (Polars: client_no, category, sorted) and the matrix (numpy float32, one row per key, the oldest day first).
+    daily: Polars or pandas."""
+    d = daily if isinstance(daily, pl.DataFrame) else pl.from_pandas(daily[DAILY_COLUMNS])
+    end = pd.Timestamp(cutoff).to_pydatetime()
+    d = d.filter(pl.col("day").is_between(end - pd.Timedelta(days=days - 1), end)).select(
+        pl.col("client_no").cast(pl.Utf8), pl.col("category").cast(pl.Utf8),
+        (days - 1 - (pl.lit(end) - pl.col("day")).dt.total_days()).alias("column"),
+        (pl.col("money_in") - pl.col("money_out")).alias("net"))
+    d = pl.concat([d, d.with_columns(category=pl.lit(TOTAL))])
+    keys = d.select("client_no", "category").unique().sort("client_no", "category")
+    d = d.join(keys.with_row_index("series"), on=["client_no", "category"])
+    flat = d["series"].to_numpy().astype(np.int64) * days + d["column"].to_numpy()
+    matrix = np.bincount(flat, weights=d["net"].to_numpy(), minlength=len(keys) * days)
+    return keys, matrix.reshape(len(keys), days).astype(np.float32)
+
+
+def model_rows(keys, matrix):
+    """The model's input (interface 2): one row per client, category and window (1, 2, 3: days 1-30, 31-60, 61-90
+    after the cut-off day), its columns client_no, category, window, day_365 ... day_1 (the net cash flow of each
+    day, SAR). keys, matrix: from day_matrix. Polars."""
+    days = pl.DataFrame(matrix, schema=day_columns(matrix.shape[1]), orient="row")
+    return pl.concat([keys.with_columns(window=pl.lit(h, pl.Int8)).hstack(days) for h in HORIZONS])

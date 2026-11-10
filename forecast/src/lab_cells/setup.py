@@ -26,10 +26,10 @@ import tracking
 
 for module in (cashflow, models, tracking, forecasters):     # pick up changes to the project library without a restart
     importlib.reload(module)
-from cashflow import (FORECAST_COLUMNS, HORIZONS, PERIOD_DAYS, TOTAL, cutoff_date, monthly_series, period_matrix,
+from cashflow import (FORECAST_COLUMNS, HORIZONS, PERIOD_DAYS, TOTAL, cutoff_date, day_matrix, monthly_series, period_matrix,
                       read_daily, read_dataset)
 from forecasters import RecentAverage6
-from models import QuantileBoosting, RecentAverage, lab_compare
+from models import DailyCatBoost, RecentAverage, lab_compare
 
 pd.set_option("display.max_columns", 30)
 cutoff = cutoff_date()

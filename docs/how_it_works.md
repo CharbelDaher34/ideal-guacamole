@@ -25,8 +25,8 @@ flowchart TB
   T["Step 2 · train_and_test<br/>trains and tests a new model"]
   V[("saved model cash_forecast<br/>one version per model")]
   C["Step 3 · champion_challenger<br/>+ promote if better"]
-  F["Step 4 · final_forecast<br/>forecasts every active client"]
-  O[("final_forecast<br/>forecast_archive<br/>inference_log")]
+  F["Step 4 · nightly_forecast, load_forecast_sql<br/>forecasts every active client, loads it into SQL"]
+  O[("forecast (Parquet, by night)<br/>final_forecast (SQL)<br/>inference_log")]
   L["Lab notebook · data scientist<br/>tries models (outside the flow)"]
 
   W --> S --> D
@@ -44,7 +44,7 @@ flowchart TB
 | 1. Get the data | `stage_tables` | the 2 warehouse tables | `clients`, `daily_flows`, `staging_log` | every scenario |
 | 2. Train and test | `train_and_test` | interface 1 | a run in Experiment Tracking, a new **inactive** version of `cash_forecast`, `test_results` | Retrain |
 | 3. Promote | `champion_challenger`, then "promote if better" | interface 1, the new and the active version | `promotion_log`; activates the new version if it passes | Retrain |
-| 4. Forecast | `final_forecast` | interface 1, interface 3 | `final_forecast`, `forecast_archive`, `inference_log` | Nightly batch |
+| 4. Forecast | `nightly_forecast`, then `load_forecast_sql` | interface 1, interface 3 | `forecast` (folder), `inference_log`, then `final_forecast` (SQL table) | Nightly batch |
 | Lab (not in the flow) | the notebook `forecast_lab.ipynb` | interface 1, the production model | lab runs in Experiment Tracking (experiment `cashflow_lab`) | by hand |
 
 **The steps only meet through 3 interfaces** (section 3). A step never reads another step's internals: inference,
@@ -56,7 +56,7 @@ for example, reads nothing from training except the active version of the saved 
 |---|---|---|
 | Raw data, Staging | you | read the warehouse, build `daily_flows` and `clients` (interface 1) |
 | Training | data scientist (model), you (pipeline) | train, test, track and promote models (promotion rules are project variables) |
-| Inference | you | forecast every active client each night with the active model, archive and log it |
+| Inference | you | forecast every active client each night with the active model, log it, load it into SQL |
 | (no zone) Lab notebook | data scientist | try models without touching production; hand over a forecaster (interface 2): set the project variable `forecaster`, run Retrain |
 
 ---
@@ -70,6 +70,10 @@ Every model gets these 2 datasets and nothing else.
 **`daily_flows`**: one row per client, day and category, over each client's whole history up to the cut-off day
 (yesterday). It is a Dataiku **folder of Parquet files**, not a dataset: read straight from the files, it is about
 35 times faster than a dataset (Dataiku's dataset reader handles about 0.4M rows a second, whatever the format).
+**One file per group of clients and calendar month** (`group_0007/2026-11_<run>.parquet`; about 5,000 clients per
+group, and a client never changes group), so the nightly forecast reads only each group's last 13 months, and each
+night only rewrites the current month's files. A small file keeps each client's first posting day, and
+`manifest.json` lists the current files.
 
 | Column | Meaning |
 |---|---|
@@ -101,8 +105,10 @@ with no other change to the project.
 | `fit(daily, clients, cutoff)` | learns from `daily_flows` and `clients` known at the cut-off day (`cutoff`: the last day of data) |
 | `predict(daily, clients, cutoff)` | returns one row per client, category (and `TOTAL`) and window (1, 2, 3: days 1–30, 31–60, 61–90 after the cut-off day): `client_no`, `category`, `window`, `p10`, `ev`, `p90` |
 
-`cashflow.period_matrix(daily, cutoff)` gives each client's net cash flow per 30-day period ending at the cut-off
-day, for the models that work that way.
+**What a model gets at night:** each client's daily flows of the **last 365 days** up to the cut-off day (a
+forecaster can ask for another number with `params["input_days"]`). `cashflow.day_matrix(daily, cutoff)` lays them
+out as one row per client and category (and `TOTAL`), one column per day. How to turn the days into features is the
+forecaster's own choice: the pipeline does not sum them.
 
 Two rules: a client's forecast may only depend on that client's own data (inference sends clients in chunks), and
 P10 ≤ EV ≤ P90 (the project enforces it).
@@ -115,16 +121,18 @@ Each training run is one model with its own **model ID** (for example `CFF_20261
 training time). It becomes a **version** of the saved model `cash_forecast`. The **active** version is the
 production model; the nightly forecast always uses it. Rolling back means activating an earlier version.
 
-### The output: `final_forecast`
+### The output: the folder `forecast`, then the SQL table `final_forecast`
 
-**One row per active client.**
+**One row per active client.** Each night's forecast is a subfolder of Parquet files (one per group of clients),
+`forecast_<cut-off>_<model ID>`, kept; `current.txt` points to the newest. The SQL table `final_forecast`
+(`OUTPUT_SQL_CONNECTION`) holds the current one.
 
 | Columns | Meaning |
 |---|---|
 | `client_no` | the client |
 | `cutoff_date` | the last day of data (yesterday) |
 | `w1_start`, `w1_end`, `w2_start`, `w2_end`, `w3_start`, `w3_end` | the first and last day of each window: days 1–30, 31–60, 61–90 after the cut-off |
-| `status` | `OK`; `NOT_ENOUGH_HISTORY` (under 360 days of history: no values); `NO_POSTINGS` (no posting at all: no values) |
+| `status` | `OK`; `NOT_ENOUGH_HISTORY` (under 365 days since its first posting: no values); `NO_POSTINGS` (no posting in the last 365 days: no values) |
 | `history_days` | days from the client's first posting to the cut-off |
 | `TOTAL_w1_p10`, `TOTAL_w1_ev`, `TOTAL_w1_p90`, … `UTILITIES_w3_p90` | one column per category (TOTAL first), window and value. Empty for a category the client doesn't have |
 | `model_id`, `forecaster`, `load_id` | which model and which warehouse load produced it |
@@ -152,10 +160,10 @@ production model; the nightly forecast always uses it. Rolling back means activa
     same as the earlier Python version: tested to give identical `daily_flows` on PostgreSQL and on Oracle.
 - **Only the new days from the warehouse.** The first run reads the history once: the last `HISTORY_MONTHS` months up to the cut-off day (a setup setting; `-1`: everything), for all business clients or only the first `CLIENTS_LIMIT` (to test fast). Under 18 months the setup only stages the data: training needs 18. After that, each night
   reads only the postings after the last day already in `daily_flows`, up to the cut-off day (yesterday).
-- **Kept grouped by client.** When there are new days, staging writes `daily_flows` again with the new days in
-  place: each client's rows together, old and new, a group of clients per Parquet file. It writes a new version of
-  the files and only switches to it once every file is written, so a failed run leaves `daily_flows` as it was.
-  When there is nothing new, `daily_flows` is not touched.
+- **By group of clients and month.** New days go to the files of their group and month (usually only the current
+  month of each group is rewritten). New files are written beside the old ones and `manifest.json` only switches to
+  them once every file is written, so a failed run leaves `daily_flows` as it was. When there is nothing new,
+  `daily_flows` is not touched.
 - **Cut-off day:** yesterday, or the project variable `cutoff_override` (YYYY-MM-DD). Set by the first step of each
   scenario.
 - **Warehouse check:** the second step of each scenario checks that the warehouse's load of the cut-off day (the ETL
@@ -173,7 +181,8 @@ production model; the nightly forecast always uses it. Rolling back means activa
 
 ### Step 2: train and test (`train_and_test`)
 
-- Trains the forecaster named by the project variable `forecaster` (default `quantile_boosting`).
+- Trains the forecaster named by the project variable `forecaster` (default `daily_catboost`). Needs at least 21
+  months of history: a year of input, the 3 windows after it, and the 6 test periods.
 - **Test, the same for every model:** trained without the last 6 periods of 30 days, it forecasts the 3 windows after
   each of the 6 test cut-offs (30 days apart) from the data known that day, and is compared with what happened:
   - **EV error (WAPE):** total of |actual − EV| ÷ total of |actual|. Lower is better; it should beat the simple guess
@@ -196,27 +205,37 @@ the **promotion rules**, which are project variables (no code change needed):
 With no production model yet, the first model is promoted. Every decision, its reason and the rules used go to
 `promotion_log`.
 
-### Step 4: forecast (`final_forecast`)
+### Step 4: forecast (`nightly_forecast`), then the SQL load (`load_forecast_sql`)
 
 - Loads the active version of `cash_forecast`.
-- **Reads and forecasts in chunks of complete clients** (project variable `inference_clients_per_chunk`, default
-  5,000): it reads `daily_flows` straight through, since staging keeps it grouped by client, and forecasts each chunk
-  as soon as it is read. Memory holds one chunk, whatever the number of clients.
-- Writes `final_forecast` and a compressed copy in the folder `forecast_archive`
-  (`forecast_<cut-off>_<model ID>.csv.gz`) **only once every chunk has worked**: a failed run leaves the previous
-  forecast as it was.
+- **Polars from start to end, the groups of clients side by side** (project variable `inference_workers`, default 4,
+  threads: Polars, Parquet and CatBoost work outside Python's lock). Each group, on its own: reads its last 13 monthly
+  files, keeps the last 365 days of its active clients, builds the model's input rows (`cashflow.model_rows`: client,
+  category, window, `day_365 … day_1`), calls the model's `predict_rows`, makes one row per client, and writes one
+  Parquet file into tonight's subfolder of `forecast`. Memory holds the groups being worked on, whatever the number of
+  clients. The code is `forecast.forecast_all`: the load test project runs the same code.
+- A client with less than 365 days of history gets `NOT_ENOUGH_HISTORY` (it is not sent to the model); one with no
+  posting in the last 365 days, `NO_POSTINGS`.
+- `current.txt` points to tonight's subfolder **only once every group has worked**: a failed run leaves the previous
+  forecast current.
 - Adds one row to `inference_log` (section 6).
+- **Then the SQL load**, the scenario's next step: the current subfolder into the table `final_forecast`, replacing
+  the previous one. If it fails, the forecast is still complete in the folder: build `final_forecast` alone to retry.
 
-### The placeholder model: `quantile_boosting`
+### The placeholder model: `daily_catboost` (option A)
 
-- **3 small models:** one for the EV, one for P10, one for P90 (scikit-learn gradient boosting; the EV is the
-  median, which a few huge amounts throw off far less than the mean).
-- **Shared by every category:** the category is an input, so a category with little data learns from the others,
-  and there are 3 models to track and promote, not 3 per category.
-- **Inputs:** the client and category's net cash flow over the last 12 periods of 30 days (scaled so small and
-  large clients look alike), the category, periods known, the window, and the calendar month of the window's middle.
-- The lab compares it with one set of 3 models per category (`quantile_boosting_by_category`) and with
-  `recent_average` (no machine learning). Small models only, no deep learning.
+- **One model:** CatBoost with the MultiQuantile loss gives P10, EV and P90 together (the EV is the median, which a
+  few huge amounts throw off far less than the mean).
+- **Shared by every category and the 3 windows:** each client and category is 3 rows with the same inputs; only the
+  window (1, 2, 3) changes. So there is one model to track and promote.
+- **Inputs:** the net cash flow of each of the last 365 days (one column per day, scaled so small and large clients
+  look alike), the category and the window. No sums over 30 days, no calendar: the data scientist decides the
+  features.
+- **Target in training:** the net cash flow of the window (the sum of its 30 days). Each window is forecast straight
+  from the real days, never from the model's own forecast of the month before.
+- **Trained on rolling cut-offs:** every 30 days back from the cut-off, the year before it as input and the 3 windows
+  after it as targets.
+- The lab compares it with `recent_average` (no machine learning). Small models only, no deep learning.
 
 ---
 
@@ -235,7 +254,7 @@ With no production model yet, the first model is promoted. Every decision, its r
 | `staging_log` | staging run, **also failed ones** | `status` / `error`, mode (`FULL`, `NEW_DAYS`, `NOTHING_NEW`), days read, postings in the daily totals read and kept (business clients, without reversals and own transfers), daily rows added and in total, last day staged |
 | Experiment Tracking | training run, and lab try | forecaster, settings, data used, test scores, the model |
 | `promotion_log` | promotion decision | candidate and production scores, decision, reason, rules used |
-| `inference_log` | forecast run, **also failed ones** | `status` / `error`; `model_id` and `forecaster`; `active_clients` = `clients_ok` + `clients_not_enough_history` + `clients_no_postings`; rows read, chunks, seconds reading, forecasting and writing, peak memory; archive file |
+| `inference_log` | forecast run, **also failed ones** | `status` / `error`; `model_id` and `forecaster`; `active_clients` = `clients_ok` + `clients_not_enough_history` + `clients_no_postings`; workers, groups, rows read; seconds reading, preparing, model, formatting, writing (added up over the workers) and in all; peak memory; the output's subfolder |
 
 **Alerts** (an email or a Teams message when a run fails) are planned, not built:
 [`forecast/alerts_plan.md`](../forecast/alerts_plan.md). Model monitoring (accuracy against actuals, drift) is the
@@ -244,7 +263,7 @@ data scientist's side.
 ## 7. Scale
 
 Built for the bank's ~420,000 clients. The nightly forecast (step 4), measured on the local Docker Dataiku with
-fake clients, the 3-model placeholder and chunks of 5,000 clients:
+fake clients, the earlier 3-model placeholder (12 periods of 30 days as inputs) and chunks of 5,000 clients:
 
 | Clients | Daily rows read | Reading | Forecasting | Writing | Total | Peak memory |
 |---|---|---|---|---|---|---|
@@ -254,22 +273,27 @@ fake clients, the 3-model placeholder and chunks of 5,000 clients:
 - Reading `daily_flows` as Parquet files cut the total from 8.5 to 4.7 min at 400k (from 19.2 to 10.4 min at 800k)
   compared with a Dataiku dataset.
 - Memory barely moves when the clients double: it holds one chunk of clients at a time.
-- The scenario **Load test** (zone Load test, apart from everything else) repeats this test on the bank's server:
-  fake data of the size set in its step 1, a dummy model, the time of each step in `load_test_log`. If it is still
-  too slow there: forecast chunks in parallel.
-- Not tested yet: training on all clients (it still loads all of `daily_flows`); train on a sample of clients, or
-  read it with `iter_clients`, if it gets too heavy.
+- **Today's pipeline** (groups of clients by month, Polars, `daily_catboost`, groups side by side), on the sandbox's
+  5,000 fake clients, forecast then SQL load: about 2,100 clients a second with 1 worker, 2,900 with 2, 4,000 with 4
+  (the earlier one: about 1,000), so roughly 3–5 minutes for 420,000 clients. To confirm on the bank's server.
+- The **load test project** (`build_load_test_project.ipynb`, a project of its own, the same code) runs this test on
+  the bank's server: a test plan of several worker counts in one run, then a report (the forecast and the SQL load,
+  the share of each step, memory, the time for the bank's clients).
+- Not tested yet: training on all clients (it still loads all of `daily_flows`); train on a sample of clients if it
+  gets too heavy.
 
 ## 8. Decisions and open points
 
 **Agreed**
-- Input: each client's daily flows per category, whole history, up to yesterday. Output: per client, category and
+- Input: each client's daily flows per category, the last 365 days up to yesterday. Output: per client, category and
   TOTAL, the next 30, 60 and 90 days, P10 / EV / P90, one row per client.
-- Small models only. Placeholder `quantile_boosting` until the data scientist's models are ready.
+- Small models only. Placeholder `daily_catboost` (option A: one model, the 3 windows as an input) until the data
+  scientist's models are ready.
 - Every model is tracked, deployed as a version, and activated only if it passes the promotion rules.
-- The warehouse is only read (read-only `SELECT`s of the columns used), never written to. Everything the project writes
-  is a CSV file (compressed for the big one), except `daily_flows`: Parquet files, for reading speed.
-- At least 360 days of history to get a forecast. Models are tested on the last 6 periods of 30 days.
+- The warehouse is only read (read-only `SELECT`s of the columns used), never written to. The daily flows and the
+  forecast are Parquet files (for speed); the forecast is then loaded into the SQL table `final_forecast` on a
+  database the project may write into (`OUTPUT_SQL_CONNECTION`); the logs and small tables are CSV files.
+- At least 365 days of history to get a forecast. Models are tested on the last 6 periods of 30 days.
 
 **To confirm at the bank**
 - The real warehouse check: how to know the load of a day (the ETL from the source systems) is finished, to replace
@@ -277,5 +301,5 @@ fake clients, the 3-model placeholder and chunks of 5,000 clients:
 - The real transaction type codes (`TRNS_TYP`) and their categories, to replace the mock list in `warehouse.py`.
 - The codes in `DIM_CUSTOMER` the project relies on: status values, retail line of business, commercial
   registration, sole-proprietor legal entities. If they differ, only `warehouse.py` changes.
-- How long the first full read of `FCT_STATEMENT_ENTRY` takes, and the scenario **Load test** on the bank's server.
+- How long the first full read of `FCT_STATEMENT_ENTRY` takes, and the load test project on the bank's server.
 - Alerts: email, Teams or both, and the channel name.

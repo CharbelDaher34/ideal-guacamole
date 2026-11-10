@@ -1,6 +1,6 @@
 if staged_only:                                                 # only staging ran (HISTORY_MONTHS too short)
     clients_staged = dataiku.Dataset("clients").get_dataframe()
-    print(f"Staged: {len(clients_staged):,} business clients, {sum(len(p) for p in cashflow.iter_daily_parts()):,} "
+    print(f"Staged: {len(clients_staged):,} business clients, {cashflow.read_manifest()[1]['rows']:,} "
           "daily_flows rows (per client, day and category)")
     print("Staging log (one row per staging run: what was read from the warehouse):")
     display(dataiku.Dataset("staging_log").get_dataframe().sort_values("run_at"))

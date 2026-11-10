@@ -6,18 +6,17 @@
 #   business clients only, no reversals, no transfers between the client's own accounts. Only the NEW days are read
 #   from the warehouse: the days after the last day already staged, up to the cut-off day (yesterday). When nothing
 #   is staged yet (the first run, or after the scenario Full rebuild), the whole history is read.
-#   daily_flows is a folder of Parquet files (read straight from the files, far faster than a dataset), kept GROUPED
-#   BY CLIENT: each file holds complete clients (sorted by client, day, category). So when there are new days, it is
-#   written again as a new version: the rows already staged and the new ones, a group of clients per file; the new
-#   version only becomes the current one once every file is written (cashflow.write_daily), so a failed run leaves
-#   daily_flows as it was. Inference (and anyone else) reads it in chunks of complete clients. When there is nothing
-#   new, daily_flows is not touched.
+#   daily_flows is a folder of Parquet files (read straight from the files, far faster than a dataset): one file per
+#   group of clients (a client never changes group) and calendar month (cashflow.write_daily), so the nightly
+#   forecast reads only the last months of each group. New days only rewrite the files of their months (usually the
+#   current month of each group); the manifest only points to the new files once every one is written, so a failed
+#   run leaves daily_flows as it was. When there is nothing new, daily_flows is not touched.
 #   staging_log: one row per run (appended), also when the run fails (status FAILED and the error): what was read,
 #   and the last day now in daily_flows.
 # The warehouse does the heavy work (warehouse.daily_totals_query): it sums the postings into daily totals per client,
 # day and category, without reversals and own-account transfers, so only those totals travel, not every posting. A
 # big read never sits in memory whole: the totals read and the rows already staged are spread over files on disk by
-# client and written one file (a group of clients) at a time.
+# group of clients and written one group at a time.
 import json
 import os
 import tempfile
@@ -26,16 +25,13 @@ import time
 import dataiku
 import pandas as pd
 
-from cashflow import (DAILY_COLUMNS, Progress, Spread, append_row, clients_limit, cutoff_date, history_start,
-                      iter_daily_parts, waiting, write_daily)
+from cashflow import (CLIENTS_PER_GROUP, DAILY_COLUMNS, Progress, Spread, append_row, client_groups, clients_limit,
+                      cutoff_date, history_start, read_manifest, waiting, write_daily)
 import warehouse
 from warehouse import TABLES, daily_totals_query, one_row_per_client, standard_daily, table_query, to_standard
 
 CHUNK = 200_000
 STEP = 10_000                       # rows: how often the reading progress is counted (CHUNK is a multiple of it)
-ROWS_PER_GROUP = 1_000_000          # about this many daily_flows rows per group of clients when rewriting
-GROUPS_FULL = 512                   # groups of clients when everything is read (its size is not known before)
-KEYS = ["client_no", "day", "category"]
 started = time.time()
 cutoff = cutoff_date()
 end = cutoff + pd.Timedelta(days=1)                # postings up to the cut-off day (included)
@@ -103,9 +99,12 @@ def stage():
     log = log[log["status"] == "SUCCESS"] if len(log) else log
     last_day = pd.to_datetime(log["last_day"]).max() if len(log) else None
     staged_rows = int(log.sort_values("run_at")["daily_rows_total"].iloc[-1]) if len(log) else 0
-    if last_day is None:
-        if next(iter_daily_parts(ignore_flow=True), None) is not None:
-            raise ValueError("staging_log is empty but daily_flows is not: run the scenario Full rebuild")
+    _, manifest = read_manifest(ignore_flow=True)
+    if last_day is None and manifest is not None:
+        raise ValueError("staging_log is empty but daily_flows is not: run the scenario Full rebuild")
+    if manifest is not None and manifest["rows"] != staged_rows:
+        raise ValueError(f"daily_flows has {manifest['rows']:,} rows but staging_log says {staged_rows:,}: run the "
+                         "scenario Full rebuild of the daily flows")
     since = None if last_day is None else last_day + pd.Timedelta(days=1)
     mode = "FULL" if since is None else "NOTHING_NEW" if since >= end else "NEW_DAYS"
     if mode == "FULL":
@@ -136,10 +135,10 @@ def stage():
 
     read_rows = kept = added = total = 0          # postings in the daily totals read, and kept
     new = {}                                       # postings per month read now
+    n_groups = manifest["groups"] if mode == "NEW_DAYS" else max(1, -(-len(clients) // CLIENTS_PER_GROUP))
     with tempfile.TemporaryDirectory() as spread:
         if mode != "NOTHING_NEW":
-            groups = Spread(os.path.join(spread, "groups"),     # groups of clients
-                            GROUPS_FULL if mode == "FULL" else max(16, -(-staged_rows // ROWS_PER_GROUP) + 1))
+            groups = Spread(os.path.join(spread, "groups"), min(n_groups, 512))     # whole groups of clients each
             query = daily_totals_query(table_name("transactions"), table_name("clients"), since, end, limit)
             progress = Progress("reading the daily totals from the warehouse (rows: client x day x category)")
             for chunk in read(query, progress, standard_daily):
@@ -150,7 +149,7 @@ def stage():
                     last_day = max(chunk["day"].max(), last_day or pd.Timestamp.min)
                     for month, n in chunk.groupby(chunk["day"].dt.strftime("%Y-%m"))["postings"].sum().items():
                         new[month] = new.get(month, 0) + int(n)
-                    groups.add(chunk[DAILY_COLUMNS], "client_no")
+                    groups.add(chunk[DAILY_COLUMNS], client_groups(chunk["client_no"], n_groups).to_pandas())
             progress.finish()
             row.update(postings_read=read_rows, postings_kept=kept)
 
@@ -164,25 +163,12 @@ def stage():
         if mode == "NOTHING_NEW":
             total = staged_rows                    # daily_flows is not touched
         else:
-            # the rows already staged join the new ones, by client; then daily_flows is written again as a new
-            # version, a group of clients per file, each client's rows together
-            old = 0
-            if mode == "NEW_DAYS":
-                progress = Progress("adding the rows already in daily_flows", staged_rows)
-                for part in iter_daily_parts(ignore_flow=True):
-                    groups.add(part[DAILY_COLUMNS], "client_no")
-                    old += len(part)
-                    progress.add(len(part))
-                progress.finish()
-            if old != staged_rows:
-                raise ValueError(f"daily_flows has {old:,} rows but staging_log says {staged_rows:,}: run the "
-                                 "scenario Full rebuild of the daily flows")
-            progress = Progress("writing daily_flows (groups of clients)", groups.n)
-            total = write_daily(counted(part.groupby(KEYS, as_index=False)[["money_in", "money_out", "postings"]]
-                                        .sum().round({"money_in": 2, "money_out": 2}).sort_values(KEYS), progress)
-                                for part in groups.parts())
+            # the new rows go to the files of their group of clients and month (added to the rows already there)
+            progress = Progress(f"writing daily_flows ({n_groups:,} groups of clients, files by month)", groups.n)
+            total = write_daily((counted(part, progress) for part in groups.parts()), n_groups,
+                                base=manifest if mode == "NEW_DAYS" else None)["rows"]
             progress.finish()
-            added = total - old
+            added = total - staged_rows
     row.update(postings_read=read_rows, postings_kept=kept, daily_rows_added=added, daily_rows_total=total,
                last_day=f"{last_day:%Y-%m-%d}", postings_per_month=json.dumps(dict(sorted(new.items()))))
 

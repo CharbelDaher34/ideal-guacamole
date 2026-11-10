@@ -6,7 +6,10 @@ Test machine only. Steps:
        empty project DCM_FORECAST (sandbox/admin_setup.py, run in a temporary project, deleted afterwards)
     4. the forecast: warehouse_simulator.ipynb (fake tables), then build_forecast_project.ipynb with the local
        settings (the flow, the first run), and forecast_lab.ipynb and daily_flows_viewer.ipynb imported
+    5. the load test, a project of its own (DCM_LOAD_TEST): build_load_test_project.ipynb with the local settings and
+       small numbers (SANDBOX_LOAD_TEST), and daily_flows_viewer.ipynb imported
 """
+import re
 import json
 import os
 import subprocess
@@ -21,8 +24,35 @@ FORECAST = os.path.join(ROOT, "forecast")
 sys.path.insert(0, HERE)
 import dss  # noqa: E402
 
-PACKAGES = ["scikit-learn", "mlflow==2.22.0", "catboost==1.2.7"]   # the code env cashflow_forecast
-LOCAL_SETTINGS = {"YOUR_EDW_CONNECTION": "EDW_LOCAL", "YOUR_CODE_ENV": "cashflow_forecast"}
+PACKAGES = ["polars", "scikit-learn", "mlflow==2.22.0", "catboost==1.2.7"]   # the code env cashflow_forecast
+LOCAL_SETTINGS = {"YOUR_EDW_CONNECTION": "EDW_LOCAL", "YOUR_SQL_CONNECTION": "FORECAST_OUT_LOCAL",
+                  "YOUR_CODE_ENV": "cashflow_forecast"}
+# the load test on the sandbox: small, a minute (the notebook's own numbers are the bank's size)
+SANDBOX_LOAD_TEST = {r"FAKE_CLIENTS = [\d_]+": "FAKE_CLIENTS = 5_000",
+                     r"FAKE_CLIENTS_PER_GROUP = [\d_]+": "FAKE_CLIENTS_PER_GROUP = 500",
+                     r"TEST_PLAN = \[.*?\n\]": """TEST_PLAN = [
+    {"test": "1 worker", "workers": 1},
+    {"test": "2 workers", "workers": 2},
+    {"test": "4 workers", "workers": 4},
+]"""}
+
+
+def local_notebook(name, folder, load_test=None):
+    """A copy of a notebook in folder with the local settings (and the sandbox's load test numbers)."""
+    with open(os.path.join(FORECAST, name)) as f:
+        nb = json.load(f)
+    for cell in nb["cells"]:
+        text = "".join(cell["source"])
+        for placeholder, value in LOCAL_SETTINGS.items():
+            text = text.replace(placeholder, value)
+        if load_test and text.startswith("PROJECT_NAME"):
+            for pattern, value in load_test.items():
+                text = re.sub(pattern, value, text, count=1, flags=re.S)
+        cell["source"] = text.splitlines(keepends=True)
+    path = os.path.join(folder, name)
+    with open(path, "w") as f:
+        json.dump(nb, f)
+    return path
 
 
 def sh(*cmd, check=True):
@@ -93,13 +123,7 @@ if not ok:
 step("4. the forecast: fake warehouse, then the setup notebook")
 sh(sys.executable, os.path.join(FORECAST, "make_notebook.py"))
 with tempfile.TemporaryDirectory() as tmp:
-    with open(os.path.join(FORECAST, "build_forecast_project.ipynb")) as f:
-        text = f.read()
-    for placeholder, value in LOCAL_SETTINGS.items():
-        text = text.replace(placeholder, value)
-    build = os.path.join(tmp, "build_forecast_project.ipynb")
-    with open(build, "w") as f:
-        f.write(text)
+    build = local_notebook("build_forecast_project.ipynb", tmp)
     if not dss.run_notebook("DCM_FORECAST", os.path.join(FORECAST, "warehouse_simulator.ipynb"), quiet=True):
         sys.exit("warehouse_simulator failed")
     print("fake warehouse tables written")
@@ -107,4 +131,11 @@ with tempfile.TemporaryDirectory() as tmp:
         sys.exit("build_forecast_project failed")
 for name in ("forecast_lab.ipynb", "daily_flows_viewer.ipynb"):
     dss.import_notebook("DCM_FORECAST", os.path.join(FORECAST, name))
-print("\nSandbox ready: http://127.0.0.1:10000 (admin / admin), project DCM_FORECAST")
+
+step("5. the load test project")
+dss.create_project("DCM_LOAD_TEST", "Digital Cash Management Forecast - Load test")
+with tempfile.TemporaryDirectory() as tmp:
+    if not dss.run_notebook("DCM_LOAD_TEST", local_notebook("build_load_test_project.ipynb", tmp, SANDBOX_LOAD_TEST)):
+        sys.exit("build_load_test_project failed")
+dss.import_notebook("DCM_LOAD_TEST", os.path.join(FORECAST, "daily_flows_viewer.ipynb"))
+print("\nSandbox ready: http://127.0.0.1:10000 (admin / admin), projects DCM_FORECAST and DCM_LOAD_TEST")

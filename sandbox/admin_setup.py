@@ -9,6 +9,12 @@ if "EDW_LOCAL" not in client.list_connections():
     client.create_connection("EDW_LOCAL", "PostgreSQL", {
         "host": "postgres", "port": 5432, "db": "dataiku", "user": "dataiku", "password": "__PG_PASSWORD__"})
 print("connection EDW_LOCAL ready")
+# the database the forecast is written into (at the bank: a connection the project may write into, never the
+# warehouse). Here the same local database, its own connection
+if "FORECAST_OUT_LOCAL" not in client.list_connections():
+    client.create_connection("FORECAST_OUT_LOCAL", "PostgreSQL", {
+        "host": "postgres", "port": 5432, "db": "dataiku", "user": "dataiku", "password": "__PG_PASSWORD__"})
+print("connection FORECAST_OUT_LOCAL ready")
 
 # 2. the code env of the recipes and the lab, with its Jupyter kernel
 if "cashflow_forecast" not in [e["envName"] for e in client.list_code_envs()]:

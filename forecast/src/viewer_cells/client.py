@@ -1,17 +1,12 @@
-# One client's daily rows and its net cash flow per month (money in, money out, net). Its rows are all in one file:
-# the files are read until it is found.
+# One client's daily rows and its net cash flow per month (money in, money out, net): only its group's files are read.
 wanted = str(CLIENT_NO).strip() or first["client_no"].iloc[0]
-rows = pd.DataFrame()
-for path in paths:
-    rows = read_file(path, filters=[("client_no", "=", wanted)])
-    if len(rows):
-        break
+group = client_groups([wanted], manifest["groups"])[0]
+rows = read_group(folder, manifest, group).filter(pl.col("client_no") == wanted).sort("day", "category").to_pandas()
 if rows.empty:
     print(f"Client {wanted} is not in {FOLDER}")
 else:
-    rows = rows.sort_values(["day", "category"]).reset_index(drop=True)
-    print(f"Client {wanted}: {len(rows):,} rows, {rows['day'].min():%Y-%m-%d} to {rows['day'].max():%Y-%m-%d}, "
-          f"{rows['postings'].sum():,} postings, in {path}")
+    print(f"Client {wanted} (group {group}): {len(rows):,} rows, {rows['day'].min():%Y-%m-%d} to "
+          f"{rows['day'].max():%Y-%m-%d}, {rows['postings'].sum():,} postings")
     display(rows.tail(SAMPLE_ROWS))
     monthly = (rows.assign(month=rows["day"].dt.to_period("M").dt.to_timestamp())
                .groupby("month")[["money_in", "money_out"]].sum())

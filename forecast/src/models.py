@@ -1,43 +1,66 @@
-"""Models (project library: python/models.py): interface 2, the forecaster, the placeholder forecasters and the test
-every model goes through. Training (train_and_test, champion_challenger) and the lab use it; inference only calls the
-production model's predict.
+"""Models (project library: python/models.py): interface 2, the model, the placeholder models and the test every
+model goes through. Training (train_and_test, champion_challenger) and the lab use it; the nightly forecast only gives
+the production model its input rows (forecast.py).
 
-A forecaster is a class with:
+A model (a "forecaster" in the project variable that picks it) is a class with:
     name            its name. The project variable forecaster says which one the scenario Retrain, test and promote
-                    trains (default: quantile_boosting).
-    params          its settings (a dict), recorded in Experiment Tracking
+                    trains (default: daily_catboost).
+    params          its settings (a dict), recorded in Experiment Tracking. params["input_days"]: how many days of
+                    each client it gets (default 365).
     fit(daily, clients, cutoff)
                     learns from the data known at the cut-off day (interface 1, cashflow.py): daily: daily_flows
-                    (client_no, day, category, money_in, money_out, postings), every day up to the cut-off day;
-                    clients: the clients dataset; cutoff: the cut-off day (a Timestamp: the last day of data).
-                    cashflow.period_matrix turns the days into 30-day periods ending at the cut-off day.
+                    (client_no, day, category, money_in, money_out, postings, pandas), every day up to the cut-off
+                    day; clients: the clients dataset; cutoff: the cut-off day (a Timestamp: the last day of data).
+    predict_rows(rows)
+                    what the nightly forecast calls. rows: a Polars DataFrame (cashflow.model_rows), one row per
+                    client, category (each category the client has, and TOTAL: all its categories together) and window
+                    (1 = days 1-30 after the cut-off day, 2 = days 31-60, 3 = days 61-90): client_no, category, window,
+                    day_365 ... day_1 (the net cash flow of each of the last input_days days, day_1 the cut-off day).
+                    Returns a numpy array, one row per input row: P10, EV, P90 of the window's net cash flow (SAR).
     predict(daily, clients, cutoff)
-                    the same inputs, for the clients to forecast. Returns a DataFrame with one row per client,
-                    category (each category the client has in daily, and TOTAL: all its categories together) and
-                    window (1 = days 1-30 after the cut-off day, 2 = days 31-60, 3 = days 61-90): the columns
-                    client_no, category, window, p10, ev, p90 (the net cash flow of that window, SAR). forecast()
-                    checks it and applies P10 <= EV <= P90.
-The data scientist's own forecasters go in forecasters.py: the setup notebook creates that file once and never
-overwrites it. lab_compare (notebook forecast_lab) tries forecasters against the production model without touching
-production.
+                    the same from daily flows, for the test, champion / challenger and the lab: DayModel gives it.
+The data scientist's own models go in forecasters.py: the setup notebook creates that file once and never overwrites
+it. lab_compare (notebook forecast_lab) tries them against the production model without touching production.
 """
 import numpy as np
 import pandas as pd
+import polars as pl
 
-from cashflow import (FORECAST_COLUMNS, HORIZONS, PERIOD_DAYS, TOTAL, cutoff_date, finish, period_matrix,
-                      period_series, until)
+from cashflow import (FORECAST_COLUMNS, HORIZONS, INPUT_DAYS, PERIOD_DAYS, cutoff_date, day_matrix, finish,
+                      model_rows, period_matrix, period_series, until)
 
 HOLDOUT = 6                 # the last 6 periods of 30 days are kept aside to test the models
 OUTPUT = ["p10", "ev", "p90"]
 
 
-class RecentAverage:
-    """A simple forecaster with no machine learning, to compare others with (and fall back on). Per client and
-    category, EV = the average net cash flow of the last 3 periods of 30 days (the same for the 3 windows). P10 and
-    P90 = EV -/+ width x the series' standard deviation over the last 12 periods, where fit sets width so that, over
-    the 12 periods before the cut-off, 80% of the actual periods fell inside."""
+class DayModel:
+    """Base of the placeholders: predict (from daily flows) through predict_rows (from the model's input rows), so the
+    test and the nightly forecast run the same code."""
+    params = {"input_days": INPUT_DAYS}
+
+    def predict(self, daily, clients, cutoff):
+        rows = model_rows(*day_matrix(until(daily, cutoff), cutoff, self.params["input_days"]))
+        if rows.is_empty():
+            return pd.DataFrame(columns=FORECAST_COLUMNS)
+        values = self.predict_rows(rows)
+        out = rows.select("client_no", "category", "window").to_pandas()
+        out["window"] = out["window"].astype(int)
+        out[OUTPUT] = values
+        return out[FORECAST_COLUMNS]
+
+    @staticmethod
+    def days(rows):
+        """The day columns of the input rows, as a numpy float32 array (the oldest day first)."""
+        return rows.select(pl.col("^day_.*$")).to_numpy().astype(np.float32, copy=False)
+
+
+class RecentAverage(DayModel):
+    """A simple model with no machine learning, to compare others with (and fall back on). Per client and category,
+    EV = the average net cash flow of the last 3 periods of 30 days (the same for the 3 windows). P10 and P90 = EV -/+
+    width x the series' standard deviation over the last 12 periods, where fit sets width so that, over the 12
+    periods before the cut-off, 80% of the actual periods fell inside."""
     name = "recent_average"
-    params = {"periods": 3, "spread_periods": 12, "coverage": 0.8}
+    params = {"input_days": INPUT_DAYS, "periods": 3, "spread_periods": 12, "coverage": 0.8}
 
     def fit(self, daily, clients, cutoff):
         wide = period_matrix(daily, cutoff)
@@ -52,94 +75,97 @@ class RecentAverage:
         self.width = float(z.quantile(self.params["coverage"])) if len(z) else 1.28
         return self
 
-    def predict(self, daily, clients, cutoff):
-        wide = period_matrix(daily, cutoff)
-        if wide.empty:
-            return pd.DataFrame(columns=FORECAST_COLUMNS)
-        ev = wide.iloc[:, -self.params["periods"]:].mean(axis=1).fillna(0.0)
-        sd = wide.iloc[:, -self.params["spread_periods"]:].std(axis=1).fillna(ev.abs())
-        one = pd.DataFrame({"p10": ev - self.width * sd, "ev": ev, "p90": ev + self.width * sd}).reset_index()
-        return pd.concat([one.assign(window=h) for h in HORIZONS], ignore_index=True)[FORECAST_COLUMNS]
+    def predict_rows(self, rows):
+        s = self.params["spread_periods"]
+        days = self.days(rows)[:, -PERIOD_DAYS * s:]
+        periods = days.reshape(len(days), s, PERIOD_DAYS).sum(axis=2)     # the last 12 periods of 30 days
+        ev = periods[:, -self.params["periods"]:].mean(axis=1)
+        sd = periods.std(axis=1, ddof=1)
+        return np.column_stack([ev - self.width * sd, ev, ev + self.width * sd])
 
 
-class QuantileBoosting:
-    """The production placeholder, until the data scientist's models replace it: 3 small models, one for the EV, one
-    for P10 and one for P90 (scikit-learn gradient boosting; P10 and P90 with the quantile loss, the EV with the median,
-    which is far less thrown off by a few huge periods than the mean). Each of the 3 is ONE model for every category
-    and TOTAL: the category is one of its inputs, so a category with little data learns from the others.
-    Inputs per client and category at a cut-off day: the net cash flow of the last 12 periods of 30 days divided by
-    the series' scale (so small and large clients look alike), the category, how many periods are known, the window
-    and the calendar month of the window's middle (seasonality). Trained on the cut-offs of the last 24 periods, on
-    at most max_rows rows (a random sample beyond that, the same every run). Each row is forecast from its own
-    client's history only."""
-    name = "quantile_boosting"
-    params = {"lags": 12, "cutoffs": 24, "max_iter": 200, "learning_rate": 0.05, "max_rows": 1_000_000}
-    QUANTILES = {"ev": 0.5, "p10": 0.1, "p90": 0.9}
+class DailyCatBoost(DayModel):
+    """The production placeholder (option A), until the data scientist's models replace it: ONE CatBoost model with
+    the MultiQuantile loss gives P10, EV (the median, far less thrown off by a few huge days than the mean) and P90
+    together, for every category, TOTAL and the 3 windows. Its inputs are the rows of cashflow.model_rows: the 365
+    days (divided by the series' scale so small and large clients look alike), the category (as a number) and the
+    window. Nothing else: no sums over 30 days, no calendar.
+    Target in training: the net cash flow of the window (the sum of its 30 days), divided by the same scale. Trained on
+    rolling cut-offs: every 30 days back from the cut-off (up to `cutoffs` of them), each series whose whole year of
+    input is known, each window whose 30 days are known; at most max_clients clients and max_rows rows (random
+    samples beyond that, the same every run). threads: CatBoost's threads when predicting (the nightly forecast sets
+    it from its workers)."""
+    name = "daily_catboost"
+    params = {"input_days": INPUT_DAYS, "cutoffs": 24, "max_clients": 20_000, "max_rows": 200_000,
+              "iterations": 300, "depth": 6, "learning_rate": 0.1}
+    QUANTILES = (0.1, 0.5, 0.9)          # the model's 3 outputs, in this order: P10, EV, P90
+    threads = -1
 
-    def _rows(self, wide, p, h):
-        """Inputs at period position p (the cut-off) for window h, and each series' scale."""
-        last = wide.iloc[:, max(0, p - self.params["lags"] + 1):p + 1]
-        scale = last.abs().mean(axis=1).fillna(0).clip(lower=100.0)
-        X = last.div(scale, axis=0).fillna(0.0)
-        X.columns = [f"lag_{len(X.columns) - i}" for i in range(len(X.columns))]
-        X = X.reindex(columns=[f"lag_{k}" for k in range(self.params["lags"], 0, -1)], fill_value=0.0)
-        category = pd.Categorical(wide.index.get_level_values("category"), categories=self.categories)
-        X["category"] = np.where(category.codes >= 0, category.codes, np.nan)      # a new category: unknown
-        X["periods_known"] = last.notna().sum(axis=1).values
-        X["window"] = h
-        X["calendar_month"] = (wide.columns[p] + pd.Timedelta(days=PERIOD_DAYS * h - PERIOD_DAYS // 2)).month
-        return X, scale
+    def new_model(self):
+        from catboost import CatBoostRegressor
+        alphas = ",".join(str(q) for q in self.QUANTILES)
+        return CatBoostRegressor(loss_function=f"MultiQuantile:alpha={alphas}", iterations=self.params["iterations"],
+                                 depth=self.params["depth"], learning_rate=self.params["learning_rate"],
+                                 random_seed=0, verbose=False, allow_writing_files=False)
+
+    def _inputs(self, days, codes, window):
+        """The model's inputs, and each row's scale."""
+        scale = np.maximum(np.abs(days).mean(axis=1) * PERIOD_DAYS, 100.0).astype(np.float32)
+        return np.column_stack([days / scale[:, None], codes, window]).astype(np.float32), scale
+
+    def _codes(self, categories):
+        """Each category as a number (its place among the categories seen in training; empty if new)."""
+        code = {c: i for i, c in enumerate(self.categories)}
+        return pl.Series(categories, dtype=pl.Utf8).replace_strict(code, default=None, return_dtype=pl.Float32)\
+            .fill_null(np.nan).to_numpy()
 
     def fit(self, daily, clients, cutoff):
-        return self.fit_periods(period_matrix(daily, cutoff))
-
-    def predict(self, daily, clients, cutoff):
-        return self.predict_periods(period_matrix(daily, cutoff))
-
-    def fit_periods(self, wide):
-        """fit, from the net cash flow per 30-day period (cashflow.period_matrix)."""
-        self.categories = sorted(set(wide.index.get_level_values("category")))
-        n = wide.shape[1]
-        blocks = [(p, h) for p in range(max(0, n - 1 - self.params["cutoffs"]), n - 1) for h in HORIZONS if p + h < n]
-        keep = min(1.0, self.params["max_rows"] / max(1, len(wide) * len(blocks)))
-        rng, Xs, ys = np.random.default_rng(0), [], []
-        for p, h in blocks:
-            X, scale = self._rows(wide, p, h)
-            y = wide.iloc[:, p + h] / scale
-            ok = (y.notna() & wide.iloc[:, p].notna()).values & (rng.random(len(y)) < keep)
-            Xs.append(X[ok])
-            ys.append(y[ok])
-        X, y = pd.concat(Xs), pd.concat(ys)
-        self.models = {column: self.new_model(q).fit(X, y) for column, q in self.QUANTILES.items()}
+        days, rng = self.params["input_days"], np.random.default_rng(0)
+        known = until(daily, cutoff)
+        if known.empty:
+            raise ValueError(f"{self.name}: no daily flows up to {cutoff:%Y-%m-%d} to train on")
+        numbers = known["client_no"].astype(str).unique()
+        if len(numbers) > self.params["max_clients"]:
+            numbers = rng.choice(np.sort(numbers), self.params["max_clients"], replace=False)
+            known = known[known["client_no"].astype(str).isin(set(numbers))]
+        first = pd.to_datetime(known.groupby("client_no")["day"].min())
+        span = (cutoff - first.min()).days + 1
+        keys, matrix = day_matrix(known, cutoff, span)                   # every day, the oldest first
+        self.categories = sorted(set(keys["category"]))
+        codes = self._codes(keys["category"])
+        start = span - 1 - (cutoff - first.reindex(keys["client_no"].to_list())).dt.days.to_numpy()
+        blocks = []                      # (the cut-off's column, window, the series whose input year is known)
+        for k in range(1, self.params["cutoffs"] + 1):
+            end = span - 1 - PERIOD_DAYS * k
+            if end - days + 1 < 0:
+                break
+            rows = np.flatnonzero(start <= end - days + 1)
+            blocks += [(end, h, rows) for h in HORIZONS if k >= h and len(rows)]
+        total = sum(len(rows) for _, _, rows in blocks)
+        if not total:
+            raise ValueError(f"{self.name}: not enough history to train: a series needs {days} days of input and the "
+                             f"{PERIOD_DAYS} days after them (daily flows from {first.min():%Y-%m-%d} to "
+                             f"{cutoff:%Y-%m-%d})")
+        keep = min(1.0, self.params["max_rows"] / total)
+        Xs, ys = [], []
+        for end, h, rows in blocks:
+            rows = rows[rng.random(len(rows)) < keep]
+            X, scale = self._inputs(matrix[rows, end - days + 1:end + 1], codes[rows], np.full(len(rows), h))
+            Xs.append(X)
+            ys.append(matrix[rows, end + PERIOD_DAYS * (h - 1) + 1:end + PERIOD_DAYS * h + 1].sum(axis=1) / scale)
+        self.model = self.new_model().fit(np.vstack(Xs), np.concatenate(ys))
         return self
 
-    def new_model(self, quantile):
-        """One of the 3 models (EV, P10, P90): scikit-learn gradient boosting with the quantile loss. A subclass can
-        use another algorithm with the same features (the load test's CatBoost, for example)."""
-        from sklearn.ensemble import HistGradientBoostingRegressor
-        return HistGradientBoostingRegressor(loss="quantile", quantile=quantile, max_iter=self.params["max_iter"],
-                                             learning_rate=self.params["learning_rate"],
-                                             categorical_features=["category"], random_state=0)
-
-    def predict_periods(self, wide):
-        """predict, from the net cash flow per 30-day period (cashflow.period_matrix)."""
-        if wide.empty:
-            return pd.DataFrame(columns=FORECAST_COLUMNS)
-        out = []
-        for h in HORIZONS:
-            X, scale = self._rows(wide, wide.shape[1] - 1, h)
-            rows = wide.index.to_frame(index=False).assign(window=h)
-            for column, model in self.models.items():
-                rows[column] = model.predict(X) * scale.values
-            out.append(rows)
-        return pd.concat(out, ignore_index=True)[FORECAST_COLUMNS]
+    def predict_rows(self, rows):
+        X, scale = self._inputs(self.days(rows), self._codes(rows["category"]), rows["window"].to_numpy())
+        return self.model.predict(X, thread_count=self.threads) * scale[:, None]
 
 
 def known_forecasters():
-    """The forecasters Retrain can train, by name: the placeholders (quantile_boosting, recent_average) and those
+    """The forecasters Retrain can train, by name: the placeholders (daily_catboost, recent_average) and those
     listed in FORECASTERS in forecasters.py. Also returns the problem reading forecasters.py, if any (the placeholders
     still work)."""
-    found, problem = {QuantileBoosting.name: QuantileBoosting, RecentAverage.name: RecentAverage}, None
+    found, problem = {DailyCatBoost.name: DailyCatBoost, RecentAverage.name: RecentAverage}, None
     try:
         import forecasters
         for forecaster in forecasters.FORECASTERS:
@@ -150,9 +176,9 @@ def known_forecasters():
 
 
 def new_forecaster(name=None):
-    """A new, untrained forecaster: the one named by the project variable forecaster (default quantile_boosting)."""
+    """A new, untrained forecaster: the one named by the project variable forecaster (default daily_catboost)."""
     import dataiku
-    name = name or dataiku.get_custom_variables().get("forecaster") or QuantileBoosting.name
+    name = name or dataiku.get_custom_variables().get("forecaster") or DailyCatBoost.name
     found, problem = known_forecasters()
     if name not in found:
         raise ValueError(f"No forecaster named {name!r} (project variable forecaster). Known: {', '.join(found)}. "

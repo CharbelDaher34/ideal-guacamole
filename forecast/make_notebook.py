@@ -1,5 +1,6 @@
 """Assemble the notebooks from the files in src/ (edit those, then run: python make_notebook.py):
-build_forecast_project.ipynb (sets up the forecast project), forecast_lab.ipynb (the data scientist's lab),
+build_forecast_project.ipynb (sets up the forecast project), build_load_test_project.ipynb (sets up the load test, a
+project of its own, with the same forecast code), forecast_lab.ipynb (the data scientist's lab),
 daily_flows_viewer.ipynb (reads the daily flows), warehouse_simulator.ipynb (test machine only). A notebook whose files are not in src/
 is skipped: the bank's package has only what build_forecast_project.ipynb needs."""
 import json
@@ -7,8 +8,8 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SRC = HERE / "src"
-RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "final_forecast", "load_test_data",
-           "load_test_run", "load_test_charts"]
+RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "nightly_forecast", "load_forecast_sql"]
+LOAD_TEST_RECIPES = ["make_fake_data", "run_test_plan", "load_test_report"]
 
 
 def code(text):
@@ -52,8 +53,9 @@ write("build_forecast_project.ipynb", [
 # Digital Cash Management Forecast: set up the project
 
 This notebook sets up the Digital Cash Management Forecast in this Dataiku project (it also gives the project
-that name), the way it runs in production. Everything the project writes is a CSV file, except `daily_flows` (Parquet
-files in a folder, for reading speed).
+that name), the way it runs in production. The daily flows and the forecast are Parquet files in folders (for speed),
+the forecast is then loaded into a SQL table, `final_forecast` (`OUTPUT_SQL_CONNECTION`); the logs and small tables
+are CSV files.
 It reads 2 warehouse tables, read-only, and creates or writes nothing in the warehouse: the clients
 (`EDW.DIM_CUSTOMER`) and the daily postings (`EDW.FCT_STATEMENT_ENTRY`), which the staging recipe sums per client,
 day and category in Dataiku. The first run reads each client's whole history; after that, each run reads only the
@@ -65,7 +67,7 @@ connection differs. Names, codes and the categories (a mock list until the bank'
 
 It forecasts, per client, per category and in TOTAL (all categories together), the net cash flow (money in minus
 money out) of each of the next 30, 60 and 90 days after the cut-off day (yesterday: days 1-30, 31-60, 61-90), as
-P10, EV and P90. It builds 4 flow zones, each with an owner (and a 5th, Load test, apart):
+P10, EV and P90, from each client's daily flows of the last 365 days. It builds 4 flow zones, each with an owner:
 
 - **Raw data** and **Staging** (shared): the 2 warehouse tables, read-only, then `clients` (the business clients)
   and `daily_flows` (money in and out per client, day and category): what every model gets. `staging_log` records
@@ -74,20 +76,23 @@ P10, EV and P90. It builds 4 flow zones, each with an owner (and a 5th, Load tes
   **forecaster** the project variable `forecaster` names, tested on the last 6 periods of 30 days, tracked in Dataiku's
   **Experiment Tracking** and deployed as a new **version** of the saved model `cash_forecast`. A champion /
   challenger test activates the new version if it passes the **promotion rules** (project variables `promotion_*`).
-- **Inference** (inference owner): `final_forecast`, the production model's forecast for every active client, made
-  a chunk of clients at a time so it scales to the bank's ~420k clients (every row says which model and which load
-  produced it), the forecast archive, and the inference log (one row per run, with timings and memory).
+- **Inference** (inference owner): the production model's forecast for every active client, one row per client
+  (every row says which model and which load produced it), Polars from start to end: the groups of clients of
+  `daily_flows` run side by side (project variable `inference_workers`), each read (its last months only),
+  prepared, forecast and written on its own into the folder `forecast` (one subfolder per night, kept). Then it is
+  loaded into the SQL table `final_forecast`. The inference log has one row per run, with timings and memory.
 The data scientist tries new forecasters outside the flow, in the notebook `forecast_lab.ipynb` (it never touches
 production), then sets the project variable `forecaster` and runs **Retrain, test and promote**.
 
-- **Load test** (apart from everything else): the scenario **Load test** times the nightly forecast (no real
-  training) on fake data of the same shape (clients, months, postings per month: set in its step 1) with a dummy model, and logs each run in
-  `load_test_log`. It never reads or writes the real data, models or logs.
+The load test is a project of its own (`build_load_test_project.ipynb`, the same code): nothing of it is here.
 
 The zones only meet through three interfaces: **1. the data** (`daily_flows` and `clients`: staging → training, lab
 and inference), **2. the forecaster** (`models.py`: lab → training), **3. the active version of the saved model**
 (training → inference). Until the data scientist's models are ready, the forecaster is a placeholder,
-`quantile_boosting`: 3 small models (EV, P10, P90), each shared by every category, with the category as an input. Two independent scenarios run it:
+`daily_catboost`: ONE CatBoost model that gives P10, EV and P90 together, for every category and the 3 windows. Its
+inputs: the client's net cash flow of each of the last 365 days (one column per day), the category and the window (1,
+2, 3), the rows the nightly forecast builds (`cashflow.model_rows`); the model only predicts (`predict_rows`). Two
+independent scenarios run it:
 **Nightly batch** (inference) and **Retrain, test and promote** (training). Each starts by setting the cut-off day
 (`set_cutoff`: yesterday, or the project variable `cutoff_override`) and checking the warehouse load of that day is
 finished (`check_warehouse_loaded`: a mock for now, to replace with the bank's real check); the staging recipe stops
@@ -107,21 +112,21 @@ database), then this notebook with `EDW_CONNECTION` set to that database's conne
     md("""
 ## 1. Code environment
 
-The recipes need scikit-learn, and MLflow for Dataiku's Experiment Tracking, in an existing code env (`CODE_ENV`
+The recipes need CatBoost (the placeholder model), scikit-learn, and MLflow for Dataiku's Experiment Tracking, in an existing code env (`CODE_ENV`
 above). This notebook does not create it: an admin creates it once. This checks it is there with those packages,
 and otherwise stops with the request to send the admin.
 """),
-    code(read("cells/code_env.py")),
+    code(read("cells/check_code_env.py") + "\n\n" + read("cells/code_env.py")),
     md("""
 ## 2. Code
 
 The project library gets these files, by owner:
 
 - shared: `warehouse.py` (the warehouse tables and columns read, codes, categories, daily sums, cut-off day, warehouse check) and
-  `cashflow.py` (dates, the data interface, days to months, the saved model name)
-- training and lab: `models.py` (the forecaster interface, the placeholder forecasters, the test and its scores) and
+  `cashflow.py` (dates, the daily flows' files, the model's input rows, the saved model name)
+- training and lab: `models.py` (the model interface, the placeholder models, the test and its scores) and
   `tracking.py` (model IDs, Experiment Tracking, saved model versions, promotion rules, champion / challenger)
-- inference: `forecast.py` (the production model, the final forecast table)
+- inference: `forecast.py` (the production model, the nightly forecast in parallel, its SQL load)
 - `forecasters.py`: the data scientist's own forecasters. Written only when it is created: running this notebook
   again never overwrites it.
 
@@ -139,9 +144,10 @@ Each recipe below becomes a Python recipe in the flow.
 ## 3. Build the flow
 
 Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the Python recipes and their
-CSV datasets, the folders `daily_flows` (Parquet files), `experiments` (tracked models) and `forecast_archive`, the
-saved model `cash_forecast`, and the project variables `forecaster` (`quantile_boosting`),
-`inference_clients_per_chunk` (5000) and the promotion rules (`promotion_*`) if they are not set yet, in 4 zones, and the Load test zone.
+datasets (CSV files, and the SQL table `final_forecast`), the folders `daily_flows` (Parquet files), `experiments`
+(tracked models) and `forecast` (Parquet, one subfolder per night), the saved model `cash_forecast`, and the project
+variables `forecaster` (`daily_catboost`), `inference_workers` (4) and the promotion rules (`promotion_*`) if they are
+not set yet, in 4 zones.
 Training (folder `experiments`) and the promotion log are only rebuilt when asked by name, so the nightly batch never
 retrains by accident.
 """),
@@ -151,21 +157,20 @@ retrains by accident.
 
 Builds the daily flows (the whole history, the first time), trains, tests and deploys a model, runs champion / challenger (with no production model yet,
 the first model is promoted, with a warning in promotion_log if its checks fail), then runs the nightly batch:
-forecast, archive, log.
+forecast, log, SQL load.
 """),
-    code(read("cells/first_run.py")),
+    code(read("cells/build_job.py") + "\n\n" + read("cells/first_run.py")),
     md("""
 ## 5. Scenarios
 
-- **Nightly batch**: set the cut-off, add the new days to the daily flows, forecast with the production model,
-  archive it and log the run. It never trains.
+- **Nightly batch**: set the cut-off, add the new days to the daily flows, forecast with the production model and
+  log the run, then load the forecast into the SQL table `final_forecast`. It never trains.
 - **Retrain, test and promote**: set the cut-off, add the new days to the daily flows, train, test and deploy a new model with
   the forecaster the project variable `forecaster` names, champion / challenger with the promotion rules, activate
   it if it passes. It does not forecast: the next Nightly batch uses the new active version.
 
 - **Full rebuild of the daily flows** (run by hand, no trigger): empty `daily_flows` and `staging_log`, then read the
   whole history again. For example after a reversal cancels a posting from a day already staged.
-- **Load test** (run by hand, no trigger): set the numbers in its step 1, run it, read `load_test_log`.
 
 Their triggers (daily at 06:00 and monthly on the 5th, Riyadh time) are created switched off; switch them on
 in production.
@@ -178,6 +183,57 @@ To use another model (for example to roll back), activate its version in the sav
 the Nightly batch. To change when a model is promoted, change the project variables `promotion_*` (no code change).
 """),
     code(read("cells/results.py")),
+])
+
+write_if_present("build_load_test_project.ipynb", "load_test_cells", lambda: [
+    md("""
+# Digital Cash Management Forecast: load test
+
+This notebook sets up the load test in this Dataiku project, a project of its own: it never reads or writes the
+forecast project. It times the nightly forecast on fake data of the same shape as the real daily flows, with the
+forecast project's own code (`cashflow.py`, `models.py`, `forecast.py`: the same files, copied by this notebook).
+
+Two scenarios, two zones, run by hand. Each sets its numbers in its **step 1** (Scenarios > the scenario > Steps >
+1): change them there, then Run.
+
+- **Create the fake data** (zone Data prep, not timed). Step 1: `fake_clients`, `fake_months`,
+  `fake_postings_per_month`, `fake_clients_per_group`. One set of fake daily flows in `load_test_flows`, Parquet files
+  laid out exactly like `daily_flows`. Data of the same size is kept; change a number and run it again to make new data.
+- **Run the load test** (zone Load test). Step 1: `load_test_plan` (one line per test: `test`, a name, and
+  `workers`) and `bank_clients`. Every test, one after the other, on that data, so the number of clients is
+  always the data's. Each test: the
+  placeholder model (`daily_catboost`: one CatBoost model, P10, EV and P90 together, the last 365 days as inputs)
+  fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), then the nightly forecast of
+  every fake client, `workers` groups of clients at a time, as production runs it, then its load into the SQL table
+  `load_test_final`, timed (the forecast, the SQL load, and the share of each step: reading, preparing, model,
+  formatting, writing). Each test runs in its own process: its memory is measured on its own, and a test that fails (out of
+  memory, for example) does not stop the others.
+- **The report**, after each load test: the dashboard **Load test**, and `latest_report.html` in the folder
+  `load_test_report` (one page: what was found, one row per test, the time of each step, the memory, and the time
+  the nightly forecast would take for the bank's clients). Every test of every run: the dataset `load_test_log`.
+
+**How to use it:** in a new empty project, import this notebook (Notebooks > New notebook > Import), fill in
+`CODE_ENV` (and the scenarios' first numbers if you like) and run all cells (Cell > Run All). It sets up the project,
+then (`RUN_NOW`) runs the 2 scenarios and shows the results. Later: change the numbers in step 1 of a scenario, then
+run **Create the fake data** (only if the size changed) and **Run the load test**. Run this notebook again after the
+forecast code changes, so the load test times the new code: it keeps the numbers set on the scenarios.
+"""),
+    code(read("load_test_cells/settings.py")),
+    md("## 1. Code environment, code, flow\n\nChecks the code env has CatBoost, writes the project library, the 3 "
+       "recipes in 2 zones (Data prep: `make_fake_data`; Load test: `run_test_plan`, `load_test_report`) and the 2 "
+       "scenarios, each with its numbers in step 1."),
+    code(read("cells/check_code_env.py")),
+    code(embedded("WAREHOUSE_CODE", SRC / "warehouse.py")),
+    code(embedded("LIBRARY_CODE", SRC / "library_cashflow.py")),
+    code(embedded("MODELS_CODE", SRC / "models.py")),
+    code(embedded("FORECAST_CODE", SRC / "forecast.py")),
+    code(embedded("LOADTEST_CODE", SRC / "loadtest.py")),
+    code("RECIPES = {}"),
+    *[code(embedded(f'RECIPES["{r}"]', SRC / "load_test_recipes" / f"{r}.py")) for r in LOAD_TEST_RECIPES],
+    code(read("load_test_cells/setup.py")),
+    md("## 2. Run the 2 scenarios\n\n**Create the fake data**, then **Run the load test**, each with the numbers of its "
+       "step 1 (with many clients it takes long: the progress shows here)."),
+    code(read("cells/build_job.py") + "\n\n" + read("load_test_cells/run.py")),
 ])
 
 write_if_present("forecast_lab.ipynb", "lab_cells", lambda: [
@@ -223,20 +279,21 @@ One client day by day (what the models see) and its monthly totals.
     md("""
 ## 2. Models to try
 
-A forecaster is a class with `name`, `params` (its settings), `fit(daily, clients, cutoff)` and
-`predict(daily, clients, cutoff)`, which returns one row per client, category (and TOTAL) and window (1, 2, 3: days
-1-30, 31-60, 61-90 after the cut-off day) with `p10`, `ev` and `p90` in SAR (details in `models.py`, project library).
-`cashflow.period_matrix(daily, cutoff)` turns the days into 30-day periods ending at the cut-off day. Compared here:
+A model is a class with `name`, `params` (its settings), `fit(daily, clients, cutoff)` and `predict_rows(rows)`:
+`rows` is a Polars table, one row per client, category (and TOTAL) and window (1, 2, 3: days 1-30, 31-60, 61-90
+after the cut-off day), with `day_365 ... day_1` (the net cash flow of each of the last 365 days); it returns P10, EV
+and P90 for each row (details in `models.py`, project library). Built on `DayModel`, it also gets `predict(daily,
+clients, cutoff)` for the test.
+Compared here:
 
-- `quantile_boosting`: the placeholder in production. 3 small models (scikit-learn gradient boosting on the last 12
-  periods of 30 days): one for the EV, one for P10, one for P90. Each is shared by every category and TOTAL, with the category as
-  an input.
-- `quantile_boosting_by_category`: the other way to split it, defined below: a separate set of 3 models for each
-  category and TOTAL, each trained only on its own category.
+- `daily_catboost`: the placeholder in production. ONE CatBoost model (MultiQuantile loss) gives P10, EV and P90
+  together; its inputs, one row per client, category (and TOTAL) and window: the net cash flow of each of the last 365
+  days, the category and the window (1, 2, 3).
+- `daily_catboost_deeper`: the same with deeper, more numerous trees, defined below: an example to change.
 - `recent_average`: no machine learning (the average of the last 3 periods of 30 days), and `recent_average_6m` (over
   6 periods, an example in `forecasters.py`)
 
-Change them or add your own, then run the comparison. scikit-learn, pandas and matplotlib are in the code env; other
+Change them or add your own, then run the comparison. CatBoost, scikit-learn, pandas and matplotlib are in the code env; other
 packages need the admin.
 """),
     code(read("lab_cells/forecasters_to_try.py")),
@@ -246,13 +303,13 @@ packages need the admin.
 ## 3. Put one in production
 
 1. Copy its class into `forecasters.py` (project library) with the imports it needs (for example
-   `import pandas as pd`, `from cashflow import FORECAST_COLUMNS, HORIZONS, TOTAL, period_matrix`) and add it to
+   `import pandas as pd`, `from models import DailyCatBoost`) and add it to
    `FORECASTERS`. The setup notebook never overwrites that file.
 2. Set the project variable `forecaster` to its name.
 3. Run the scenario **Retrain, test and promote**. Champion / challenger promotes it only if it passes the
    promotion rules (project variables `promotion_*`) against the production model on the same 6 periods; the next
    Nightly batch forecasts with it.
-4. To stop training it, set `forecaster` back to `quantile_boosting`. To use an earlier model now, activate its
+4. To stop training it, set `forecaster` back to `daily_catboost`. To use an earlier model now, activate its
    version in the saved model `cash_forecast`.
 """),
 ], kernel={"display_name": "Python (env cashflow_forecast)", "language": "python",    # the code env's own kernel
@@ -299,15 +356,15 @@ write_if_present("daily_flows_viewer.ipynb", "viewer_cells", lambda: [
 
 Reads the Parquet files of `daily_flows` (what staging writes and every model gets: one row per client, day and
 category with `money_in`, `money_out` and `postings`) and shows them. It only reads: nothing here changes the
-project. Set `FOLDER` to `load_test_flows` to look at the load test's fake data instead.
+project. In the load test project (import it there), set `FOLDER` to `load_test_flows` to look at its fake data.
 
-**Kernel:** the project's code env (the setup's `CODE_ENV`, which has pyarrow), like `forecast_lab.ipynb`.
+**Kernel:** the project's code env (the setup's `CODE_ENV`, which has polars), like `forecast_lab.ipynb`.
 """),
     code(read("viewer_cells/settings.py")),
     code(read("viewer_cells/setup.py")),
-    md("## 1. Files\n\nEach Parquet file of the current version and its size."),
+    md("## 1. Files\n\nOne Parquet file per group of clients and month: rows per month, and the first files."),
     code(read("viewer_cells/files.py")),
-    md("## 2. Summary\n\nRows, clients, postings and money per category, over the first `SUMMARY_FILES` files."),
+    md("## 2. Summary\n\nRows, clients, postings and money per category, over the first `SUMMARY_GROUPS` groups of clients."),
     code(read("viewer_cells/summary.py")),
     md("## 3. Sample rows\n\nThe columns and the first rows of the first file."),
     code(read("viewer_cells/sample.py")),

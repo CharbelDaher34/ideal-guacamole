@@ -1,12 +1,12 @@
 # Digital Cash Management Forecast: run it at the bank
 
-Forecasts, for every active business client, the net cash flow of the next 30, 60 and 90 days (from all the data up
-to yesterday), per category and in TOTAL,
+Forecasts, for every active business client, the net cash flow of the next 30, 60 and 90 days (from the client's
+daily flows of the last 365 days up to yesterday), per category and in TOTAL,
 as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/how_it_works.md).
 
 ## Before you start (ask once)
 
-1. **A Python code env** named `cashflow_forecast` (Python 3.9 or later) with `scikit-learn` and `mlflow==2.22.0`.
+1. **A Python code env** named `cashflow_forecast` (Python 3.9 or later) with `polars`, `catboost`, `scikit-learn` and `mlflow==2.22.0`.
    Only a Dataiku admin can create it. The setup notebook checks it and, if something is missing, prints the request
    to send the admin.
 2. **A read-only database connection** to the warehouse (Oracle), usable by your group, for example `EDW`. The
@@ -43,8 +43,9 @@ You only need `build_forecast_project.ipynb`: it holds all the code and creates 
    | `EDW_SCHEMA` | **input**: the schema of `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` | `"EDW"` |
    | `HISTORY_MONTHS` | **input**: months of postings read the first time, up to yesterday; `-1` reads everything. Under 18 months, the setup only stages the data (training needs 18) | for example `24`, or `3` to test fast |
    | `CLIENTS_LIMIT` | **input**: how many business clients to read (the lowest customer numbers); `-1` all | `-1`, or for example `1000` to test fast |
-   | `OUTPUT_CONNECTION` | **output**: where the project writes its datasets (tables) | `"filesystem_managed"` |
-   | `OUTPUT_FOLDER_CONNECTION` | **output**: where it writes its folders (files: `daily_flows`, models, archive) | `"filesystem_folders"` |
+   | `OUTPUT_SQL_CONNECTION` | **output**: the database the forecast goes to, the table `final_forecast` (a connection you may write into, never the warehouse) | your output database |
+   | `OUTPUT_CONNECTION` | **output**: where the project writes its other datasets (CSV: clients, logs) | `"filesystem_managed"` |
+   | `OUTPUT_FOLDER_CONNECTION` | **output**: where it writes its folders (Parquet: `daily_flows`, `forecast`; models) | `"filesystem_folders"` |
    | `CODE_ENV` | the Python code env | for example `"cashflow_forecast"` |
 
    The project reads the warehouse through SQL only: there is no CSV input.
@@ -66,7 +67,6 @@ The test-machine notebook `warehouse_simulator.ipynb` is not part of the bank's 
 | **Nightly batch** | daily, 06:00 | reads the new days, forecasts every active client with the production model |
 | **Retrain, test and promote** | monthly, on the 5th | trains a new model and activates it only if it passes the promotion rules |
 | **Full rebuild of the daily flows** | by hand | reads the history again (the last `HISTORY_MONTHS` months) |
-| **Load test** | by hand | times the nightly forecast on fake data (zone Load test only, never the real data); see below |
 
 **To follow a long run:** the setup notebook prints progress lines while it runs (rows read of the total, %, about how long is left). For a scenario, open its job (Jobs) → Log and search `PROGRESS`.
 
@@ -83,7 +83,8 @@ The test-machine notebook `warehouse_simulator.ipynb` is not part of the bank's 
 | `staging_log` FAILED: "the warehouse load of <day> looks late" | wait for the warehouse load, then run the Nightly batch again |
 | "run the scenario Full rebuild" | run **Full rebuild of the daily flows**, then the Nightly batch |
 | Staging looks stuck | Jobs → the job → Log, search `PROGRESS`. `no row yet, the warehouse is still running the query` = Oracle is still working on it: the line above shows the exact SQL, to give the DBA. The row count going up slowly = rows are arriving, it's just long |
-| `inference_log` FAILED | read its `error`; `final_forecast` still holds the previous forecast |
+| `inference_log` FAILED | read its `error`; `final_forecast` and the folder `forecast` still hold the previous forecast |
+| The Nightly batch's last step (SQL load) FAILED | the forecast is complete in the folder `forecast`: fix the database, then build `final_forecast` alone |
 | "No production model yet" | run **Retrain, test and promote** |
 | The setup stops on the code env | send the admin the request it printed |
 | The setup says "Cannot read EDW.<table>" | check `EDW_CONNECTION`, `EDW_SCHEMA`, the table's columns, and that the connection's user may read it |
@@ -95,47 +96,49 @@ The test-machine notebook `warehouse_simulator.ipynb` is not part of the bank's 
 
 | Variable | Default | What it does |
 |---|---|---|
-| `forecaster` | `quantile_boosting` | the model Retrain trains |
+| `forecaster` | `daily_catboost` | the model Retrain trains |
 | `promotion_min_coverage`, `promotion_max_coverage` | 0.70, 0.90 | promotion rule: P10–P90 coverage range |
 | `promotion_beat_simple_guess` | true | promotion rule: must beat "same as the last 30 days" |
 | `promotion_min_gain` | 0.0 | promotion rule: how much better than production |
-| `inference_clients_per_chunk` | 5000 | clients forecast at a time: bigger is faster but needs more memory |
+| `inference_workers` | 4 | groups of clients forecast side by side: more is faster (up to the server's cores) but needs more memory |
 | `history_months`, `clients_limit` | from `HISTORY_MONTHS`, `CLIENTS_LIMIT` | set by the setup; to change them, run the setup again, then **Full rebuild** |
 | `cutoff_override` | empty | forecast from another day's data (YYYY-MM-DD) instead of yesterday |
 
 
-## Load test
+## Load test (a project of its own)
 
-Times the nightly forecast on fake data in its own zone, **Load test**. No real training: the model is fitted on 2
-clients only, since only the forecast's time is measured. It never reads or writes the real data, models or logs.
+Times the nightly forecast on fake data, in a separate project, so it never touches this one. It runs the same code
+(`cashflow.py`, `models.py`, `forecast.py`, copied by its setup notebook) with the placeholder model fitted on 2
+clients only: its forecasts mean nothing, its prediction time is real.
 
-1. **Scenarios → Load test → Steps → 1. Set the load test numbers**, change the values, Save:
+1. **Set it up:** in a new empty project, import `build_load_test_project.ipynb`, fill in `CODE_ENV`, and run all
+   cells. It sets up the project, then runs the 2 scenarios' jobs once and shows the results.
+2. **Two scenarios, two zones.** Each sets its numbers in its **step 1** (Scenarios → the scenario → Steps → 1):
+   change them there, Save, then Run. Running the setup notebook again keeps them.
 
-   | Variable | Default | What it is |
+   | Scenario (zone) | What it does | Step 1: its numbers |
    |---|---|---|
-   | `loadtest_clients` | 1000 | fake clients (for example 420000 for the bank's size) |
-   | `loadtest_months` | 24 | months of history per client |
-   | `loadtest_postings_per_month` | 40 | average postings (transactions) per client and month |
-   | `loadtest_clients_per_chunk` | 5000 | clients forecast at a time |
-   | `loadtest_model` | catboost | `catboost`: real CatBoost trained on 2 clients only (real prediction time, meaningless forecasts); `dummy`: no model; or a forecaster's name (`quantile_boosting`) |
+   | **Create the fake data** (Data prep) | makes one set of fake daily flows, `load_test_flows`; not timed. Same size: kept | `fake_clients` (420000: the bank's size), `fake_months` (at least 16), `fake_postings_per_month`, `fake_clients_per_group` (5000) |
+   | **Run the load test** (Load test) | runs every test of the plan on that data (so on all its clients), then the report | `load_test_plan`: one line per test, `{"test": "a name", "workers": 4}`; `bank_clients`: the report gives the time for this many clients |
 
-2. **Run** the scenario. Progress: the job's log (Jobs → the last job → the recipe → lines starting with `PROGRESS`).
-3. **Results:** the dashboard **Load test** (Dashboards → Load test), updated after each run: seconds per step of
-   each run, speed and memory by number of clients, CSV vs Parquet (seconds to write and read back the forecast), and
-   the last runs. The numbers are in `load_test_log`, one row per run (also the failed ones, with the error): the
-   data size, the seconds of each step, clients per second and the most memory used (`peak_memory_mb`).
-   The dashboard is made again after each run: to change it, copy it first.
+   Each test runs in its own process: its memory is measured on its own, and a test that fails (out of memory, for
+   example) does not stop the others.
+3. **Results:** the dashboard **Load test**, and `latest_report.html` in the folder `load_test_report` (one page:
+   what was found in plain words, one row per test, the time of each step, the memory, and how long the nightly
+   forecast would take for the bank's clients). Every test of every run: `load_test_log` (one row per test, with
+   its `batch_id`).
 
-Running the setup again keeps the numbers set in step 1.
+After the forecast code changes, run `build_load_test_project.ipynb` again so the load test times the new code.
 
 ## Files
 
-The bank's package is `build_forecast_project.ipynb`, `forecast_lab.ipynb`, `daily_flows_viewer.ipynb` and this README. The rest stays in the code repository:
+The bank's package is `build_forecast_project.ipynb`, `build_load_test_project.ipynb`, `forecast_lab.ipynb`, `daily_flows_viewer.ipynb` and this README. The rest stays in the code repository:
 
 | File | What it is |
 |---|---|
 | `src/` | the code the notebooks are built from; edit it, then run `python make_notebook.py` |
 | `forecast_lab.ipynb` | the data scientist's lab (outside the flow): EDA and model comparison; then set `forecaster` and run Retrain |
 | `warehouse_simulator.ipynb` | test machine only: fake warehouse tables in a local test database |
-| `daily_flows_viewer.ipynb` | reads and shows the Parquet files of `daily_flows` (or `load_test_flows`); only reads |
+| `build_load_test_project.ipynb` | sets up the load test, a project of its own (see above) |
+| `daily_flows_viewer.ipynb` | reads and shows the Parquet files of `daily_flows` (or, in the load test project, `load_test_flows`); only reads |
 | `alerts_plan.md` | planned email / Teams alerts (not built) |

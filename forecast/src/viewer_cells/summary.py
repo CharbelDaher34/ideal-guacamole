@@ -1,20 +1,17 @@
-# Totals over the first SUMMARY_FILES files (each client's rows are all in one file), read one file at a time.
-chosen = paths if SUMMARY_FILES in (-1, None) else paths[:SUMMARY_FILES]
-started, parts, clients_read = time.time(), [], 0
-for i, path in enumerate(chosen, 1):
-    d = read_file(path)
-    d["net"] = d["money_in"] - d["money_out"]
-    clients_read += d["client_no"].nunique()
-    parts.append(d.groupby("category").agg(rows=("client_no", "size"), clients=("client_no", "nunique"),
-                                           postings=("postings", "sum"), money_in=("money_in", "sum"),
-                                           money_out=("money_out", "sum"), net=("net", "sum"),
-                                           first_day=("day", "min"), last_day=("day", "max")))
+# Totals over the first SUMMARY_GROUPS groups of clients (each client's rows are all in its group), one group at a time.
+groups = sorted(int(g) for g in manifest["files"])
+chosen = groups if SUMMARY_GROUPS in (-1, None) else groups[:SUMMARY_GROUPS]
+started, parts = time.time(), []
+for i, group in enumerate(chosen, 1):
+    parts.append(read_group(folder, manifest, group).group_by("category").agg(
+        rows=pl.len(), clients=pl.col("client_no").n_unique(), postings=pl.col("postings").sum(),
+        money_in=pl.col("money_in").sum(), money_out=pl.col("money_out").sum(),
+        first_day=pl.col("day").min(), last_day=pl.col("day").max()))
     if i % 10 == 0 or i == len(chosen):
-        print(f"read {i} of {len(chosen)} files ({time.time() - started:.0f} s)")
-by_category = pd.concat(parts).groupby(level=0).agg({"rows": "sum", "clients": "sum", "postings": "sum",
-                                                     "money_in": "sum", "money_out": "sum", "net": "sum",
-                                                     "first_day": "min", "last_day": "max"})
-print(f"{'All' if len(chosen) == len(paths) else f'First {len(chosen)} of {len(paths)}'} files: "
-      f"{by_category['rows'].sum():,} rows, {clients_read:,} clients, {by_category['postings'].sum():,} postings, "
-      f"from {by_category['first_day'].min():%Y-%m-%d} to {by_category['last_day'].max():%Y-%m-%d}")
-display(by_category.round(0).sort_values("rows", ascending=False))
+        print(f"read {i} of {len(chosen)} groups ({time.time() - started:.0f} s)")
+by_category = (pl.concat(parts).group_by("category").agg(
+    pl.col("rows", "clients", "postings", "money_in", "money_out").sum(), pl.col("first_day").min(),
+    pl.col("last_day").max()).with_columns(net=pl.col("money_in") - pl.col("money_out")).sort("rows", descending=True))
+print(f"{'All' if len(chosen) == len(groups) else f'The first {len(chosen)} of {len(groups)}'} groups: "
+      f"{by_category['rows'].sum():,} rows, {by_category['clients'].sum():,} client-categories")
+display(by_category.to_pandas().round(0))
