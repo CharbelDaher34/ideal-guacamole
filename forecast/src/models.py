@@ -305,20 +305,21 @@ def _by_window(tested):
     return per
 
 
-def _record_try(forecaster, tested, production_id):
-    """Record a lab try in Experiment Tracking (experiment cashflow_lab). Returns the run ID."""
+def _record_try(forecaster, tested, production_id, daily, clients, purpose):
+    """Record a lab try in Experiment Tracking (experiment cashflow_lab), with its fingerprint (tracking.describe).
+    Returns the run ID."""
     import tracking
-    params = {"forecaster": forecaster.name, **getattr(forecaster, "params", {}),
-              "cutoff_date": f"{cutoff_date():%Y-%m-%d}", "test_rows": len(tested),
-              "compared_with": production_id or "none"}
+    params = {"test_rows": len(tested), "compared_with": production_id or "none"}
+    about = tracking.describe(forecaster, daily, clients, cutoff_date(), tested, "lab notebook (lab_compare)")
     run_name = f"{forecaster.name}_{pd.Timestamp.now():%Y%m%dT%H%M}"
-    return tracking.log_lab_run(run_name, params, run_metrics(test_results(tested)), forecaster)
+    return tracking.log_lab_run(run_name, params, run_metrics(test_results(tested)), forecaster, about, purpose)
 
 
-def lab_compare(forecasters, record=True):
+def lab_compare(forecasters, record=True, purpose=""):
     """Try several forecasters at once against the production model, on the same test as champion / challenger,
     without touching production. Each forecaster is trained without the last 6 periods of 30 days; each try is
-    recorded in Experiment Tracking (experiment cashflow_lab) unless record is False. Returns a dict:
+    recorded in Experiment Tracking (experiment cashflow_lab) unless record is False, with `purpose` (what the try
+    is for) as a tag. Returns a dict:
         board       one row per model (production first, simple guess last): EV error, P10-P90 coverage, share below
                     P10 and above P90, the decision champion / challenger would take and its reason, the lab run ID
         errors      EV error per window: the simple guess, the production model and each forecaster
@@ -332,7 +333,8 @@ def lab_compare(forecasters, record=True):
     tested = {} if production is None else {"production": production}
     for forecaster in forecasters:
         tested[forecaster.name] = backtest(forecaster, daily, clients, cutoff_date())
-    run_ids = {f.name: _record_try(f, tested[f.name], production_id) for f in forecasters} if record else {}
+    run_ids = ({f.name: _record_try(f, tested[f.name], production_id, daily, clients, purpose) for f in forecasters}
+               if record else {})
     reference = scores(production) if production is not None else None
     board = []
     for name, rows in tested.items():

@@ -259,8 +259,15 @@ saved models or the production model.
    (trained without the last 6 periods of 30 days before the cut-off, tested on them), next to the production model
    and the simple guess (the same as the 30 days before), with the decision champion / challenger would take for each.
    Each try is recorded in Experiment Tracking, experiment `cashflow_lab` (same folder as the production models,
-   `experiments`, but its own experiment); lab tries are never deployed.
+   `experiments`, but its own experiment); lab tries are never deployed. Your own experiments can be recorded there
+   too (`tracking.lab_run`).
 3. **Put one in production.**
+
+**What every run records**, lab and training alike: the data (days, rows, clients, categories, `load_id`), the code
+(tag `forecaster_version`: the same in the lab and in training for the same code and settings; the forecaster's code
+as a file), the package versions (tags `env.*`), who ran it and where, and the test per category and window (files
+`test/`). Training runs also have the tag `status` (candidate, production, rejected, retired) and `lab_runs`: the lab
+runs with the same `forecaster_version`, the experiments behind the model.
 
 **Kernel:** the code env `cashflow_forecast`. If it is not in the kernel list, ask whoever manages it to enable its
 Jupyter support. Meanwhile a forecaster can be tried safely through **Retrain, test and promote**: it goes live
@@ -311,6 +318,11 @@ packages need the admin.
     code(read("lab_cells/compare.py")),
     code(read("lab_cells/compare_chart.py")),
     md("""
+**Your own experiments:** anything you try your own way can be recorded with `tracking.lab_run(name, purpose=...)`:
+the same fingerprint as every run, plus what you record inside.
+"""),
+    code(read("lab_cells/own_experiment.py")),
+    md("""
 ## 3. Put one in production
 
 1. Copy its class into `forecasters.py` (project library) with the imports it needs (for example
@@ -319,9 +331,10 @@ packages need the admin.
 2. Set the project variable `forecaster` to its name.
 3. Run the scenario **Retrain, test and promote**. Champion / challenger promotes it only if it passes the
    promotion rules (project variables `promotion_*`) against the production model on the same 6 periods; the next
-   Nightly batch forecasts with it.
+   Nightly batch forecasts with it. In Experiment Tracking (`cashflow_forecast`) its run shows `status` and, in
+   `lab_runs`, the lab runs it comes from: the class must be the same code, with the same `name` and `params`.
 4. To stop training it, set `forecaster` back to `daily_catboost`. To use an earlier model now, activate its
-   version in the saved model `cash_forecast`.
+   version in the saved model `cash_forecast`, then run `tracking.sync_status()` so the runs' `status` follows.
 """),
 ], kernel={"display_name": "Python (env cashflow_forecast)", "language": "python",    # the code env's own kernel
            "name": "py-dku-venv-cashflow_forecast"})

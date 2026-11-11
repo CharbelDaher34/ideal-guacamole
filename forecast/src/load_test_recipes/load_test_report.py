@@ -2,8 +2,10 @@
 # the same batch). The number of clients is not a setting (it is how many clients the bank has), so each client count
 # is shown on its own, and only the settings (workers, clients per group) are compared, at the same client count:
 #   1. the run: what a test times, the model, the fake data, the machine (CPUs, RAM)
-#   2. one section per client count: a table (one line per setting: forecast, final load, total, memory, the forecast's
-#      main step, compared with the best setting at this client count) and a chart of the total times
+#   2. one section per client count: a table (one line per setting: the forecast's 5 parts in seconds, the forecast,
+#      the final load, the total, memory, compared with the best setting at this client count) and a chart of the
+#      same times. The parts are measured added up over the workers (they run at the same time), so each part is
+#      shown as its share of that work times the forecast's own time: the 5 add up to the forecast.
 #   3. where the forecast's time goes, per setting, at the largest client count
 #   4. each setting's time per 100,000 clients, at each client count
 #   5. the earlier tests, as a table
@@ -31,7 +33,7 @@ PER = 100_000                   # section 4: the time per this many clients
 STEPS = {"seconds_reading": "reading", "seconds_preparing": "preparing", "seconds_model": "model",
          "seconds_formatting": "formatting", "seconds_writing": "writing"}
 STEP_COLORS = ["#2a6f97", "#61a5c2", "#e07a5f", "#f2cc8f", "#81b29a"]
-COLORS = {"forecast": "#2a6f97", "final load": "#e07a5f"}
+FINAL_COLOR = "#7d6b9e"         # the final load, after the forecast's 5 parts (STEP_COLORS)
 NUMBERS = ["test", "workers", "clients", "months", "postings_per_month", "clients_per_group", "seconds_forecast",
            "seconds_sql_load", "peak_memory_mb", "cpus", "ram_gb", *STEPS]
 CELL = "padding:5px 9px;border-bottom:1px solid #ddd;text-align:left"
@@ -83,15 +85,18 @@ def gb(mb):
 
 def setting(t, full=data_varies):
     """A test's setting: 4 workers · 5,000 per group (and its fake data's months and postings when they vary)."""
-    text = f"{int(t['workers'])} workers · {int(t['clients_per_group']):,} per group"
+    workers = int(t["workers"])
+    text = f"{workers} worker{'s' if workers != 1 else ''} · {int(t['clients_per_group']):,} per group"
     if full and pd.notna(t["months"]):
         text += f" · {int(t['months'])} months · {int(t['postings_per_month'])} postings/month"
     return text
 
 
-def main_step(t):
-    steps = t[list(STEPS)].astype(float)
-    return f"{STEPS[steps.idxmax()]} ({steps.max() / steps.sum():.0%})" if steps.sum() > 0 else ""
+def clock_parts(tests):
+    """The forecast's 5 parts in seconds of the clock, one row per test: each part's share of the work (added up over
+    the workers) times the forecast's own time, so they add up to the forecast."""
+    work = tests[list(STEPS)].astype(float)
+    return work.div(work.sum(axis=1).where(lambda total: total > 0), axis=0).mul(tests["seconds_forecast"], axis=0)
 
 
 def table(headers, rows, styles=None):
@@ -161,32 +166,40 @@ sections = []          # (client count, its table's HTML, its chart's PNG or Non
 for clients, tests in run.groupby("clients", sort=True):
     good = tests[tests["status"] == "SUCCESS"]
     best = good["seconds_total"].min() if len(good) else None
+    parts = clock_parts(tests)
     lines, styles = [], {}
-    for i, (_, t) in enumerate(tests.iterrows()):
+    for i, (index, t) in enumerate(tests.iterrows()):
         if t["status"] != "SUCCESS":
-            lines.append([html.escape(setting(t)), failed(t), "", "", "", "", ""])
+            lines.append([html.escape(setting(t)), failed(t)] + [""] * (len(STEPS) + 5))
             continue
         is_best = t["seconds_total"] == best
         if is_best:
             styles[i] = BEST
-        lines.append([html.escape(setting(t)), duration(t["seconds_forecast"]), duration(t["seconds_sql_load"]),
-                      f"<b>{duration(t['seconds_total'])}</b>", gb(t["peak_memory_mb"]), main_step(t),
+        lines.append([html.escape(setting(t)), *[duration(parts.loc[index, c]) for c in STEPS],
+                      f"<b>{duration(t['seconds_forecast'])}</b>", duration(t["seconds_sql_load"]),
+                      f"<b>{duration(t['seconds_total'])}</b>", gb(t["peak_memory_mb"]),
                       "the best here" if is_best else f"{t['seconds_total'] / best - 1:.0%} longer"])
     section = (f"<h3 style='margin:22px 0 2px'>{int(clients):,} clients</h3>"
                f"<p style='{NOTE}'>Each setting with {int(clients):,} fake clients. Compared only with the other "
-               "settings at this client count.</p>"
-               + table(["Setting", "Forecast", "Final load", "Total", "Memory (most used)", "Most of the forecast's time",
-                        "Compared with the best here"], lines, styles))
+               "settings at this client count. The forecast = its 5 parts: reading the daily flows, preparing the "
+               "model's input rows, the model's prediction, formatting one row per client, writing the Parquet files "
+               "(each part: its share of the workers' work × the forecast's time, so they add up to the forecast). "
+               "Then the final load.</p>"
+               + table(["Setting", *[s.capitalize() for s in STEPS.values()], "Forecast", "Final load", "Total",
+                        "Memory (most used)", "Compared with the best here"], lines, styles))
     png = None
     if len(good):
-        fig, ax, names, shown = bar_chart(f"{int(clients):,} clients: the total time per setting, the forecast then "
-                                          "the final load (shorter is better)", good, "seconds")
-        ax.barh(names, shown["seconds_forecast"], color=COLORS["forecast"], label="forecast")
-        ax.barh(names, shown["seconds_sql_load"], left=shown["seconds_forecast"], color=COLORS["final load"],
+        fig, ax, names, shown = bar_chart(f"{int(clients):,} clients: the total time per setting, the forecast's 5 "
+                                          "parts then the final load (shorter is better)", good, "seconds")
+        left = pd.Series(0.0, index=shown.index)
+        for (column, step), color in zip(STEPS.items(), STEP_COLORS):
+            ax.barh(names, parts.loc[shown.index, column].fillna(0), left=left, color=color, label=step)
+            left += parts.loc[shown.index, column].fillna(0)
+        ax.barh(names, shown["seconds_sql_load"], left=shown["seconds_forecast"], color=FINAL_COLOR,
                 label="final load")
         for y, total in enumerate(shown["seconds_total"]):
             ax.text(total, y, f"  {duration(total)}", va="center", fontsize=9)
-        ax.legend(ncol=2, loc="lower left", bbox_to_anchor=(0, 1.0), fontsize=8, frameon=False)
+        ax.legend(ncol=6, loc="lower left", bbox_to_anchor=(0, 1.0), fontsize=8, frameon=False)
         png = figure(fig, f"{int(clients)}_clients")
     sections.append((int(clients), section, png, len(tests)))
 

@@ -2,8 +2,9 @@
 # production recipe trained again: when the production model was trained on the same cut-off day, their scores match
 # (a check that the test is the same).
 RECORD = True       # record each try in Experiment Tracking (experiment cashflow_lab)
+PURPOSE = "deeper trees vs the production recipe"      # what these tries are for: a tag on each run
 result = lab_compare([DailyCatBoost(), DailyCatBoostDeeper(), RecentAverage(), RecentAverage6()],
-                     record=RECORD)
+                     record=RECORD, purpose=PURPOSE)
 print("Net cash flow per client, category and TOTAL. EV error: lower is better. P10-P90 coverage: aim 80%.")
 display(result["board"])
 print("EV error per window (ALL: together):")

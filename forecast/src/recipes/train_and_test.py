@@ -4,6 +4,8 @@
 #   backtest: trained without the last 6 periods of 30 days, then tested on them (models.backtest, test_results)
 #   final: trained on everything up to the cut-off, deployed as version <model ID> of the saved model cash_forecast
 #   (not active: the promotion activates it)
+# The run also records its fingerprint (tracking.describe: the data, the code, the package versions, where it ran,
+# the test per category and window), the status candidate, and the lab runs of the same code and settings.
 import time
 
 import dataiku
@@ -11,7 +13,7 @@ import pandas as pd
 
 from cashflow import MIN_TRAINING_MONTHS, cutoff_date, read_daily, read_dataset, until
 from models import backtest, new_forecaster, run_metrics, test_results
-from tracking import log_model, new_model_id
+from tracking import describe, log_model, new_model_id
 
 started = time.time()
 
@@ -40,10 +42,9 @@ model_id = new_model_id(cutoff)
 results = test_results(tested)
 results.insert(0, "model_id", model_id)
 metrics = run_metrics(results)
-params = {"forecaster": final.name, **getattr(final, "params", {}), "cutoff_date": f"{cutoff:%Y-%m-%d}",
-          "load_id": dataiku.get_custom_variables().get("load_id", ""), "daily_rows": len(daily),
-          "clients": daily["client_no"].nunique(), "test_rows": len(tested)}
-log_model(model_id, params, metrics, backtested, final)
+params = {"test_rows": len(tested)}
+about = describe(final, daily, clients, cutoff, tested, "Retrain scenario (recipe train_and_test)")
+log_model(model_id, params, metrics, backtested, final, about)
 print(f"Model {model_id} ({final.name}): EV error {metrics['wape']:.1%} (simple guess {metrics['wape_baseline']:.1%}), "
       f"coverage {metrics['coverage_p10_p90']:.1%}")
 
