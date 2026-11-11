@@ -2,96 +2,94 @@
 forecast project on fake data of the same shape, with the same code: cashflow.py, models.py and forecast.py are copies
 of the forecast project's, made by the same setup files. Nothing here reads or writes the forecast project.
 
-Zone Data prep, scenario "Create the fake data" (recipe make_fake_data, not timed): one set of fake daily flows in
-the folder load_test_flows, laid out like daily_flows (one file per group of clients and month), of the size its
-step 1 sets (data_size):
-    fake_clients                 how many fake clients
-    fake_months                  months of daily flows per client up to the day they are made (at least MIN_MONTHS)
-    fake_postings_per_month      the average number of postings per client and month
-    fake_clients_per_group       clients per group (production: cashflow.CLIENTS_PER_GROUP)
-Zone Load test, scenario "Run the load test" (recipe run_test_plan): every test of the test plan (load_test_plan, set
-by its step 1) on that data, so the number of clients is always the data's. Each test:
-    test                 a name, for the report
+One scenario, "Run the load test". Its step 1 sets a list of tests, run one after the other in one go (step1_tests):
+    tests: [{"clients": ..., "months": ..., "postings_per_month": ..., "clients_per_group": ..., "workers": ...}, ...]
+each with every number:
+    clients              how many fake clients
+    months               months of daily flows per client up to the day they are made (at least MIN_MONTHS)
+    postings_per_month   the average number of postings per client and month
+    clients_per_group    clients per group (production: cashflow.CLIENTS_PER_GROUP)
     workers              groups of clients forecast at a time (production: the project variable inference_workers)
-fits the placeholder model (models.DailyCatBoost, option A) on 2 clients only (its forecasts mean nothing, its
-prediction time is real), runs the nightly forecast of every fake client (forecast.forecast_all) into the folder
-load_test_forecast, then loads it into the SQL table load_test_final (forecast.load_to_sql), timed step by step
-(run_test), in its own process (in_own_process)."""
+Zone Data prep (recipe make_fake_data, not timed): the fake daily flows of each size listed (the first 4 numbers) in
+load_test_flows, one subfolder per size (size_path), each laid out like daily_flows (one file per group of clients and
+month), made only when not there yet; sizes no longer listed are removed (prepare_data).
+Zone Load test (recipe run_load_test, then load_test_report): each test on its size's data: the placeholder model
+(models.DailyCatBoost) fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), the nightly
+forecast of every fake client (forecast.forecast_all) into the folder load_test_forecast, then its load into the SQL
+table load_test_final (forecast.load_to_sql), timed (run_test), in its own process (in_own_process)."""
 import json
 import multiprocessing
+import os
 import time
 import traceback
 
 import numpy as np
 import pandas as pd
 
-from cashflow import INPUT_DAYS, PERIOD_DAYS, Progress, client_groups, whole_number, write_daily
+from cashflow import INPUT_DAYS, PERIOD_DAYS, Progress, client_groups, local_path, whole_number, write_daily
 from warehouse import CATEGORY_OF_TYPE, COLUMNS, OTHER
 
+SCENARIO = "Run the load test"
 FLOWS = "load_test_flows"         # folder: the fake daily flows, laid out like daily_flows
 OUTPUT = "load_test_forecast"     # folder: the forecast, like the folder forecast
 SQL = "load_test_final"           # SQL table: the forecast loaded, like final_forecast
 MIN_MONTHS = -(-(INPUT_DAYS + PERIOD_DAYS * 3) // PERIOD_DAYS)    # a year of input and 3 windows: 16 months
-SIZE = {"clients": "fake_clients", "months": "fake_months", "postings_per_month": "fake_postings_per_month",
-        "clients_per_group": "fake_clients_per_group"}
-CREATE, RUN = "Create the fake data", "Run the load test"         # the 2 scenarios
+SIZE = ("clients", "months", "postings_per_month", "clients_per_group")     # the fake data's size
+TEST = SIZE + ("workers",)                                                  # the numbers of one test
 
 
-def scenario_numbers(scenario, names):
-    """The numbers set in step 1 of the scenario (a define-variables step), by name: the scenario's variables when it
-    runs; otherwise (a build from the Flow, or the setup notebook) read from its step 1, so they are always the same."""
+def check(test, n=1):
+    """One test of step 1 (TEST: whole numbers, months at least MIN_MONTHS), checked. n: its place in the list."""
+    if not isinstance(test, dict):
+        raise ValueError(f"test {n} must be an object {{\"clients\": ..., ...}}: set it in step 1 of the scenario "
+                         f"{SCENARIO}")
+    checked = {}
+    for name in TEST:
+        checked[name] = whole_number(name, test.get(name))
+        if checked[name] is None:
+            raise ValueError(f"test {n}: {name} must be a whole number (1 or more): set it in step 1 of the scenario "
+                             f"{SCENARIO}")
+    if checked["months"] < MIN_MONTHS:
+        raise ValueError(f"test {n}: months is {checked['months']}: it must be at least {MIN_MONTHS} (a year of input, "
+                         f"{INPUT_DAYS} days, and the 3 windows after it)")
+    return checked
+
+
+def check_tests(tests):
+    """The list of tests of step 1, each checked."""
+    if not isinstance(tests, list) or not tests:
+        raise ValueError(f"tests must be a list of tests, [{{\"clients\": ..., ...}}, ...]: set it in step 1 of the "
+                         f"scenario {SCENARIO}")
+    return [check(test, n) for n, test in enumerate(tests, 1)]
+
+
+def step1_tests():
+    """The tests set in step 1 of the scenario, checked: read from its settings, so they are the same whether the
+    scenario runs, a recipe is built from the Flow or the setup notebook runs it."""
     import dataiku
-    variables = dataiku.get_custom_variables()
-    if all(n in variables for n in names):
-        return {n: variables[n] for n in names}
     project = dataiku.api_client().get_default_project()
     ids = {s["name"]: s["id"] for s in project.list_scenarios()}
-    steps = (project.get_scenario(ids[scenario]).get_settings().get_raw()["params"].get("steps", [])
-             if scenario in ids else [])
+    steps = (project.get_scenario(ids[SCENARIO]).get_settings().get_raw()["params"].get("steps", [])
+             if SCENARIO in ids else [])
     found = steps[0]["params"].get("variables", {}) if steps and steps[0].get("type") == "define_vars" else {}
-    return {n: found.get(n, variables.get(n)) for n in names}
+    return check_tests(found.get("tests"))
 
 
-def data_size(variables):
-    """The size of the fake data to make (step 1 of the scenario Create the fake data), checked."""
-    size = {}
-    for key, name in SIZE.items():
-        size[key] = whole_number(name, variables.get(name))
-        if size[key] is None:
-            raise ValueError(f"{name} must be a whole number (1 or more): set it in step 1 of the scenario Create the "
-                             "fake data, and run the scenario (not the recipe alone)")
-    if size["months"] < MIN_MONTHS:
-        raise ValueError(f"fake_months is {size['months']}: it must be at least {MIN_MONTHS} (a year of input, "
-                         f"{INPUT_DAYS} days, and the 3 windows after it)")
-    return size
+def size_path(test):
+    """The subfolder of load_test_flows holding the fake data of a test's size."""
+    return (f"/{test['clients']}_clients_{test['months']}_months_{test['postings_per_month']}_postings_"
+            f"{test['clients_per_group']}_per_group")
 
 
-def read_plan(value):
-    """The test plan (load_test_plan, step 1 of the scenario Run the load test: a list, or its JSON text), checked."""
-    try:
-        plan = json.loads(value) if isinstance(value, str) else value
-    except ValueError as e:
-        raise ValueError(f"load_test_plan is not valid JSON ({e})") from None
-    if not isinstance(plan, list) or not plan or not all(isinstance(t, dict) for t in plan):
-        raise ValueError("load_test_plan must be a list of tests, each {\"test\": \"a name\", \"workers\": 4}: set it "
-                         "in step 1 of the scenario Run the load test, and run the scenario (not the recipe alone)")
-    tests = [{"test": str(t.get("test", "")).strip() or f"test {n}",
-              "workers": whole_number(f"workers of test {n}", t.get("workers"))} for n, t in enumerate(plan, 1)]
-    if any(t["workers"] is None for t in tests):
-        raise ValueError("Each test of load_test_plan needs workers: a whole number (1 or more)")
-    if len({t["test"] for t in tests}) != len(tests):
-        raise ValueError(f"Give each test of load_test_plan its own name: {[t['test'] for t in tests]}")
-    return tests
-
-
-def data_info():
-    """What fake data is in load_test_flows (its data.json: size, cut-off day, rows, MB), or None if none yet."""
+def data_info(test):
+    """What fake data of this test's size is in load_test_flows (its data.json: size, cut-off day, rows, MB), or
+    None."""
     import dataiku
-    folder = dataiku.Folder(FLOWS)
-    if "/data.json" not in folder.list_paths_in_partition():
+    path = local_path(dataiku.Folder(FLOWS), f"{size_path(test)}/data.json")
+    if not os.path.exists(path):
         return None
-    with folder.get_download_stream("data.json") as stream:
-        return json.loads(stream.read())
+    with open(path) as f:
+        return json.load(f)
 
 
 def in_own_process(function, *args):
@@ -132,17 +130,18 @@ def fake_clients(n):
 
 
 def fake_data(wanted, cutoff):
-    """Zone Data prep: makes sure load_test_flows holds fake daily flows of the size `wanted` (data_size): kept when
-    they are already there (whatever their cut-off day), else made again up to `cutoff`, replacing the earlier ones.
-    Returns what is there (data.json). Each client gets its own rate around the average (a few busy clients, many
-    quiet ones), and 10% of them a shorter history, so some get NOT_ENOUGH_HISTORY, as in production."""
+    """Zone Data prep: the fake daily flows of the size `wanted` (SIZE) in their subfolder of load_test_flows
+    (size_path): kept when they are already there (whatever their cut-off day), else made up to `cutoff`. Returns what
+    is there (data.json). Each client gets its own rate around the average (a few busy clients, many quiet ones), and 10% of
+    them a shorter history, so some get NOT_ENOUGH_HISTORY, as in production."""
     import dataiku
     started = time.time()
-    info = data_info()
-    if info and {k: info.get(k) for k in wanted} == wanted:
-        print(f"PROGRESS fake data: already there ({wanted}, up to {info['cutoff']}): kept. Change one of these numbers "
-              "to make it again", flush=True)
+    wanted, prefix = {k: wanted[k] for k in SIZE}, size_path(wanted)
+    info = data_info(wanted)
+    if info:
+        print(f"PROGRESS fake data {prefix[1:]}: already there (up to {info['cutoff']}): kept", flush=True)
         return info
+    folder = dataiku.Folder(FLOWS)
     clients, months, postings = wanted["clients"], wanted["months"], wanted["postings_per_month"]
     groups = max(1, -(-clients // wanted["clients_per_group"]))
     days = months * PERIOD_DAYS
@@ -151,7 +150,7 @@ def fake_data(wanted, cutoff):
     group_of = client_groups(numbers, groups).to_numpy()
     rng = np.random.default_rng(7)
     totals = {"postings": 0, "rows": 0}
-    print(f"PROGRESS fake data: {clients:,} clients ({groups:,} groups) x {months} months x about {postings} postings "
+    print(f"PROGRESS fake data {prefix[1:]}: {clients:,} clients ({groups:,} groups) x {months} months x about {postings} postings "
           f"a month = about {clients * months * postings:,} postings, up to {cutoff:%Y-%m-%d}", flush=True)
 
     def parts():
@@ -184,31 +183,43 @@ def fake_data(wanted, cutoff):
                                 "postings": daily["postings"].to_numpy()})
         progress.finish()
 
-    manifest = write_daily(parts(), groups, FLOWS)
-    folder = dataiku.Folder(FLOWS)
+    manifest = write_daily(parts(), groups, FLOWS, prefix=prefix)
     info = {**wanted, "groups": groups, "cutoff": f"{cutoff:%Y-%m-%d}", "postings": totals["postings"],
             "daily_rows": manifest["rows"], "files": sum(len(m) for m in manifest["files"].values()),
             "data_mb": round(sum(folder.get_path_details(p).get("size", 0)
-                                 for p in folder.list_paths_in_partition()) / 1e6, 1),
+                                 for p in folder.list_paths_in_partition() if p.startswith(prefix + "/")) / 1e6, 1),
             "seconds_generating": round(time.time() - started, 1)}
-    with folder.get_writer("data.json") as writer:
+    with folder.get_writer(f"{prefix}/data.json") as writer:
         writer.write(json.dumps(info).encode())
     print(f"PROGRESS fake data: done in {info['seconds_generating']:.0f} s: {info['postings']:,} postings, "
           f"{info['daily_rows']:,} daily rows, {info['files']:,} files ({info['data_mb']} MB)", flush=True)
     return info
 
 
+def prepare_data(tests, cutoff):
+    """Zone Data prep: the fake data of every size the tests use (fake_data), the sizes no longer listed (and the
+    files of earlier versions) removed first, to free the disk. Returns {size_path: data.json}."""
+    import dataiku
+    sizes = {size_path(t): t for t in tests}
+    folder = dataiku.Folder(FLOWS)
+    for path in folder.list_paths_in_partition():
+        if "/" + path.split("/")[1] not in sizes:
+            folder.delete_path(path)
+    return {prefix: fake_data(test, cutoff) for prefix, test in sizes.items()}
+
+
 def run_test(test, info):
-    """Zone Load test: one test on the fake data in load_test_flows (info: its data.json): fit option A on 2 clients,
-    forecast every fake client as the nightly forecast does, then load the forecast into SQL. Returns the values for
-    load_test_log."""
+    """Zone Load test: one test, on the fake data of its size in load_test_flows (info: its data.json): fit option A
+    on 2 clients, forecast every fake client as the nightly forecast does with `workers`, then load the forecast into
+    SQL. Returns the values for load_test_log."""
     from cashflow import read_group, read_manifest
     from forecast import STEPS, forecast_all, load_to_sql
     from models import DailyCatBoost
     cutoff = pd.Timestamp(info["cutoff"])
     print("PROGRESS fitting the model on 2 clients only (no real training: only the forecast is timed)", flush=True)
     ticked = time.time()
-    folder, manifest = read_manifest(FLOWS)
+    prefix = size_path(test)
+    folder, manifest = read_manifest(FLOWS, prefix)
     daily = read_group(folder, manifest, next(iter(manifest["files"]))).to_pandas()          # one group of clients
     two = daily.groupby("client_no")["day"].min().nsmallest(2).index                       # its 2 oldest clients
     model = DailyCatBoost().fit(daily[daily["client_no"].isin(two)], None, cutoff)
@@ -217,11 +228,11 @@ def run_test(test, info):
     del daily
 
     done = forecast_all(model, "load_test", fake_clients(info["clients"]), cutoff, test["workers"], FLOWS, OUTPUT,
-                        {"forecaster": model.name, "load_id": test["test"]})
+                        {"forecaster": model.name, "load_id": "load_test"}, prefix)
     ticked = time.time()
     load_to_sql(SQL, OUTPUT)
     seconds_sql = time.time() - ticked
-    log.update({f"seconds_{k}": round(done[k], 1) for k in STEPS}, workers=done["workers"], groups=done["groups"],
+    log.update({f"seconds_{k}": round(done[k], 1) for k in STEPS}, groups=done["groups"],
                daily_rows_read=done["daily_rows"], seconds_forecast=round(done["seconds"], 1),
                seconds_sql_load=round(seconds_sql, 1), clients_ok=done.get("OK", 0),
                clients_not_enough_history=done.get("NOT_ENOUGH_HISTORY", 0), clients_no_postings=done.get("NO_POSTINGS", 0),

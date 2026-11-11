@@ -111,22 +111,36 @@ Times the nightly forecast on fake data, in a separate project, so it never touc
 (`cashflow.py`, `models.py`, `forecast.py`, copied by its setup notebook) with the placeholder model fitted on 2
 clients only: its forecasts mean nothing, its prediction time is real.
 
-1. **Set it up:** in a new empty project, import `build_load_test_project.ipynb`, fill in `CODE_ENV`, and run all
-   cells. It sets up the project, then runs the 2 scenarios' jobs once and shows the results.
-2. **Two scenarios, two zones.** Each sets its numbers in its **step 1** (Scenarios → the scenario → Steps → 1):
-   change them there, Save, then Run. Running the setup notebook again keeps them.
+1. **Set it up:** in a new empty project, import `build_load_test_project.ipynb`, fill in `CODE_ENV` and
+   `OUTPUT_SQL_CONNECTION`, and run all cells. It sets up the project, runs the load test once and shows the result.
+2. **One scenario, Run the load test.** Its **step 1** (Scenarios → Run the load test → Steps → 1) sets `tests`, a
+   list of tests run one after the other in one go; change it there, Save, then Run. Running the setup notebook again
+   keeps it. Each test has every number:
 
-   | Scenario (zone) | What it does | Step 1: its numbers |
-   |---|---|---|
-   | **Create the fake data** (Data prep) | makes one set of fake daily flows, `load_test_flows`; not timed. Same size: kept | `fake_clients` (420000: the bank's size), `fake_months` (at least 16), `fake_postings_per_month`, `fake_clients_per_group` (5000) |
-   | **Run the load test** (Load test) | runs every test of the plan on that data (so on all its clients), then the report | `load_test_plan`: one line per test, `{"test": "a name", "workers": 4}`; `bank_clients`: the report gives the time for this many clients |
+   | Number | What it is |
+   |---|---|
+   | `clients` | fake clients |
+   | `months` | months of history per client (at least 16) |
+   | `postings_per_month` | average postings (transactions) per client and month |
+   | `clients_per_group` | clients per group: one Parquet file per group and month (production: 5000) |
+   | `workers` | groups of clients forecast at a time (production: `inference_workers`) |
 
-   Each test runs in its own process: its memory is measured on its own, and a test that fails (out of memory, for
-   example) does not stop the others.
-3. **Results:** the dashboard **Load test**, and `latest_report.html` in the folder `load_test_report` (one page:
-   what was found in plain words, one row per test, the time of each step, the memory, and how long the nightly
-   forecast would take for the bank's clients). Every test of every run: `load_test_log` (one row per test, with
-   its `batch_id`).
+   For example, 4 then 8 workers on the same data:
+
+   ```json
+   {"tests": [
+     {"clients": 420000, "months": 24, "postings_per_month": 40, "clients_per_group": 5000, "workers": 4},
+     {"clients": 420000, "months": 24, "postings_per_month": 40, "clients_per_group": 5000, "workers": 8}
+   ]}
+   ```
+
+   It makes the fake data of each size if it is not there yet (zone Data prep, not timed, one subfolder of
+   `load_test_flows` per size, kept for the next runs; tests of the same size share it), runs each test (the
+   forecast, then its SQL load; zone Load test), then the report. Each test runs in its own process: its memory is
+   measured on its own, and running out of memory is logged as a failed test; the next test still runs.
+3. **Results:** the dashboard **Load test**, and `latest_report.html` in the folder `load_test_report` (one page: the
+   tests of this run side by side and next to the earlier ones, in plain words and as a table, the time and the
+   memory). Every test: one row of `load_test_log`, its `batch` the run it was part of.
 
 After the forecast code changes, run `build_load_test_project.ipynb` again so the load test times the new code.
 
@@ -140,5 +154,5 @@ The bank's package is `build_forecast_project.ipynb`, `build_load_test_project.i
 | `forecast_lab.ipynb` | the data scientist's lab (outside the flow): EDA and model comparison; then set `forecaster` and run Retrain |
 | `warehouse_simulator.ipynb` | test machine only: fake warehouse tables in a local test database |
 | `build_load_test_project.ipynb` | sets up the load test, a project of its own (see above) |
-| `daily_flows_viewer.ipynb` | reads and shows the Parquet files of `daily_flows` (or, in the load test project, `load_test_flows`); only reads |
+| `daily_flows_viewer.ipynb` | reads and shows the Parquet files of `daily_flows` (or, in the load test project, one size of `load_test_flows`); only reads |
 | `alerts_plan.md` | planned email / Teams alerts (not built) |

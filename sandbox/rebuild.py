@@ -27,14 +27,9 @@ import dss  # noqa: E402
 PACKAGES = ["polars", "scikit-learn", "mlflow==2.22.0", "catboost==1.2.7"]   # the code env cashflow_forecast
 LOCAL_SETTINGS = {"YOUR_EDW_CONNECTION": "EDW_LOCAL", "YOUR_SQL_CONNECTION": "FORECAST_OUT_LOCAL",
                   "YOUR_CODE_ENV": "cashflow_forecast"}
-# the load test on the sandbox: small, a minute (the notebook's own numbers are the bank's size)
-SANDBOX_LOAD_TEST = {r"FAKE_CLIENTS = [\d_]+": "FAKE_CLIENTS = 5_000",
-                     r"FAKE_CLIENTS_PER_GROUP = [\d_]+": "FAKE_CLIENTS_PER_GROUP = 500",
-                     r"TEST_PLAN = \[.*?\n\]": """TEST_PLAN = [
-    {"test": "1 worker", "workers": 1},
-    {"test": "2 workers", "workers": 2},
-    {"test": "4 workers", "workers": 4},
-]"""}
+# the load test on the sandbox: small, a minute (the notebook's own numbers are bigger)
+SANDBOX_LOAD_TEST = {r'"clients": [\d_]+': '"clients": 5_000', r'"clients_per_group": [\d_]+': '"clients_per_group": 500',
+                     r'"workers": [\d_]+': '"workers": 2'}
 
 
 def local_notebook(name, folder, load_test=None):

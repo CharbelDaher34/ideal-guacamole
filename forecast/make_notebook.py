@@ -9,7 +9,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 SRC = HERE / "src"
 RECIPES = ["stage_tables", "train_and_test", "champion_challenger", "nightly_forecast", "load_forecast_sql"]
-LOAD_TEST_RECIPES = ["make_fake_data", "run_test_plan", "load_test_report"]
+LOAD_TEST_RECIPES = ["make_fake_data", "run_load_test", "load_test_report"]
 
 
 def code(text):
@@ -193,35 +193,42 @@ This notebook sets up the load test in this Dataiku project, a project of its ow
 forecast project. It times the nightly forecast on fake data of the same shape as the real daily flows, with the
 forecast project's own code (`cashflow.py`, `models.py`, `forecast.py`: the same files, copied by this notebook).
 
-Two scenarios, two zones, run by hand. Each sets its numbers in its **step 1** (Scenarios > the scenario > Steps >
-1): change them there, then Run.
+One scenario, **Run the load test**, run by hand. Its **step 1** (Scenarios > Run the load test > Steps > 1) sets
+`tests`: a list of tests run one after the other in one go, each with every number: the fake data's size (`clients`,
+`months`, `postings_per_month`, `clients_per_group`) and `workers`. For example:
 
-- **Create the fake data** (zone Data prep, not timed). Step 1: `fake_clients`, `fake_months`,
-  `fake_postings_per_month`, `fake_clients_per_group`. One set of fake daily flows in `load_test_flows`, Parquet files
-  laid out exactly like `daily_flows`. Data of the same size is kept; change a number and run it again to make new data.
-- **Run the load test** (zone Load test). Step 1: `load_test_plan` (one line per test: `test`, a name, and
-  `workers`) and `bank_clients`. Every test, one after the other, on that data, so the number of clients is
-  always the data's. Each test: the
-  placeholder model (`daily_catboost`: one CatBoost model, P10, EV and P90 together, the last 365 days as inputs)
-  fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), then the nightly forecast of
-  every fake client, `workers` groups of clients at a time, as production runs it, then its load into the SQL table
-  `load_test_final`, timed (the forecast, the SQL load, and the share of each step: reading, preparing, model,
-  formatting, writing). Each test runs in its own process: its memory is measured on its own, and a test that fails (out of
-  memory, for example) does not stop the others.
-- **The report**, after each load test: the dashboard **Load test**, and `latest_report.html` in the folder
-  `load_test_report` (one page: what was found, one row per test, the time of each step, the memory, and the time
-  the nightly forecast would take for the bank's clients). Every test of every run: the dataset `load_test_log`.
+```json
+{"tests": [
+  {"clients": 420000, "months": 24, "postings_per_month": 40, "clients_per_group": 5000, "workers": 4},
+  {"clients": 420000, "months": 24, "postings_per_month": 40, "clients_per_group": 5000, "workers": 8}
+]}
+```
+
+Change them there, then Run. It runs, in 2 zones:
+
+- **Data prep** (not timed): the fake daily flows of each size listed in `load_test_flows`, one subfolder per size,
+  Parquet files laid out exactly like `daily_flows`; a size already there is kept, a size no longer listed removed.
+  Tests with the same size share its data.
+- **Load test**: the placeholder model (`daily_catboost`: one CatBoost model, P10, EV and P90 together, the last 365
+  days as inputs) fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), then the nightly
+  forecast of every fake client, `workers` groups of clients at a time, as production runs it, then its load into the
+  SQL table `load_test_final`, timed (the forecast, the SQL load, and the share of each step: reading, preparing,
+  model, formatting, writing). Each test runs in its own process: its memory is measured on its own, and running out
+  of memory is logged as a failed test (the next test still runs).
+- **The report** (even when a test failed): the dashboard **Load test** and `latest_report.html` in the folder
+  `load_test_report`: the tests of this run side by side, next to the earlier ones. Every test: one row of the
+  dataset `load_test_log` (its `batch`: the run it was part of).
 
 **How to use it:** in a new empty project, import this notebook (Notebooks > New notebook > Import), fill in
-`CODE_ENV` (and the scenarios' first numbers if you like) and run all cells (Cell > Run All). It sets up the project,
-then (`RUN_NOW`) runs the 2 scenarios and shows the results. Later: change the numbers in step 1 of a scenario, then
-run **Create the fake data** (only if the size changed) and **Run the load test**. Run this notebook again after the
-forecast code changes, so the load test times the new code: it keeps the numbers set on the scenarios.
+`CODE_ENV` and `OUTPUT_SQL_CONNECTION` (and the scenario's first tests if you like) and run all cells (Cell > Run
+All). It sets up the project, then (`RUN_NOW`) runs what the scenario runs and shows the result. Later: change the
+tests in step 1 of the scenario, then Run. Run this notebook again after the forecast code changes, so the load test
+times the new code: it keeps the tests set on the scenario.
 """),
     code(read("load_test_cells/settings.py")),
     md("## 1. Code environment, code, flow\n\nChecks the code env has CatBoost, writes the project library, the 3 "
-       "recipes in 2 zones (Data prep: `make_fake_data`; Load test: `run_test_plan`, `load_test_report`) and the 2 "
-       "scenarios, each with its numbers in step 1."),
+       "recipes in 2 zones (Data prep: `make_fake_data`; Load test: `run_load_test`, `load_test_report`) and the "
+       "scenario, its tests in step 1."),
     code(read("cells/check_code_env.py")),
     code(embedded("WAREHOUSE_CODE", SRC / "warehouse.py")),
     code(embedded("LIBRARY_CODE", SRC / "library_cashflow.py")),
@@ -231,8 +238,8 @@ forecast code changes, so the load test times the new code: it keeps the numbers
     code("RECIPES = {}"),
     *[code(embedded(f'RECIPES["{r}"]', SRC / "load_test_recipes" / f"{r}.py")) for r in LOAD_TEST_RECIPES],
     code(read("load_test_cells/setup.py")),
-    md("## 2. Run the 2 scenarios\n\n**Create the fake data**, then **Run the load test**, each with the numbers of its "
-       "step 1 (with many clients it takes long: the progress shows here)."),
+    md("## 2. Run it\n\nWhat the scenario **Run the load test** runs, with the tests of its step 1 (with many "
+       "clients it takes long: the progress shows here)."),
     code(read("cells/build_job.py") + "\n\n" + read("load_test_cells/run.py")),
 ])
 

@@ -1,15 +1,12 @@
-# Load test, zone Data prep (scenario "Create the fake data"; not timed): the fake daily flows the load test reads,
-# in the folder load_test_flows, of the size step 1 of the scenario sets: fake_clients, fake_months (months of
-# history up to yesterday), fake_postings_per_month. Parquet files exactly like the forecast project's daily_flows (one row
-# per client, day and category: money_in, money_out, postings; each client's rows together), and data.json (what was
-# made, up to which day, how long it took). Data of the same size already there is kept; a new size replaces it.
-import dataiku
+# Load test, zone Data prep (not timed): the fake daily flows the tests read, in load_test_flows, one subfolder per
+# size of fake data (clients, months, postings_per_month, clients_per_group) used by the tests in step 1 of the
+# scenario Run the load test, each laid out like the forecast project's daily_flows (one Parquet file per group of
+# clients and month). A size already there is kept (whatever day it was made); a size no longer listed is removed.
 import pandas as pd
 
-from loadtest import CREATE, SIZE, data_size, fake_data, scenario_numbers
+from loadtest import prepare_data, step1_tests
 
-size = data_size(scenario_numbers(CREATE, list(SIZE.values())))
-cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)          # yesterday
-info = fake_data(size, cutoff)
-print(f"PROGRESS fake data ready: {info['clients']:,} clients, {info['months']} months, {info['postings_per_month']} "
-      f"postings a month, up to {info['cutoff']}: {info['daily_rows']:,} daily rows, {info['data_mb']} MB", flush=True)
+cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)          # yesterday, for new data
+for prefix, info in prepare_data(step1_tests(), cutoff).items():
+    print(f"PROGRESS fake data ready, {prefix[1:]}: up to {info['cutoff']}, {info['daily_rows']:,} daily rows, "
+          f"{info['data_mb']} MB", flush=True)

@@ -11,6 +11,7 @@ The forecast: per client, per category and in TOTAL (all categories together), t
 money out) of each of the next 3 windows of 30 days after the cut-off day (the last day of data: yesterday): days
 1-30, 31-60 and 61-90, as P10, EV and P90 in SAR."""
 import logging
+import os
 import warnings
 
 import numpy as np
@@ -84,23 +85,35 @@ def client_groups(clients, groups):
     return numbers.replace_strict(group_of, return_dtype=pl.Int64)
 
 
-def read_manifest(name=DAILY_FLOWS, **kwargs):
+def local_path(folder, path=""):
+    """A file of a Dataiku folder, on this server's disk: read straight from there, not downloaded through Dataiku's
+    server (one HTTP request per file). Every folder of the project is on the local filesystem."""
+    if getattr(folder, "local_root", None) is None:
+        try:
+            folder.local_root = folder.get_path()
+        except Exception as e:
+            raise RuntimeError(f"The folder {folder.short_name} is not on the Dataiku server's own disk: its connection "
+                               f"must be a local filesystem one (it is read straight from disk). {e}") from None
+    return os.path.join(folder.local_root, path.lstrip("/"))
+
+
+def read_manifest(name=DAILY_FLOWS, prefix="", **kwargs):
     """The folder and its manifest (None when nothing is written yet): {"groups": number of groups, "files":
-    {group: {month: [path, rows]}}, "first_days": path, "rows": rows in all}. kwargs: for dataiku.Folder."""
+    {group: {month: [path, rows]}}, "first_days": path, "rows": rows in all}. prefix: a subfolder holding the daily
+    flows ("" in production; the load test keeps one per size of fake data). kwargs: for dataiku.Folder."""
     import json
     import dataiku
     folder = dataiku.Folder(name, **kwargs)
-    if MANIFEST not in folder.list_paths_in_partition():
+    path = local_path(folder, prefix + MANIFEST)
+    if not os.path.exists(path):
         return folder, None
-    with folder.get_download_stream(MANIFEST) as stream:
-        return folder, json.loads(stream.read())
+    with open(path) as f:
+        return folder, json.load(f)
 
 
 def read_parquet(folder, path, columns=None):
-    """One Parquet file of a folder, as a Polars DataFrame."""
-    import io
-    with folder.get_download_stream(path) as stream:
-        return pl.read_parquet(io.BytesIO(stream.read()), columns=columns)
+    """One Parquet file of a folder, as a Polars DataFrame, read straight from disk (local_path)."""
+    return pl.read_parquet(local_path(folder, path), columns=columns)
 
 
 def read_group(folder, manifest, group, since=None):
@@ -127,13 +140,13 @@ def read_daily(name=DAILY_FLOWS, columns=None, **kwargs):
     return _plain(daily.to_pandas())
 
 
-def write_daily(parts, groups, name=DAILY_FLOWS, base=None):
+def write_daily(parts, groups, name=DAILY_FLOWS, base=None, prefix=""):
     """Write daily flows: each part (pandas or Polars, DAILY_COLUMNS) holds rows of some groups of clients; its rows of
     each group and calendar month go to one Parquet file, group_0007/2026-11_<run>.parquet, added to the rows already
     in that file (base: the current manifest, when adding new days; None: from nothing). Files are never changed in
     place: new ones are written, then the manifest points to them (a failed run leaves the daily flows as they
-    were), then the files it no longer lists are removed. Also each client's first posting day (first_days). Returns
-    the new manifest."""
+    were), then the files it no longer lists are removed. Also each client's first posting day (first_days). prefix:
+    a subfolder (see read_manifest), the only place files are written and removed. Returns the new manifest."""
     import io
     import json
     import uuid
@@ -161,19 +174,19 @@ def write_daily(parts, groups, name=DAILY_FLOWS, base=None):
             before = files.get(group, {}).get(month)
             if before:
                 rows = pl.concat([read_parquet(folder, before[0]), rows])
-            path = f"/group_{int(group):04d}/{month}_{run}.parquet"
+            path = f"{prefix}/group_{int(group):04d}/{month}_{run}.parquet"
             write(path, rows.sort(["client_no", "day", "category"]))
             files.setdefault(group, {})[month] = [path, len(rows)]
-    first_days = f"/first_days_{run}.parquet"
+    first_days = f"{prefix}/first_days_{run}.parquet"
     write(first_days, pl.concat(firsts).group_by("client_no").agg(pl.col("first_day").min()).sort("client_no")
           if firsts else pl.DataFrame(schema={"client_no": pl.Utf8, "first_day": pl.Datetime("us")}))
     manifest = {"groups": groups, "files": files, "first_days": first_days,
                 "rows": sum(rows for months in files.values() for _, rows in months.values())}
-    with folder.get_writer(MANIFEST) as writer:
+    with folder.get_writer(prefix + MANIFEST) as writer:
         writer.write(json.dumps(manifest).encode())
-    kept = {first_days, MANIFEST} | {path for months in files.values() for path, _ in months.values()}
+    kept = {first_days, prefix + MANIFEST} | {path for months in files.values() for path, _ in months.values()}
     for path in folder.list_paths_in_partition():
-        if path not in kept:
+        if path.startswith(prefix + "/") and path not in kept:
             folder.delete_path(path)
     return manifest
 
@@ -200,18 +213,21 @@ def peak_memory_mb():
 
 
 def append_row(name, columns, row):
-    """Add one row to a log dataset (an appended output of the recipe) with fixed column types, so that rows of
+    """Add one row (or a list of rows, written together: a recipe writes its output once) to a log dataset (an appended output of the recipe) with fixed column types, so that rows of
     failed runs (with empty values) never change how the earlier rows are read. columns: {name: Dataiku type}, one of
     string, bigint, double, boolean. When the columns changed since the last row (a new version of the code), the
     earlier rows are first read with the old columns and written again with the new ones, by name (a new column is
     empty in them), so they never end up under the wrong column."""
     import dataiku
     kinds = {"string": "string", "bigint": "Int64", "double": "float64", "boolean": "boolean"}
-    frame = pd.DataFrame([{c: row.get(c) for c in columns}])
+    frame = pd.DataFrame([{c: r.get(c) for c in columns} for r in (row if isinstance(row, list) else [row])])
     dataset = dataiku.Dataset(name)
     before = [c["name"] for c in dataset.read_schema(raise_if_empty=False)]
     if before and before != list(columns):
-        earlier = dataiku.Dataset(name, ignore_flow=True).get_dataframe()      # read with the old columns
+        try:
+            earlier = dataiku.Dataset(name, ignore_flow=True).get_dataframe()  # read with the old columns
+        except Exception:                                   # its data was cleared (only the old columns are left)
+            earlier = pd.DataFrame(columns=before)
         print(f"{name}: its columns changed; its {len(earlier)} earlier rows are written again with the new columns")
         frame = pd.concat([earlier.reindex(columns=list(columns)), frame], ignore_index=True)
         dataset.spec_item["appendMode"] = False                                 # this time: all the rows again

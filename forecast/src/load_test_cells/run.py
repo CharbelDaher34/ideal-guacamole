@@ -1,13 +1,14 @@
-if RUN_NOW:      # what the 2 scenarios run, as jobs (the recipes read the numbers of each scenario's step 1)
-    build("1/2 Create the fake data (not timed)", ["load_test_flows"], "NON_RECURSIVE_FORCED_BUILD")
-    build("2/2 Run the load test: every test of the plan", ["load_test_log"], "NON_RECURSIVE_FORCED_BUILD")
-    build("The report", ["load_test_report"], "NON_RECURSIVE_FORCED_BUILD")
-    log = dataiku.Dataset("load_test_log").get_dataframe()
-    batch = log[log["batch_id"] == log["batch_id"].max()].sort_values("test_no")
-    print(f"Batch {batch['batch_id'].iloc[0]}, on {int(batch['clients'].iloc[0]):,} fake clients:")
-    display(batch[["test", "status", "workers", "seconds_forecast", "seconds_sql_load", "clients_per_second",
-                   "peak_memory_mb", "minutes_at_bank_size", "error"]].set_index("test"))
-    print("The full report: Dashboards > Load test, or the folder load_test_report > latest_report.html")
+if RUN_NOW:      # what the scenario Run the load test runs, as jobs (the recipes read its step 1)
+    build("1/3 The fake data of each size (not timed; kept if already there)", ["load_test_flows"],
+          "NON_RECURSIVE_FORCED_BUILD")
+    try:
+        build("2/3 The tests", ["load_test_log"], "NON_RECURSIVE_FORCED_BUILD")
+    finally:                                         # the report even when a test failed
+        build("3/3 The report", ["load_test_report"], "NON_RECURSIVE_FORCED_BUILD")
+        log = dataiku.Dataset("load_test_log").get_dataframe().sort_values("run_at")
+        print("The last tests (the newest last):")
+        display(log[["batch", "test", "status", "workers", "clients", "clients_per_group", "seconds_forecast",
+                     "seconds_sql_load", "clients_per_second", "peak_memory_mb", "error"]].tail(10).set_index("batch"))
+        print("The full report: Dashboards > Load test, or the folder load_test_report > latest_report.html")
 else:
-    print("Set up. Then: Scenarios > Create the fake data (its size: Steps > 1), Run; then Scenarios > Run the load "
-          "test (its plan: Steps > 1), Run")
+    print("Set up. Then: Scenarios > Run the load test (its tests: Steps > 1), Run")

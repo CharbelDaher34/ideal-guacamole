@@ -21,11 +21,8 @@ def load_module(name, code):
 
 
 for name, code in (("cashflow", LIBRARY_CODE), ("warehouse", WAREHOUSE_CODE), ("loadtest", LOADTEST_CODE)):
-    load_module(name, code)                         # to check the numbers below (this notebook has no polars)
-SIZE = {"fake_clients": FAKE_CLIENTS, "fake_months": FAKE_MONTHS, "fake_postings_per_month": FAKE_POSTINGS_PER_MONTH,
-        "fake_clients_per_group": FAKE_CLIENTS_PER_GROUP}
-size = sys.modules["loadtest"].data_size(SIZE)                    # checked before anything is built
-plan = sys.modules["loadtest"].read_plan(TEST_PLAN)
+    load_module(name, code)                         # to check the tests below (this notebook has no polars)
+TESTS = sys.modules["loadtest"].check_tests(TESTS)            # checked before anything is built
 
 try:                                                # needs the project's admin right
     metadata = project.get_metadata()
@@ -44,20 +41,10 @@ for file_name, code in (("cashflow.py", LIBRARY_CODE), ("warehouse.py", WAREHOUS
     (python_folder.get_file(file_name) or python_folder.add_file(file_name)).write(code)
 print("Library: cashflow.py, warehouse.py, models.py, forecast.py (the forecast project's code) and loadtest.py")
 
-# the numbers are set in step 1 of each scenario (below), not as project variables: those of an earlier setup go
-variables = project.get_variables()
-old = [k for k in ("fake_clients", "fake_months", "fake_postings_per_month", "load_test_plan", "bank_clients")
-       if k in variables["standard"]]
-if old:
-    for k in old:
-        variables["standard"].pop(k)
-    project.set_variables(variables)
-    print(f"Project variables {', '.join(old)} removed: these numbers are now set in step 1 of the scenarios")
-
-# the flow, in 2 zones: Data prep (the fake data) and Load test (the tests, their log and the report).
+# the flow, in 2 zones: Data prep (the fake data) and Load test (the test, its log and the report).
 # Python recipes: (inputs, outputs, zone); load_test_final is a table on OUTPUT_SQL_CONNECTION, load_test_log a CSV
 FLOW = {"make_fake_data": ([], ["load_test_flows"], "Data prep"),
-        "run_test_plan": (["load_test_flows"], ["load_test_forecast", "load_test_final", "load_test_log"],
+        "run_load_test": (["load_test_flows"], ["load_test_forecast", "load_test_final", "load_test_log"],
                           "Load test"),
         "load_test_report": (["load_test_log"], ["load_test_report"], "Load test")}
 FOLDERS = ["load_test_flows", "load_test_forecast", "load_test_report"]
@@ -65,11 +52,15 @@ CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', 
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
 datasets = {d["name"] for d in project.list_datasets()}
 recipes = {r["name"] for r in project.list_recipes()}
+for old in ("run_test_plan",):                       # the earlier recipe, replaced by run_load_test
+    if old in recipes:
+        project.get_recipe(old).delete()
+        recipes.discard(old)
 existing_folders = {f["name"]: f["id"] for f in project.list_managed_folders()}
 folders = {name: (project.get_managed_folder(existing_folders[name]) if name in existing_folders
                   else project.create_managed_folder(name, connection_name=OUTPUT_FOLDER_CONNECTION))
            for name in FOLDERS}
-# the fake data is only made when asked by name (scenario Create the fake data): the load test never makes it again
+# the fake data is only made when asked by name (step 2 of the scenario), never by building what follows it
 folder_settings = folders["load_test_flows"].get_settings()
 folder_settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
 folder_settings.save()
@@ -120,59 +111,66 @@ for _, outputs, zone_name in FLOW.values():
         except Exception as e:
             if "already" not in str(e).lower():
                 raise
-print("Flow ready: zones Data prep (the fake data) and Load test (the tests, their log, the report)")
+print("Flow ready: zones Data prep (the fake data) and Load test (the test, its log, the report)")
 
-# the 2 scenarios, run by hand (no trigger): one makes the data (not timed), the other runs the load test on it.
-# Step 1 of each sets its numbers (Scenarios > the scenario > Steps > 1): the settings above when the scenario is
-# made; running this notebook again keeps the numbers already set there (a new number gets its default).
+# the scenario, run by hand (no trigger). Its step 1 sets the tests (Scenarios > Run the load test > Steps > 1): the
+# settings above when the scenario is made; running this notebook again keeps the tests already set there.
 def numbers_step(label, variables):
     return {"id": "step_0", "name": label, "enabled": True, "runConditionType": "RUN_IF_STATUS_MATCH",
             "runConditionStatuses": ["SUCCESS", "WARNING"], "type": "define_vars",
             "params": {"variables": variables, "definitions": []}}
 
 
-def build_step(n, label, items):
+def build_step(n, label, items, even_if_failed=False):
     return {"id": f"step_{n}", "name": label, "enabled": True, "runConditionType": "RUN_IF_STATUS_MATCH",
-            "runConditionStatuses": ["SUCCESS", "WARNING"], "type": "build_flowitem", "params": {
+            "runConditionStatuses": ["SUCCESS", "WARNING"] + (["FAILED"] if even_if_failed else []),
+            "type": "build_flowitem", "params": {
                 "builds": [{"type": "MANAGED_FOLDER", "itemId": folders[i].id, "partitionsSpec": ""} if i in folders
                            else {"type": "DATASET", "itemId": i, "partitionsSpec": ""} for i in items],
                 "jobType": "NON_RECURSIVE_FORCED_BUILD", "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
 
 
-SCENARIOS = {
-    "Create the fake data": (
-        "Run by hand, first, and again after changing its size: the fake daily flows the load test reads, zone Data "
-        "prep. Not timed. Set the size in step 1 (Steps > 1. Set the fake data's size): fake_clients, fake_months "
-        "(at least 16), fake_postings_per_month, fake_clients_per_group. Data of the same size already there is kept", [
-            numbers_step("Set the fake data's size",
-                         {name: size[key] for key, name in sys.modules["loadtest"].SIZE.items()}),
-            build_step(1, "Make the fake daily flows", ["load_test_flows"])]),
-    "Run the load test": (
-        "Run by hand, after Create the fake data: every test of the test plan, one after the other, on all the fake "
-        "data's clients (the forecast, then its SQL load), then the report (dashboard Load test, folder load_test_report). Set the plan in step 1 "
-        "(Steps > 1. Set the test plan): load_test_plan, one line per test with test (a name) and workers; "
-        "bank_clients, the number of clients the report gives the time for", [
-            numbers_step("Set the test plan", {"load_test_plan": plan, "bank_clients": int(BANK_CLIENTS)}),
-            build_step(1, "Every test of the plan", ["load_test_log"]),
-            build_step(2, "The report", ["load_test_report"])]),
-}
+SCENARIO = "Run the load test"
+DESCRIPTION = (
+    "Run by hand. Step 1 (Steps > 1. Set the tests): tests, a list run one after the other, each "
+    '{"clients": ..., "months": ... (at least 16), "postings_per_month": ..., "clients_per_group": ..., "workers": ...}. '
+    "It makes the fake data of each size if it is not there yet (zone Data prep, not timed, kept for the next runs), "
+    "runs each test (the forecast, then its SQL load), then the report: these tests next to the earlier ones "
+    "(dashboard Load test, folder load_test_report), even when a test failed")
+STEPS = [numbers_step("Set the tests", {"tests": TESTS}),
+         build_step(1, "The fake data of each size (not timed)", ["load_test_flows"]),
+         build_step(2, "The tests", ["load_test_log"]),
+         build_step(3, "The report", ["load_test_report"], even_if_failed=True)]
 existing_scenarios = {s["name"]: s["id"] for s in project.list_scenarios()}
-if "Run the test plan" in existing_scenarios:                       # the earlier name
-    project.get_scenario(existing_scenarios.pop("Run the test plan")).delete()
-for name, (description, steps) in SCENARIOS.items():
-    if name in existing_scenarios:     # run again: its numbers set on the scenario's page are kept
-        settings = project.get_scenario(existing_scenarios[name]).get_settings()
-        before = (settings.get_raw()["params"].get("steps") or [{}])[0]
-        if before.get("type") == "define_vars":
-            old = before["params"].get("variables", {})
-            steps[0]["params"]["variables"] = {k: old.get(k, v) for k, v in steps[0]["params"]["variables"].items()}
-        settings.get_raw()["description"] = description
-        settings.get_raw()["params"]["steps"] = steps
-        settings.save()
-    else:
-        project.create_scenario(name, "step_based", {"active": False, "description": description,
-                                                     "params": {"steps": steps}})
-    numbers = steps[0]["params"]["variables"]
-    print(f"Scenario ready: {name} (run it by hand). Step 1, {steps[0]['name']}:")
-    for k, v in numbers.items():
-        print(f"    {k} = {json.dumps(v)}")
+
+
+def first_numbers(name):
+    """The variables in step 1 of an existing scenario."""
+    first = (project.get_scenario(existing_scenarios[name]).get_settings().get_raw()["params"].get("steps") or [{}])[0]
+    return first.get("params", {}).get("variables", {}) if first.get("type") == "define_vars" else {}
+
+
+# tests already set: kept (and the earlier version's single test, its numbers directly in step 1, as the only test)
+before = {}
+for name in ("Create the fake data", SCENARIO):
+    if name in existing_scenarios:
+        before.update({k.replace("fake_", ""): v for k, v in first_numbers(name).items()})
+if isinstance(before.get("tests"), list) and before["tests"]:
+    STEPS[0]["params"]["variables"] = {"tests": before["tests"]}
+elif any(k in before for k in TESTS[0]):
+    STEPS[0]["params"]["variables"] = {"tests": [{k: before.get(k, v) for k, v in TESTS[0].items()}]}
+for old in ("Create the fake data", "Run the test plan"):           # the earlier scenarios, now this one
+    if old in existing_scenarios:
+        project.get_scenario(existing_scenarios.pop(old)).delete()
+        print(f"Scenario {old}: removed (its numbers are now in step 1 of {SCENARIO})")
+if SCENARIO in existing_scenarios:
+    settings = project.get_scenario(existing_scenarios[SCENARIO]).get_settings()
+    settings.get_raw()["description"] = DESCRIPTION
+    settings.get_raw()["params"]["steps"] = STEPS
+    settings.save()
+else:
+    project.create_scenario(SCENARIO, "step_based", {"active": False, "description": DESCRIPTION,
+                                                     "params": {"steps": STEPS}})
+print(f"Scenario ready: {SCENARIO} (run it by hand). Step 1, Set the tests:")
+for n, test in enumerate(STEPS[0]["params"]["variables"]["tests"], 1):
+    print(f"    test {n}: {json.dumps(test)}")

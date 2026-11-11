@@ -10,7 +10,8 @@ to end (forecast_group):
     preparing    the model's input rows (cashflow.model_rows: client, category, window, day_365 ... day_1)
     model        the model's predict_rows: P10, EV, P90 of each row
     formatting   one row per client (output_rows)
-    writing      one Parquet file of the group, straight into the output folder
+    writing      one Parquet file of the group, straight into the output folder (one group at a time: Dataiku
+                 allows one writer per folder)
 The output folder holds one subfolder per night, forecast_<cut-off>_<model ID> (kept: the archive), and current.txt,
 which points to the newest one only once every group is written: a failed night leaves the previous forecast current.
 The SQL table final_forecast is then loaded from it (load_to_sql)."""
@@ -23,8 +24,8 @@ import pandas as pd
 import polars as pl
 
 from cashflow import (DAILY_FLOWS, HORIZONS, MIN_HISTORY_DAYS, SAVED_MODEL, TOTAL, Progress, client_groups,
-                      day_matrix, input_days, model_rows, peak_memory_mb, read_first_days, read_group, read_manifest,
-                      read_parquet, window)
+                      day_matrix, input_days, local_path, model_rows, peak_memory_mb, read_first_days, read_group,
+                      read_manifest, read_parquet, window)
 
 VALUES = ("p10", "ev", "p90")
 STEPS = ("reading", "preparing", "model", "formatting", "writing")
@@ -128,23 +129,25 @@ def forecast_group(group):
     times["formatting"], ticked = time.time() - ticked, time.time()
     buffer = io.BytesIO()
     out.write_parquet(buffer)
-    with job["output"].get_writer(f"/{job['version']}/part_{group:05d}.parquet") as writer:
-        writer.write(buffer.getvalue())
+    with job["writing"], job["output"].get_writer(f"/{job['version']}/part_{group:05d}.parquet") as writer:
+        writer.write(buffer.getvalue())             # one writer at a time: Dataiku allows one per folder
     times["writing"] = time.time() - ticked
     counts = out["status"].value_counts()
     return {**times, "daily_rows": len(daily), "clients": len(out),
             **dict(zip(counts["status"].to_list(), counts["count"].to_list()))}
 
 
-def forecast_all(model, model_id, clients, cutoff, workers, name=DAILY_FLOWS, output=OUTPUT, columns=None):
+def forecast_all(model, model_id, clients, cutoff, workers, name=DAILY_FLOWS, output=OUTPUT, columns=None,
+                 prefix=""):
     """The nightly forecast of `clients` (Polars or pandas, client_no: the active clients) with `model`, into the
-    folder `output` (see the module's text). columns: values added to every row (forecaster, load_id, ...). Returns
+    folder `output` (see the module's text). columns: values added to every row (forecaster, load_id, ...). prefix:
+    the subfolder of `name` holding the daily flows (cashflow.read_manifest; "" in production). Returns
     the seconds of each step (added up over the groups), the wall time, the counts per status, the most memory used
     and the output's subfolder."""
     from concurrent.futures import ThreadPoolExecutor
     import dataiku
     started = time.time()
-    folder, manifest = read_manifest(name)
+    folder, manifest = read_manifest(name, prefix)
     if manifest is None:
         raise ValueError(f"{name} is empty: run the staging first")
     clients = (clients if isinstance(clients, pl.DataFrame) else pl.from_pandas(clients[["client_no"]])).select(
@@ -159,7 +162,8 @@ def forecast_all(model, model_id, clients, cutoff, workers, name=DAILY_FLOWS, ou
             out.delete_path(path)
     workers = max(1, min(int(workers), len(by_group)))
     model.threads = max(1, (os.cpu_count() or 1) // workers)    # CatBoost's threads: the cores shared out
-    _JOB.update(model=model, cutoff=cutoff, days=input_days(model), clients=by_group, folder=folder,
+    import threading
+    _JOB.update(model=model, cutoff=cutoff, days=input_days(model), clients=by_group, folder=folder, writing=threading.Lock(),
                 manifest=manifest, output=out, version=version,
                 columns={"model_id": model_id, **(columns or {})})
     summary = {k: 0.0 for k in STEPS}
@@ -186,8 +190,8 @@ def current_output(output=OUTPUT):
     paths = folder.list_paths_in_partition()
     if CURRENT not in paths:
         raise ValueError(f"No forecast in the folder {output} yet: run the nightly forecast first")
-    with folder.get_download_stream(CURRENT) as stream:
-        version = stream.read().decode().strip()
+    with open(local_path(folder, CURRENT)) as f:
+        version = f.read().strip()
     return folder, version, sorted(p for p in paths if p.startswith(f"/{version}/") and p.endswith(".parquet"))
 
 

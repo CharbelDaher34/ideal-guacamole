@@ -277,8 +277,8 @@ fake clients, the earlier 3-model placeholder (12 periods of 30 days as inputs) 
   5,000 fake clients, forecast then SQL load: about 2,100 clients a second with 1 worker, 2,900 with 2, 4,000 with 4
   (the earlier one: about 1,000), so roughly 3–5 minutes for 420,000 clients. To confirm on the bank's server.
 - The **load test project** (`build_load_test_project.ipynb`, a project of its own, the same code) runs this test on
-  the bank's server: a test plan of several worker counts in one run, then a report (the forecast and the SQL load,
-  the share of each step, memory, the time for the bank's clients).
+  the bank's server: one scenario, a list of tests in step 1 (each: data size, workers) run in one go, compared
+  side by side and with the earlier ones in a report (the forecast and the SQL load, the share of each step, memory).
 - Not tested yet: training on all clients (it still loads all of `daily_flows`); train on a sample of clients if it
   gets too heavy.
 
