@@ -1,19 +1,20 @@
-# Load test, zone Load test: every test listed in step 1 of the scenario Run the load test, one after the other, each
+# Load test, zone Load test: every test set in step 1 of the scenario Run the load test, one after the other, each
 # on the fake data of its size in load_test_flows (made by the step before, not timed), each in its own process
 # (forked from this one: its memory is measured on its own, and a crash such as running out of memory is logged as
 # FAILED and the next test still runs). Adds one row per test to load_test_log, all with the same batch (this run),
 # written together at the end.
 # A test (loadtest.run_test): the placeholder model fitted on 2 clients, then the nightly forecast of every fake
 # client with the forecast project's own code (forecast.forecast_all: `workers` groups of clients at a time, each
-# read, prepared, forecast and written on its own), then the SQL load (forecast.load_to_sql). Its seconds:
+# read, prepared, forecast and written on its own), then the final load (a CSV file or the SQL table load_test_final,
+# as set by FINAL_LOAD in the setup notebook: loadtest.run_test). Its seconds:
 #   reading, preparing, model, formatting, writing   added up over the groups (so over the workers too)
 #   forecast                                         from start to end of the forecast (the wall clock)
-#   sql_load                                         the forecast loaded into the SQL table load_test_final
+#   sql_load                                         the final load (the CSV file, or the SQL table)
 import pandas as pd
 
 from cashflow import append_row
 from forecast import STEPS
-from loadtest import data_info, in_own_process, run_test, size_path, step1_tests
+from loadtest import data_info, in_own_process, machine, run_test, size_path, step1_tests
 
 LOG = {"batch": "string", "test": "bigint", "run_at": "string", "status": "string", "error": "string",
        "workers": "bigint", "clients": "bigint", "months": "bigint", "postings_per_month": "bigint",
@@ -22,12 +23,12 @@ LOG = {"batch": "string", "test": "bigint", "run_at": "string", "status": "strin
        **{f"seconds_{k}": "double" for k in STEPS}, "seconds_forecast": "double", "seconds_sql_load": "double",
        "clients_per_second": "double", "peak_memory_mb": "bigint",
        "daily_rows_read": "bigint", "clients_ok": "bigint", "clients_not_enough_history": "bigint",
-       "clients_no_postings": "bigint"}
+       "clients_no_postings": "bigint", "cpus": "bigint", "ram_gb": "double", "final_load_to": "string"}
 tests = step1_tests()
 batch = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 rows, failed = [], []
 for n, test in enumerate(tests, 1):
-    row = {"batch": batch, "test": n, "run_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), **test}
+    row = {"batch": batch, "test": n, "run_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), **test, **machine()}
     print(f"PROGRESS test {n}/{len(tests)}: {test['workers']} workers, {test['clients']:,} clients, {test['months']} "
           f"months, {test['postings_per_month']} postings a month, {test['clients_per_group']:,} per group", flush=True)
     info = data_info(test)
@@ -39,7 +40,7 @@ for n, test in enumerate(tests, 1):
         result = in_own_process(run_test, test, info)
     if result[0] == "ok":
         row.update(result[1], status="SUCCESS")
-        print(f"PROGRESS test {n}/{len(tests)}: forecast {row['seconds_forecast']:.0f} s + SQL load "
+        print(f"PROGRESS test {n}/{len(tests)}: forecast {row['seconds_forecast']:.0f} s + final load "
               f"{row['seconds_sql_load']:.0f} s, {row['clients_per_second']:,.0f} clients a second, "
               f"{row['peak_memory_mb']:,} MB at most", flush=True)
     else:

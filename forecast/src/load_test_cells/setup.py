@@ -5,8 +5,10 @@ import types
 
 import pandas as pd
 
+if FINAL_LOAD not in ("csv", "sql"):
+    raise RuntimeError(f"FINAL_LOAD is {FINAL_LOAD!r}: set it to \"csv\" or \"sql\" in the settings cell above.")
 placeholders = [name for name, value in (("CODE_ENV", CODE_ENV), ("OUTPUT_SQL_CONNECTION", OUTPUT_SQL_CONNECTION))
-                if str(value).startswith("YOUR_")]
+                if str(value).startswith("YOUR_") and (name != "OUTPUT_SQL_CONNECTION" or FINAL_LOAD == "sql")]
 if placeholders:
     raise RuntimeError(f"Fill in {' and '.join(placeholders)} in the settings cell above, then run again.")
 check_code_env(CODE_ENV, ("polars", "catboost"))
@@ -22,7 +24,7 @@ def load_module(name, code):
 
 for name, code in (("cashflow", LIBRARY_CODE), ("warehouse", WAREHOUSE_CODE), ("loadtest", LOADTEST_CODE)):
     load_module(name, code)                         # to check the tests below (this notebook has no polars)
-TESTS = sys.modules["loadtest"].check_tests(TESTS)            # checked before anything is built
+CHECKED = sys.modules["loadtest"].check_tests(TESTS)          # checked before anything is built (as a list)
 
 try:                                                # needs the project's admin right
     metadata = project.get_metadata()
@@ -42,10 +44,11 @@ for file_name, code in (("cashflow.py", LIBRARY_CODE), ("warehouse.py", WAREHOUS
 print("Library: cashflow.py, warehouse.py, models.py, forecast.py (the forecast project's code) and loadtest.py")
 
 # the flow, in 2 zones: Data prep (the fake data) and Load test (the test, its log and the report).
-# Python recipes: (inputs, outputs, zone); load_test_final is a table on OUTPUT_SQL_CONNECTION, load_test_log a CSV
+# Python recipes: (inputs, outputs, zone); load_test_log is a CSV; load_test_final, a table on OUTPUT_SQL_CONNECTION,
+# only for FINAL_LOAD = "sql" ("csv": a file in the folder load_test_forecast, nothing to create)
 FLOW = {"make_fake_data": ([], ["load_test_flows"], "Data prep"),
-        "run_load_test": (["load_test_flows"], ["load_test_forecast", "load_test_final", "load_test_log"],
-                          "Load test"),
+        "run_load_test": (["load_test_flows"], ["load_test_forecast", "load_test_log"]
+                          + (["load_test_final"] if FINAL_LOAD == "sql" else []), "Load test"),
         "load_test_report": (["load_test_log"], ["load_test_report"], "Load test")}
 FOLDERS = ["load_test_flows", "load_test_forecast", "load_test_report"]
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
@@ -64,7 +67,11 @@ folders = {name: (project.get_managed_folder(existing_folders[name]) if name in 
 folder_settings = folders["load_test_flows"].get_settings()
 folder_settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
 folder_settings.save()
-if "load_test_final" not in datasets:
+variables = project.get_variables()                  # what run_load_test reads: the final load, csv or sql
+variables["standard"]["final_load"] = FINAL_LOAD
+project.set_variables(variables)
+print(f"Final load of each test: {FINAL_LOAD}")
+if FINAL_LOAD == "sql" and "load_test_final" not in datasets:
     project.new_managed_dataset("load_test_final").with_store_into(OUTPUT_SQL_CONNECTION).create()
 if "load_test_log" not in datasets:
     settings = project.new_managed_dataset("load_test_log").with_store_into(OUTPUT_CONNECTION).create().get_settings()
@@ -72,10 +79,17 @@ if "load_test_log" not in datasets:
     settings.get_raw()["formatParams"].update(CSV)
     settings.save()
 ref = lambda name: folders[name].id if name in folders else name
-# first, the recipes whose inputs or outputs changed are removed (made again below), so no output is held by an old one
+# first, the recipes whose inputs or outputs changed are removed (made again below), so no output is held by an old one;
+# an output no longer wanted (load_test_final, for FINAL_LOAD = "csv") is only taken off the recipe (nothing to create)
 for name, (inputs, outputs, _) in FLOW.items():
     if name in recipes:
         settings = project.get_recipe(name).get_settings()
+        extra = set(settings.get_flat_output_refs()) - set(map(ref, outputs))
+        if extra and set(settings.get_flat_output_refs()) - extra == set(map(ref, outputs)):
+            for role in settings.get_recipe_outputs().values():
+                role["items"] = [item for item in role.get("items", []) if item.get("ref") not in extra]
+            settings.save()
+            print("recipe", name, "no longer writes", ", ".join(sorted(extra)))
         if (set(settings.get_flat_input_refs()) != set(map(ref, inputs))
                 or set(settings.get_flat_output_refs()) != set(map(ref, outputs))):
             project.get_recipe(name).delete()
@@ -132,11 +146,12 @@ def build_step(n, label, items, even_if_failed=False):
 
 SCENARIO = "Run the load test"
 DESCRIPTION = (
-    "Run by hand. Step 1 (Steps > 1. Set the tests): tests, a list run one after the other, each "
-    '{"clients": ..., "months": ... (at least 16), "postings_per_month": ..., "clients_per_group": ..., "workers": ...}. '
+    "Run by hand. Step 1 (Steps > 1. Set the tests): tests, run one after the other, a grid "
+    '{"clients": [...], "months": ... (at least 16), "postings_per_month": ..., "clients_per_group": [...], '
+    '"workers": [...]} (each a number or a list: every combination is a test) or a list of tests. '
     "It makes the fake data of each size if it is not there yet (zone Data prep, not timed, kept for the next runs), "
-    "runs each test (the forecast, then its SQL load), then the report: these tests next to the earlier ones "
-    "(dashboard Load test, folder load_test_report), even when a test failed")
+    "runs each test (the forecast, then its final load: a CSV file or the SQL table), then the report: each client count on its own, the settings "
+    "compared at the same count (dashboard Load test, folder load_test_report), even when a test failed")
 STEPS = [numbers_step("Set the tests", {"tests": TESTS}),
          build_step(1, "The fake data of each size (not timed)", ["load_test_flows"]),
          build_step(2, "The tests", ["load_test_log"]),
@@ -155,10 +170,11 @@ before = {}
 for name in ("Create the fake data", SCENARIO):
     if name in existing_scenarios:
         before.update({k.replace("fake_", ""): v for k, v in first_numbers(name).items()})
-if isinstance(before.get("tests"), list) and before["tests"]:
-    STEPS[0]["params"]["variables"] = {"tests": before["tests"]}
-elif any(k in before for k in TESTS[0]):
-    STEPS[0]["params"]["variables"] = {"tests": [{k: before.get(k, v) for k, v in TESTS[0].items()}]}
+variables = STEPS[0]["params"]["variables"]
+if isinstance(before.get("tests"), (list, dict)) and before["tests"]:
+    variables["tests"] = before["tests"]
+elif any(k in before for k in CHECKED[0]):
+    variables["tests"] = [{k: before.get(k, v) for k, v in CHECKED[0].items()}]
 for old in ("Create the fake data", "Run the test plan"):           # the earlier scenarios, now this one
     if old in existing_scenarios:
         project.get_scenario(existing_scenarios.pop(old)).delete()
@@ -171,6 +187,6 @@ if SCENARIO in existing_scenarios:
 else:
     project.create_scenario(SCENARIO, "step_based", {"active": False, "description": DESCRIPTION,
                                                      "params": {"steps": STEPS}})
-print(f"Scenario ready: {SCENARIO} (run it by hand). Step 1, Set the tests:")
-for n, test in enumerate(STEPS[0]["params"]["variables"]["tests"], 1):
+print(f"Scenario ready: {SCENARIO} (run it by hand). Step 1, Set the tests: {json.dumps(variables)}")
+for n, test in enumerate(sys.modules["loadtest"].check_tests(variables["tests"]), 1):
     print(f"    test {n}: {json.dumps(test)}")

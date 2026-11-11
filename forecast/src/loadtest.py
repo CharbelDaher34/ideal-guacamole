@@ -2,9 +2,11 @@
 forecast project on fake data of the same shape, with the same code: cashflow.py, models.py and forecast.py are copies
 of the forecast project's, made by the same setup files. Nothing here reads or writes the forecast project.
 
-One scenario, "Run the load test". Its step 1 sets a list of tests, run one after the other in one go (step1_tests):
-    tests: [{"clients": ..., "months": ..., "postings_per_month": ..., "clients_per_group": ..., "workers": ...}, ...]
-each with every number:
+One scenario, "Run the load test". Its step 1 sets the tests, run one after the other in one go (step1_tests):
+    {"tests": {"clients": [100000, 400000, 800000], "months": 24, "postings_per_month": 60,
+               "clients_per_group": [2000, 5000], "workers": [2, 4, 8]}}
+tests is a grid (each number, or a list of numbers: every combination is a test, the clients first, the workers last)
+or a list of tests, each with every number, [{"clients": ..., "months": ..., ..., "workers": ...}, ...]. The numbers:
     clients              how many fake clients
     months               months of daily flows per client up to the day they are made (at least MIN_MONTHS)
     postings_per_month   the average number of postings per client and month
@@ -15,8 +17,11 @@ load_test_flows, one subfolder per size (size_path), each laid out like daily_fl
 month), made only when not there yet; nothing is deleted by code (remove unused sizes by hand).
 Zone Load test (recipe run_load_test, then load_test_report): each test on its size's data: the placeholder model
 (models.DailyCatBoost) fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), the nightly
-forecast of every fake client (forecast.forecast_all) into the folder load_test_forecast, then its load into the SQL
-table load_test_final (forecast.load_to_sql), timed (run_test), in its own process (in_own_process)."""
+forecast of every fake client (forecast.forecast_all) into the folder load_test_forecast, then its final load, timed
+(run_test), in its own process (in_own_process). The final load is set by FINAL_LOAD in the setup notebook (the project
+variable final_load): "csv", one CSV file in the folder load_test_forecast (load_to_file: no table, no dataset), or
+"sql", the SQL table load_test_final (forecast.load_to_sql, as production loads final_forecast)."""
+import itertools
 import json
 import multiprocessing
 import os
@@ -32,7 +37,8 @@ from warehouse import CATEGORY_OF_TYPE, COLUMNS, OTHER
 SCENARIO = "Run the load test"
 FLOWS = "load_test_flows"         # folder: the fake daily flows, laid out like daily_flows
 OUTPUT = "load_test_forecast"     # folder: the forecast, like the folder forecast
-SQL = "load_test_final"           # SQL table: the forecast loaded, like final_forecast
+SQL = "load_test_final"           # final load "sql": the SQL table, like final_forecast
+FINAL_FILE = "/final/load_test_final.csv"    # final load "csv": this file of the folder OUTPUT
 MIN_MONTHS = -(-(INPUT_DAYS + PERIOD_DAYS * 3) // PERIOD_DAYS)    # a year of input and 3 windows: 16 months
 SIZE = ("clients", "months", "postings_per_month", "clients_per_group")     # the fake data's size
 TEST = SIZE + ("workers",)                                                  # the numbers of one test
@@ -55,24 +61,57 @@ def check(test, n=1):
     return checked
 
 
+def grid_tests(grid):
+    """A grid {"clients": [100000, 400000], "workers": [2, 4], "months": 24, ...} (each a number or a list): every
+    combination, as a list of tests, in the order of TEST (the clients first, the workers last)."""
+    lists = {name: value if isinstance(value, list) else [value] for name, value in grid.items()}
+    return [dict(zip(TEST, numbers)) for numbers in itertools.product(*(lists.get(name, [None]) for name in TEST))]
+
+
 def check_tests(tests):
-    """The list of tests of step 1, each checked."""
+    """The tests of step 1 (a grid, or a list of tests), as a list, each checked."""
+    if isinstance(tests, dict):
+        tests = grid_tests(tests)
     if not isinstance(tests, list) or not tests:
-        raise ValueError(f"tests must be a list of tests, [{{\"clients\": ..., ...}}, ...]: set it in step 1 of the "
-                         f"scenario {SCENARIO}")
+        raise ValueError(f"tests must be a grid {{\"clients\": [...], \"workers\": [...], ...}} or a list of tests "
+                         f"[{{\"clients\": ..., ...}}, ...]: set it in step 1 of the scenario {SCENARIO}")
     return [check(test, n) for n, test in enumerate(tests, 1)]
 
 
-def step1_tests():
-    """The tests set in step 1 of the scenario, checked: read from its settings, so they are the same whether the
-    scenario runs, a recipe is built from the Flow or the setup notebook runs it."""
+def step1_variables():
+    """The variables set in step 1 of the scenario, read from its settings, so they are the same whether the scenario
+    runs, a recipe is built from the Flow or the setup notebook runs it."""
     import dataiku
     project = dataiku.api_client().get_default_project()
     ids = {s["name"]: s["id"] for s in project.list_scenarios()}
     steps = (project.get_scenario(ids[SCENARIO]).get_settings().get_raw()["params"].get("steps", [])
              if SCENARIO in ids else [])
-    found = steps[0]["params"].get("variables", {}) if steps and steps[0].get("type") == "define_vars" else {}
-    return check_tests(found.get("tests"))
+    return steps[0]["params"].get("variables", {}) if steps and steps[0].get("type") == "define_vars" else {}
+
+
+def step1_tests():
+    """The tests set in step 1 of the scenario, as a list, each checked."""
+    return check_tests(step1_variables().get("tests"))
+
+
+def machine():
+    """The machine the tests run on: its CPUs (the ones this process may use) and its RAM in GB (the container's
+    limit when it is lower)."""
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+    ram = None
+    try:
+        with open("/proc/meminfo") as f:
+            ram = next(int(line.split()[1]) * 1024 for line in f if line.startswith("MemTotal:"))
+        for limit in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+            if os.path.exists(limit):
+                with open(limit) as f:
+                    value = f.read().strip()
+                if value.isdigit():
+                    ram = min(ram, int(value))
+                break
+    except (OSError, StopIteration):
+        pass
+    return {"cpus": cpus, "ram_gb": round(ram / 1024 ** 3, 1) if ram else None}
 
 
 def size_path(test):
@@ -204,10 +243,27 @@ def prepare_data(tests, cutoff):
     return {prefix: fake_data(test, cutoff) for prefix, test in sizes.items()}
 
 
+def final_load():
+    """The final load of the tests, "csv" or "sql": the project variable final_load (set by the setup notebook)."""
+    import dataiku
+    return dataiku.get_custom_variables().get("final_load", "sql")
+
+
+def load_to_file(output=OUTPUT):
+    """The final load "csv": the current forecast of the folder `output` (one Parquet file per group) into one CSV
+    file of the same folder (FINAL_FILE), replacing the previous one, one group's file at a time."""
+    from cashflow import read_parquet
+    from forecast import current_output
+    folder, version, paths = current_output(output)
+    with folder.get_writer(FINAL_FILE) as writer:
+        for n, path in enumerate(paths):
+            writer.write(read_parquet(folder, path).to_pandas().to_csv(header=n == 0, index=False).encode())
+
+
 def run_test(test, info):
     """Zone Load test: one test, on the fake data of its size in load_test_flows (info: its data.json): fit option A
     on 2 clients, forecast every fake client as the nightly forecast does with `workers`, then load the forecast into
-    SQL. Returns the values for load_test_log."""
+    the CSV file or the SQL table (final_load). Returns the values for load_test_log."""
     from cashflow import read_group, read_manifest
     from forecast import STEPS, forecast_all, load_to_sql
     from models import DailyCatBoost
@@ -225,9 +281,11 @@ def run_test(test, info):
 
     done = forecast_all(model, "load_test", fake_clients(info["clients"]), cutoff, test["workers"], FLOWS, OUTPUT,
                         {"forecaster": model.name, "load_id": "load_test"}, prefix)
+    to_csv = final_load() == "csv"
     ticked = time.time()
-    load_to_sql(SQL, OUTPUT)
+    load_to_file(OUTPUT) if to_csv else load_to_sql(SQL, OUTPUT)
     seconds_sql = time.time() - ticked
+    log["final_load_to"] = f"a CSV file ({OUTPUT}{FINAL_FILE})" if to_csv else f"the SQL table {SQL}"
     log.update({f"seconds_{k}": round(done[k], 1) for k in STEPS}, groups=done["groups"],
                daily_rows_read=done["daily_rows"], seconds_forecast=round(done["seconds"], 1),
                seconds_sql_load=round(seconds_sql, 1), clients_ok=done.get("OK", 0),

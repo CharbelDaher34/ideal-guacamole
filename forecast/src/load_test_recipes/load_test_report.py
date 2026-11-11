@@ -1,12 +1,16 @@
-# Load test, the report of the last run of the scenario Run the load test: its tests side by side (one row per test
-# in load_test_log, all with the same batch), then the earlier tests below:
-#   1. this run: one line per test (its data, its workers, its times, its memory), the fastest marked, in a table
-#   2. charts of this run's tests: the total time (forecast + SQL load), where the forecast's time goes (reading,
-#      preparing, model, formatting, writing), the memory
-#   3. the earlier tests, as a table
+# Load test, the report of the last run of the scenario Run the load test (its tests: the rows of load_test_log with
+# the same batch). The number of clients is not a setting (it is how many clients the bank has), so each client count
+# is shown on its own, and only the settings (workers, clients per group) are compared, at the same client count:
+#   1. the run: what a test times, the model, the fake data, the machine (CPUs, RAM)
+#   2. one section per client count: a table (one line per setting: forecast, final load, total, memory, the forecast's
+#      main step, compared with the best setting at this client count) and a chart of the total times
+#   3. where the forecast's time goes, per setting, at the largest client count
+#   4. each setting's time per 100,000 clients, at each client count
+#   5. the earlier tests, as a table
 # In the folder load_test_report: report_<batch>.html (one per run, kept) and latest_report.html, one page each; and
 # the dashboard "Load test" (Dashboards > Load test), made again each time (do not edit it by hand: copy it first).
-# A test's time: the forecast from start to end (the wall clock) plus the SQL load; not making the fake data nor
+# A test's time: the forecast from start to end (the wall clock) plus the final load (a CSV file or the SQL table
+# load_test_final, as set by FINAL_LOAD in the setup notebook); not making the fake data nor
 # fitting the model on 2 clients (production does neither at night).
 import base64
 import html
@@ -23,13 +27,16 @@ from dataiku import insights  # noqa: E402
 
 DASHBOARD = "Load test"
 EARLIER = 20                    # the earlier tests shown
+PER = 100_000                   # section 4: the time per this many clients
 STEPS = {"seconds_reading": "reading", "seconds_preparing": "preparing", "seconds_model": "model",
          "seconds_formatting": "formatting", "seconds_writing": "writing"}
 STEP_COLORS = ["#2a6f97", "#61a5c2", "#e07a5f", "#f2cc8f", "#81b29a"]
-COLORS = {"forecast": "#2a6f97", "SQL load": "#e07a5f", "memory": "#81b29a"}
+COLORS = {"forecast": "#2a6f97", "final load": "#e07a5f"}
 NUMBERS = ["test", "workers", "clients", "months", "postings_per_month", "clients_per_group", "seconds_forecast",
-           "seconds_sql_load", "clients_per_second", "peak_memory_mb", *STEPS]
+           "seconds_sql_load", "peak_memory_mb", "cpus", "ram_gb", *STEPS]
 CELL = "padding:5px 9px;border-bottom:1px solid #ddd;text-align:left"
+BEST = "background:#e8f5e9;font-weight:bold"
+NOTE = "margin:2px 0 8px;color:#555;font-size:13px"
 
 log = dataiku.Dataset("load_test_log").get_dataframe()
 if log.empty:
@@ -39,14 +46,27 @@ for column in NUMBERS:
 log["batch"] = log["batch"].fillna("").astype(str) if "batch" in log else ""
 log["batch"] = log["batch"].where(log["batch"] != "", log["run_at"])      # tests from before batches: one run each
 log["test"] = log["test"].fillna(1)
-log["seconds_total"] = log["seconds_forecast"].fillna(0) + log["seconds_sql_load"].fillna(0)
+log["seconds_total"] = log["seconds_forecast"] + log["seconds_sql_load"]
 log = log.sort_values(["run_at", "test"]).reset_index(drop=True)
 batch_id = log.iloc[-1]["batch"]
-run = log[log["batch"] == batch_id].sort_values("test")             # this run's tests
+run = log[log["batch"] == batch_id].sort_values("test")             # this run's tests, in their order
 earlier = log[log["batch"] != batch_id].tail(EARLIER).iloc[::-1]     # the newest first
 ok = run[run["status"] == "SUCCESS"]
-fastest = ok.loc[ok["seconds_total"].idxmin()] if len(ok) else None
+data_varies = len(run[["months", "postings_per_month"]].drop_duplicates()) > 1
 folder = dataiku.Folder("load_test_report")
+dashboard_error = []        # why the dashboard could not be made (the HTML report is made all the same)
+
+
+def to_dashboard(call, *args, **kwargs):
+    """A call that makes the dashboard (an insight): when Dataiku refuses it (a licence limit, a right), the report
+    goes on without the dashboard."""
+    if dashboard_error:
+        return
+    try:
+        call(*args, **kwargs)
+    except Exception as e:
+        dashboard_error.append(f"{type(e).__name__}: {e}")
+        print(f"PROGRESS the dashboard is not made ({dashboard_error[0][:300]}): the HTML report still is", flush=True)
 
 
 def duration(seconds):
@@ -57,15 +77,16 @@ def duration(seconds):
             else f"{seconds / 60:,.1f} min" if seconds < 5400 else f"{seconds / 3600:,.1f} h")
 
 
-def data(t):
-    """The test's fake data, short: 50,000 clients · 500 per group · 36 months · 40 postings/month."""
-    return (f"{int(t['clients']):,} clients · {int(t['clients_per_group']):,} per group · {int(t['months'])} months · "
-            f"{int(t['postings_per_month'])} postings/month")
+def gb(mb):
+    return "" if pd.isna(mb) else f"{mb / 1024:,.1f} GB"
 
 
-def label(t):
-    return (f"Test {int(t['test'])}: {int(t['clients']):,} clients, {int(t['clients_per_group']):,}/group, "
-            f"{int(t['workers'])} workers")
+def setting(t, full=data_varies):
+    """A test's setting: 4 workers · 5,000 per group (and its fake data's months and postings when they vary)."""
+    text = f"{int(t['workers'])} workers · {int(t['clients_per_group']):,} per group"
+    if full and pd.notna(t["months"]):
+        text += f" · {int(t['months'])} months · {int(t['postings_per_month'])} postings/month"
+    return text
 
 
 def main_step(t):
@@ -80,50 +101,14 @@ def table(headers, rows, styles=None):
     return f"<table style='border-collapse:collapse;font-size:13px;margin:6px 0 14px'>{head}{body}</table>"
 
 
-# 1. this run: one line per test
-lines, styles = [], {}
-for i, (_, t) in enumerate(run.iterrows()):
-    if t["status"] != "SUCCESS":
-        lines.append([int(t["test"]), html.escape(data(t)), int(t["workers"]),
-                      f"<span style='color:#b00020'>FAILED: {html.escape(str(t['error'])[:200])}</span>",
-                      "", "", "", "", "", ""])
-        continue
-    is_fastest = t.name == fastest.name
-    if is_fastest:
-        styles[i] = "background:#e8f5e9;font-weight:bold"
-    lines.append([int(t["test"]), html.escape(data(t)), int(t["workers"]), duration(t["seconds_forecast"]),
-                  duration(t["seconds_sql_load"]), f"<b>{duration(t['seconds_total'])}</b>",
-                  f"{t['clients_per_second']:,.0f}", f"{t['peak_memory_mb'] / 1024:,.1f} GB", main_step(t),
-                  "the fastest" if is_fastest else
-                  f"{t['seconds_total'] / fastest['seconds_total'] - 1:.0%} slower"])
-this_run = table(["Test", "Fake data", "Workers", "Forecast", "SQL load", "Total", "Clients / second", "Memory",
-                  "Most of the forecast's time", "Compared with the fastest"], lines, styles)
-words = (f"<p>The fastest: <b>{html.escape(label(fastest))}</b>, {duration(fastest['seconds_total'])} in all "
-         f"({fastest['clients_per_second']:,.0f} clients a second).</p>" if fastest is not None else
-         "<p style='color:#b00020'>No test of this run succeeded.</p>")
-if len(run) > len(ok):
-    words += f"<p style='color:#b00020'>{len(run) - len(ok)} of {len(run)} tests failed: see the table.</p>"
+def failed(t):
+    return f"<span style='color:#b00020'>FAILED: {html.escape(str(t['error'])[:200])}</span>"
 
 
-# 3. the earlier tests
-def earlier_row(t):
-    done = t["status"] == "SUCCESS"
-    return [html.escape(str(t["batch"])), int(t["test"]), html.escape(data(t)) if pd.notna(t["clients"]) else "",
-            int(t["workers"]) if pd.notna(t["workers"]) else "", duration(t["seconds_forecast"]),
-            duration(t["seconds_sql_load"]), duration(t["seconds_total"]) if done else "",
-            f"{t['clients_per_second']:,.0f}" if pd.notna(t["clients_per_second"]) else "",
-            f"{t['peak_memory_mb'] / 1024:,.1f} GB" if pd.notna(t["peak_memory_mb"]) else "",
-            html.escape(str(t["status"]))]
-
-
-history = (table(["Run", "Test", "Fake data", "Workers", "Forecast", "SQL load", "Total", "Clients / second", "Memory",
-                  "Status"], [earlier_row(t) for _, t in earlier.iterrows()]) if len(earlier) else "<p>None yet.</p>")
-
-
-# 2. charts of this run's successful tests, test 1 at the top
 def figure(fig, name):
+    """The chart saved as an insight (for the dashboard) and a PNG in the folder; returns the PNG, base64."""
     fig.tight_layout()
-    insights.save_figure(f"load_test_{name}", fig, label=f"Load test: {name}")
+    to_dashboard(insights.save_figure, f"load_test_{name}", fig, label=f"Load test: {name}")
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=110)
     plt.close(fig)
@@ -132,77 +117,168 @@ def figure(fig, name):
     return base64.b64encode(buffer.getvalue()).decode()
 
 
-shown = ok.iloc[::-1]
-names = [label(t) for _, t in shown.iterrows()]
-height = 1.8 + 0.5 * max(len(shown), 1)
-charts = {}
-for name, title in (("times", "Total time per test: the forecast, then the SQL load (shorter is better)"),
-                    ("steps", "Where the forecast's time goes, per test (share of the workers' time)"),
-                    ("memory", "The most memory used, per test")):
-    fig, ax = plt.subplots(figsize=(11, height))
-    if not len(shown):
-        ax.text(0.5, 0.5, "No successful test in this run", ha="center", va="center")
-        ax.axis("off")
-    elif name == "times":
-        forecast, load = shown["seconds_forecast"].fillna(0), shown["seconds_sql_load"].fillna(0)
-        ax.barh(names, forecast, color=COLORS["forecast"], label="forecast")
-        ax.barh(names, load, left=forecast, color=COLORS["SQL load"], label="SQL load")
-        for y, total in enumerate(forecast + load):
-            ax.text(total, y, f"  {duration(total)}", va="center", fontsize=9)
-        ax.set_xlabel("seconds")
-    elif name == "steps":
-        shares = shown[list(STEPS)].div(shown[list(STEPS)].sum(axis=1), axis=0) * 100
-        left = pd.Series(0.0, index=shares.index)
-        for (column, step), color in zip(STEPS.items(), STEP_COLORS):
-            ax.barh(names, shares[column], left=left, color=color, label=step)
-            for y, (value, start) in enumerate(zip(shares[column], left)):
-                if value >= 6:
-                    ax.text(start + value / 2, y, f"{value:.0f}%", ha="center", va="center", fontsize=8,
-                            color="white" if color in ("#2a6f97", "#e07a5f") else "black")
-            left += shares[column]
-        ax.set_xlim(0, 100)
-        ax.set_xlabel("% of the forecast's work")
-    else:
-        memory = shown["peak_memory_mb"] / 1024
-        ax.barh(names, memory, color=COLORS["memory"])
-        for y, value in enumerate(memory):
-            ax.text(value, y, f"  {value:,.1f} GB", va="center", fontsize=9)
-        ax.set_xlabel("GB")
-    if len(shown) and name != "memory":
-        ax.legend(ncol=5, loc="lower left", bbox_to_anchor=(0, 1.0), fontsize=8, frameon=False)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.set_title(title, loc="left", fontsize=11, pad=24 if name != "memory" else 6)
-    charts[name] = figure(fig, name)
+def image(png):
+    return f"<p><img style='max-width:100%' src='data:image/png;base64,{png}'></p>"
 
-# 4. the page, and the dashboard
+
+def bar_chart(title, shown, xlabel):
+    """A horizontal bar per test of `shown` (its setting), the first at the top. Returns the figure and its axes."""
+    fig, ax = plt.subplots(figsize=(11, 1.6 + 0.45 * max(len(shown), 1)))
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.set_title(title, loc="left", fontsize=11, pad=24)
+    ax.set_xlabel(xlabel)
+    return fig, ax, [setting(t) for _, t in shown.iloc[::-1].iterrows()], shown.iloc[::-1]
+
+
+# 1. the run
+first = run.iloc[0]
 model = html.escape(str(run.iloc[-1].get("model") or "daily_catboost"))
-summary = (f"<h2 style='margin:0 0 4px'>Load test, {html.escape(str(batch_id))}: {len(run)} "
-           f"test{'s' if len(run) > 1 else ''}</h2>"
-           f"<p style='margin:0 0 10px;color:#555'>Each test: the nightly forecast of every fake client with the "
-           f"model {model} (fitted on 2 clients only: its forecasts mean nothing, its time is real), then its load "
-           "into SQL. Total = forecast + SQL load; making the fake data is not timed. The tests ran one after the "
-           "other.</p>" + words + this_run)
-earlier_html = (f"<h3 style='margin:18px 0 4px'>Earlier tests (the last {len(earlier)}, the newest first)</h3>"
-                + history)
+machine = ", ".join([f"{int(first['cpus'])} CPUs"] * pd.notna(first["cpus"])
+                    + [f"{first['ram_gb']:,.0f} GB of RAM"] * pd.notna(first["ram_gb"])) or "not recorded"
+final_to = sorted({str(v) for v in run.get("final_load_to", pd.Series(dtype=str)).dropna() if str(v)})
+final_to = html.escape(" / ".join(final_to) or "the SQL table load_test_final")
+data = ("as in each setting" if data_varies else
+        f"{int(first['months'])} months of daily flows per client, about {int(first['postings_per_month'])} postings "
+        "a month per client")
+header = (
+    f"<h2 style='margin:0 0 4px'>Load test, {html.escape(str(batch_id))}: {len(run)} test{'s' if len(run) > 1 else ''}"
+    "</h2>"
+    "<p style='margin:0 0 6px;color:#555'>Each test: the nightly forecast of every fake client, then its final load "
+    f"into {final_to}. <b>Total = forecast + final load</b> (making the fake data is not timed). The tests ran one "
+    "after the other on the same machine.</p>"
+    "<p style='margin:0 0 6px'><b>How to read it:</b> the number of clients is not a setting, it is how many clients "
+    "the bank has. So each client count has its own table, and only the settings (workers, clients per group) are "
+    "compared there.</p>"
+    f"<ul style='margin:0 0 10px;font-size:13px'><li>Machine: {machine}</li><li>Fake data: {data}</li>"
+    f"<li>Model: {model}, fitted on 2 clients only (its forecasts mean nothing, its time is real)</li></ul>")
+if len(run) > len(ok):
+    header += f"<p style='color:#b00020'>{len(run) - len(ok)} of {len(run)} tests failed: see the tables.</p>"
+if not len(ok):
+    header += "<p style='color:#b00020'>No test of this run succeeded.</p>"
+
+# 2. one section per client count
+sections = []          # (client count, its table's HTML, its chart's PNG or None, its number of tests)
+for clients, tests in run.groupby("clients", sort=True):
+    good = tests[tests["status"] == "SUCCESS"]
+    best = good["seconds_total"].min() if len(good) else None
+    lines, styles = [], {}
+    for i, (_, t) in enumerate(tests.iterrows()):
+        if t["status"] != "SUCCESS":
+            lines.append([html.escape(setting(t)), failed(t), "", "", "", "", ""])
+            continue
+        is_best = t["seconds_total"] == best
+        if is_best:
+            styles[i] = BEST
+        lines.append([html.escape(setting(t)), duration(t["seconds_forecast"]), duration(t["seconds_sql_load"]),
+                      f"<b>{duration(t['seconds_total'])}</b>", gb(t["peak_memory_mb"]), main_step(t),
+                      "the best here" if is_best else f"{t['seconds_total'] / best - 1:.0%} longer"])
+    section = (f"<h3 style='margin:22px 0 2px'>{int(clients):,} clients</h3>"
+               f"<p style='{NOTE}'>Each setting with {int(clients):,} fake clients. Compared only with the other "
+               "settings at this client count.</p>"
+               + table(["Setting", "Forecast", "Final load", "Total", "Memory (most used)", "Most of the forecast's time",
+                        "Compared with the best here"], lines, styles))
+    png = None
+    if len(good):
+        fig, ax, names, shown = bar_chart(f"{int(clients):,} clients: the total time per setting, the forecast then "
+                                          "the final load (shorter is better)", good, "seconds")
+        ax.barh(names, shown["seconds_forecast"], color=COLORS["forecast"], label="forecast")
+        ax.barh(names, shown["seconds_sql_load"], left=shown["seconds_forecast"], color=COLORS["final load"],
+                label="final load")
+        for y, total in enumerate(shown["seconds_total"]):
+            ax.text(total, y, f"  {duration(total)}", va="center", fontsize=9)
+        ax.legend(ncol=2, loc="lower left", bbox_to_anchor=(0, 1.0), fontsize=8, frameon=False)
+        png = figure(fig, f"{int(clients)}_clients")
+    sections.append((int(clients), section, png, len(tests)))
+
+# 3. where the forecast's time goes, at the largest client count
+steps_png, steps_html, steps_rows = None, "", 0
+if len(ok):
+    largest = ok["clients"].max()
+    shown_tests = ok[ok["clients"] == largest]
+    fig, ax, names, shown = bar_chart(f"Where the forecast's time goes, per setting, at {int(largest):,} clients "
+                                      "(share of the workers' time)", shown_tests, "% of the forecast's work")
+    shares = shown[list(STEPS)].div(shown[list(STEPS)].sum(axis=1), axis=0) * 100
+    left = pd.Series(0.0, index=shares.index)
+    for (column, step), color in zip(STEPS.items(), STEP_COLORS):
+        ax.barh(names, shares[column], left=left, color=color, label=step)
+        for y, (value, start) in enumerate(zip(shares[column], left)):
+            if value >= 6:
+                ax.text(start + value / 2, y, f"{value:.0f}%", ha="center", va="center", fontsize=8,
+                        color="white" if color in ("#2a6f97", "#e07a5f") else "black")
+        left += shares[column]
+    ax.set_xlim(0, 100)
+    ax.legend(ncol=5, loc="lower left", bbox_to_anchor=(0, 1.0), fontsize=8, frameon=False)
+    steps_png, steps_rows = figure(fig, "steps"), len(shown_tests)
+    steps_html = ("<h3 style='margin:22px 0 2px'>Where the forecast's time goes</h3>"
+                  f"<p style='{NOTE}'>reading: the daily flows; preparing: the model's input rows; model: its "
+                  "prediction; formatting: one row per client; writing: the forecast's files. The final load is not in "
+                  "it.</p>")
+
+# 4. each setting's time per 100,000 clients, at each client count
+counts = sorted(int(c) for c in ok["clients"].unique())
+rate_lines = []
+for name, tests in ok.assign(setting=ok.apply(setting, axis=1)).groupby("setting", sort=False):
+    per_count = tests.groupby("clients")["seconds_total"].mean()
+    lost = sorted(int(t["clients"]) for _, t in run.iterrows() if t["status"] != "SUCCESS" and setting(t) == name)
+    rate_lines.append([html.escape(name) + "".join(f"<br><span style='color:#b00020'>failed at {c:,} clients</span>"
+                                                   for c in lost),
+                       *[duration(per_count[c] / c * PER) if c in per_count.index else "" for c in counts],
+                       gb(tests["peak_memory_mb"].max())])
+rate_html = (
+    f"<h3 style='margin:22px 0 2px'>Time per {PER:,} clients</h3>"
+    f"<p style='{NOTE}'>A test's total time (forecast + final load) ÷ its clients × {PER:,}, for each setting at each "
+    "client count. When the values in a row are close, the time grows in step with the clients.</p>"
+    + (table(["Setting", *[f"At {c:,} clients" for c in counts], "Memory (most used)"], rate_lines)
+       if rate_lines else "<p>No successful test.</p>"))
+
+
+# 5. the earlier tests
+def earlier_row(t):
+    done = t["status"] == "SUCCESS"
+    return [html.escape(str(t["batch"])), int(t["test"]),
+            f"{int(t['clients']):,}" if pd.notna(t["clients"]) else "",
+            html.escape(setting(t, full=True)) if pd.notna(t["workers"]) else "",
+            duration(t["seconds_forecast"]), duration(t["seconds_sql_load"]),
+            duration(t["seconds_total"]) if done else "", gb(t["peak_memory_mb"]), html.escape(str(t["status"]))]
+
+
+earlier_html = (f"<h3 style='margin:22px 0 4px'>Earlier tests (the last {len(earlier)}, the newest first)</h3>"
+                + (table(["Run", "Test", "Clients", "Setting", "Forecast", "Final load", "Total", "Memory", "Status"],
+                         [earlier_row(t) for _, t in earlier.iterrows()]) if len(earlier) else "<p>None yet.</p>"))
+
+# the page
 page = ("<!doctype html><html><head><meta charset='utf-8'><title>Load test report</title></head>"
         "<body style='font-family:sans-serif;max-width:1200px;margin:20px auto;padding:0 16px'>"
-        + summary
-        + "".join(f"<p><img style='max-width:100%' src='data:image/png;base64,{png}'></p>" for png in charts.values())
-        + earlier_html
+        + header
+        + "".join(section + (image(png) if png else "") for _, section, png, _ in sections)
+        + (steps_html + image(steps_png) if steps_png else "")
+        + rate_html + earlier_html
         + "<p style='color:#777;font-size:12px'>Every test: the dataset load_test_log.</p></body></html>")
 name = f"report_{str(batch_id).replace(':', '').replace(' ', '_')}.html"
 for path in (name, "latest_report.html"):
     with folder.get_writer(path) as writer:
         writer.write(page.encode())
-for insight, content, title in (("load_test_summary", summary, "this run"),
-                                ("load_test_earlier", earlier_html, "earlier tests")):
-    insights.save_data(insight, f"<div style='font-family:sans-serif'>{content}</div>".encode(), "text/html",
-                       label=f"Load test: {title}")
 
-project = dataiku.api_client().get_default_project()
-existing = [d for d in project.list_dashboards(as_type="listitems") if d.name == DASHBOARD]
-dashboard = existing[0].to_dashboard() if existing else project.create_dashboard(DASHBOARD)
+# the dashboard: the same parts, one tile each, in the same order
+tiles_wanted = []                   # (insight ID, height)
 
+
+def html_insight(insight_id, content, title, height):
+    to_dashboard(insights.save_data, insight_id, f"<div style='font-family:sans-serif'>{content}</div>".encode(),
+                 "text/html", label=f"Load test: {title}")
+    tiles_wanted.append((insight_id, height))
+
+
+html_insight("load_test_summary", header, "this run", 10)
+for clients, section, png, n in sections:
+    html_insight(f"load_test_{clients}_table", section, f"{clients:,} clients", 6 + 2 * n)
+    if png:
+        tiles_wanted.append((f"load_test_{clients}_clients", 5 + 2 * n))
+if steps_png:
+    html_insight("load_test_steps_text", steps_html, "where the time goes", 4)
+    tiles_wanted.append(("load_test_steps", 5 + 2 * steps_rows))
+html_insight("load_test_per_100k", rate_html, f"time per {PER:,} clients", 6 + 2 * len(rate_lines))
+html_insight("load_test_earlier", earlier_html, "earlier tests", 4 + 2 * len(earlier))
 
 def tile(insight_id, top, height):
     return {"tileType": "INSIGHT", "insightId": insight_id, "insightType": "static_file",
@@ -211,14 +287,20 @@ def tile(insight_id, top, height):
             "titleOptions": {"showTitle": "NO"}, "resizeImageMode": "FIT_SIZE", "autoLoad": True}
 
 
-tiles, top = [], 0
-for insight_id, height in (("load_test_summary", 8 + 2 * len(run)), ("load_test_times", 5 + 2 * len(shown)),
-                           ("load_test_steps", 5 + 2 * len(shown)), ("load_test_memory", 5 + 2 * len(shown)),
-                           ("load_test_earlier", 4 + 2 * len(earlier))):
-    tiles.append(tile(insight_id, top, height))
-    top += height
-settings = dashboard.get_settings()
-settings.get_raw()["pages"] = [{"id": None, "title": "Last run", "show": True, "grid": {"tiles": tiles}}]
-settings.save()
-print(f"PROGRESS load test report: done: {name} and latest_report.html in the folder load_test_report, and the "
-      f"dashboard {DASHBOARD!r}", flush=True)
+def make_dashboard():
+    project = dataiku.api_client().get_default_project()
+    existing = [d for d in project.list_dashboards(as_type="listitems") if d.name == DASHBOARD]
+    dashboard = existing[0].to_dashboard() if existing else project.create_dashboard(DASHBOARD)
+    tiles, top = [], 0
+    for insight_id, height in tiles_wanted:
+        tiles.append(tile(insight_id, top, height))
+        top += height
+    settings = dashboard.get_settings()
+    settings.get_raw()["pages"] = [{"id": None, "title": "Last run", "show": True, "grid": {"tiles": tiles}}]
+    settings.save()
+
+
+to_dashboard(make_dashboard)
+print(f"PROGRESS load test report: done: {name} and latest_report.html in the folder load_test_report"
+      + (f", not the dashboard ({dashboard_error[0][:200]})" if dashboard_error else f", and the dashboard {DASHBOARD!r}"),
+      flush=True)

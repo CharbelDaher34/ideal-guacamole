@@ -194,14 +194,14 @@ forecast project. It times the nightly forecast on fake data of the same shape a
 forecast project's own code (`cashflow.py`, `models.py`, `forecast.py`: the same files, copied by this notebook).
 
 One scenario, **Run the load test**, run by hand. Its **step 1** (Scenarios > Run the load test > Steps > 1) sets
-`tests`: a list of tests run one after the other in one go, each with every number: the fake data's size (`clients`,
-`months`, `postings_per_month`, `clients_per_group`) and `workers`. For example:
+`tests`, run one after the other in one go. `tests` is a grid: each
+number (the fake data's size: `clients`, `months`, `postings_per_month`, `clients_per_group`; and `workers`) is one
+value or a list, and every combination is a test (here 3 x 2 x 3 = 18 tests). A list of tests, each with every
+number, works too. For example:
 
 ```json
-{"tests": [
-  {"clients": 420000, "months": 24, "postings_per_month": 40, "clients_per_group": 5000, "workers": 4},
-  {"clients": 420000, "months": 24, "postings_per_month": 40, "clients_per_group": 5000, "workers": 8}
-]}
+{"tests": {"clients": [100000, 400000, 800000], "months": 24, "postings_per_month": 60,
+           "clients_per_group": [2000, 5000], "workers": [2, 4, 8]}}
 ```
 
 Change them there, then Run. It runs, in 2 zones:
@@ -211,16 +211,20 @@ Change them there, then Run. It runs, in 2 zones:
   Tests with the same size share its data.
 - **Load test**: the placeholder model (`daily_catboost`: one CatBoost model, P10, EV and P90 together, the last 365
   days as inputs) fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), then the nightly
-  forecast of every fake client, `workers` groups of clients at a time, as production runs it, then its load into the
-  SQL table `load_test_final`, timed (the forecast, the SQL load, and the share of each step: reading, preparing,
+  forecast of every fake client, `workers` groups of clients at a time, as production runs it, then its final load,
+  timed: set by `FINAL_LOAD`, `"csv"` (a CSV file in the folder `load_test_forecast`: no table, no new dataset) or
+  `"sql"` (the SQL table `load_test_final`, as production). The times: the forecast, the final load, and the share
+  of each step of the forecast (reading, preparing,
   model, formatting, writing). Each test runs in its own process: its memory is measured on its own, and running out
   of memory is logged as a failed test (the next test still runs).
 - **The report** (even when a test failed): the dashboard **Load test** and `latest_report.html` in the folder
-  `load_test_report`: the tests of this run side by side, next to the earlier ones. Every test: one row of the
+  `load_test_report`. The number of clients is not a setting, so each client count has its own table and chart,
+  and only the settings (workers, clients per group) are compared there. Then where the forecast's time goes, and
+  each setting's time per 100,000 clients at each client count. Every test: one row of the
   dataset `load_test_log` (its `batch`: the run it was part of).
 
 **How to use it:** in a new empty project, import this notebook (Notebooks > New notebook > Import), fill in
-`CODE_ENV` and `OUTPUT_SQL_CONNECTION` (and the scenario's first tests if you like) and run all cells (Cell > Run
+`CODE_ENV`, `FINAL_LOAD` (and `OUTPUT_SQL_CONNECTION` for `"sql"`), and the scenario's first tests if you like, and run all cells (Cell > Run
 All). It sets up the project, then (`RUN_NOW`) runs what the scenario runs and shows the result. Later: change the
 tests in step 1 of the scenario, then Run. Run this notebook again after the forecast code changes, so the load test
 times the new code: it keeps the tests set on the scenario.
