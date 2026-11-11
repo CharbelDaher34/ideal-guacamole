@@ -12,7 +12,7 @@ each with every number:
     workers              groups of clients forecast at a time (production: the project variable inference_workers)
 Zone Data prep (recipe make_fake_data, not timed): the fake daily flows of each size listed (the first 4 numbers) in
 load_test_flows, one subfolder per size (size_path), each laid out like daily_flows (one file per group of clients and
-month), made only when not there yet; sizes no longer listed are removed (prepare_data).
+month), made only when not there yet; nothing is deleted by code (remove unused sizes by hand).
 Zone Load test (recipe run_load_test, then load_test_report): each test on its size's data: the placeholder model
 (models.DailyCatBoost) fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), the nightly
 forecast of every fake client (forecast.forecast_all) into the folder load_test_forecast, then its load into the SQL
@@ -197,14 +197,10 @@ def fake_data(wanted, cutoff):
 
 
 def prepare_data(tests, cutoff):
-    """Zone Data prep: the fake data of every size the tests use (fake_data), the sizes no longer listed (and the
-    files of earlier versions) removed first, to free the disk. Returns {size_path: data.json}."""
-    import dataiku
+    """Zone Data prep: the fake data of every size the tests use (fake_data), made only when not there yet.
+    Nothing is deleted: remove the sizes no longer needed by hand (the folder load_test_flows).
+    Returns {size_path: data.json}."""
     sizes = {size_path(t): t for t in tests}
-    folder = dataiku.Folder(FLOWS)
-    for path in folder.list_paths_in_partition():
-        if "/" + path.split("/")[1] not in sizes:
-            folder.delete_path(path)
     return {prefix: fake_data(test, cutoff) for prefix, test in sizes.items()}
 
 

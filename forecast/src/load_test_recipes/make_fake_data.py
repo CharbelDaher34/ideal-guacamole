@@ -1,7 +1,7 @@
 # Load test, zone Data prep (not timed): the fake daily flows the tests read, in load_test_flows, one subfolder per
 # size of fake data (clients, months, postings_per_month, clients_per_group) used by the tests in step 1 of the
 # scenario Run the load test, each laid out like the forecast project's daily_flows (one Parquet file per group of
-# clients and month). A size already there is kept (whatever day it was made); a size no longer listed is removed.
+# clients and month). A size already there is kept (whatever day it was made); nothing is deleted (remove unused sizes by hand).
 import pandas as pd
 
 from loadtest import prepare_data, step1_tests

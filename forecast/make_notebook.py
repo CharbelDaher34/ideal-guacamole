@@ -207,7 +207,7 @@ One scenario, **Run the load test**, run by hand. Its **step 1** (Scenarios > Ru
 Change them there, then Run. It runs, in 2 zones:
 
 - **Data prep** (not timed): the fake daily flows of each size listed in `load_test_flows`, one subfolder per size,
-  Parquet files laid out exactly like `daily_flows`; a size already there is kept, a size no longer listed removed.
+  Parquet files laid out exactly like `daily_flows`; a size already there is kept, nothing is deleted (remove unused sizes by hand).
   Tests with the same size share its data.
 - **Load test**: the placeholder model (`daily_catboost`: one CatBoost model, P10, EV and P90 together, the last 365
   days as inputs) fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), then the nightly
