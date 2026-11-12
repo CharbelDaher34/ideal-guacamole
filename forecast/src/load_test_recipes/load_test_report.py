@@ -35,7 +35,8 @@ STEPS = {"seconds_reading": "reading", "seconds_preparing": "preparing", "second
 STEP_COLORS = ["#2a6f97", "#61a5c2", "#e07a5f", "#f2cc8f", "#81b29a"]
 FINAL_COLOR = "#7d6b9e"         # the final load, after the forecast's 5 parts (STEP_COLORS)
 NUMBERS = ["test", "workers", "clients", "months", "postings_per_month", "clients_per_group", "seconds_forecast",
-           "seconds_sql_load", "peak_memory_mb", "cpus", "ram_gb", *STEPS]
+           "seconds_sql_load", "peak_memory_mb", "cpus", "ram_gb", "cpu_limit", "ram_limit_gb", "ram_free_gb", "disk_gb",
+           "disk_free_gb", *STEPS]
 CELL = "padding:5px 9px;border-bottom:1px solid #ddd;text-align:left"
 BEST = "background:#e8f5e9;font-weight:bold"
 NOTE = "margin:2px 0 8px;color:#555;font-size:13px"
@@ -138,8 +139,34 @@ def bar_chart(title, shown, xlabel):
 # 1. the run
 first = run.iloc[0]
 model = html.escape(str(run.iloc[-1].get("model") or "daily_catboost"))
-machine = ", ".join([f"{int(first['cpus'])} CPUs"] * pd.notna(first["cpus"])
-                    + [f"{first['ram_gb']:,.0f} GB of RAM"] * pd.notna(first["ram_gb"])) or "not recorded"
+
+
+def gb(v):
+    return f"{v / 1024:,.1f} TB" if v >= 1024 else f"{v:,.0f} GB" if v >= 10 else f"{v:,.1f} GB"
+
+
+def recorded(column):
+    """The column's value at the run's first test (the machine as the run started), None when not recorded (tests from
+    before it was measured: then the report says so)."""
+    return first[column] if pd.notna(first[column]) else None
+
+
+cpus, cpu_cap = recorded("cpus"), recorded("cpu_limit")
+ram, ram_cap, ram_free = recorded("ram_gb"), recorded("ram_limit_gb"), recorded("ram_free_gb")
+disk, disk_free = recorded("disk_gb"), recorded("disk_free_gb")
+measured = run[["ram_free_gb", "disk_gb"]].notna().any().any()     # this run's code measured the limits too
+cpu_text = ("not recorded" if cpus is None else f"{int(cpus)} CPUs it may run on" + (
+    f", but the job may use only {cpu_cap:g} CPUs' worth of time (its limit)" if cpu_cap is not None and cpu_cap < cpus
+    else ", no CPU limit on the job" if measured else ""))
+ram_text = ("not recorded" if ram is None else f"{gb(ram)} in the server" + (
+    f", the job is limited to {gb(ram_cap)}" if ram_cap is not None
+    else ", no memory limit on the job" if measured else "")
+    + (f"; {gb(ram_free)} free when the run started" if ram_free is not None else ""))
+disk_text = (f"{gb(disk_free)} free of {gb(disk)}, on the disk of the folder load_test_forecast"
+             if disk is not None and disk_free is not None else "not recorded")
+machine = (f"<ul style='margin:2px 0 0'><li>CPUs: {cpu_text}</li><li>RAM: {ram_text}</li><li>Disk: {disk_text}</li>"
+           "</ul><span style='color:#555'>Read from Linux as each test starts (/proc, the job's cgroup: the limits set "
+           "on its container or service, the folder's disk), the values of the first test. The server's other jobs share them.</span>")
 final_to = sorted({str(v) for v in run.get("final_load_to", pd.Series(dtype=str)).dropna() if str(v)})
 final_to = html.escape(" / ".join(final_to) or "the SQL table load_test_final")
 data = ("as in each setting" if data_varies else

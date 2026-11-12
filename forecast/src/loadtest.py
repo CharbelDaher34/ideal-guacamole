@@ -94,24 +94,119 @@ def step1_tests():
     return check_tests(step1_variables().get("tests"))
 
 
-def machine():
-    """The machine the tests run on: its CPUs (the ones this process may use) and its RAM in GB (the container's
-    limit when it is lower)."""
-    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
-    ram = None
+GB = 1024 ** 3
+
+
+def _read(path):
+    """A small file's text, stripped, or None when it can't be read."""
     try:
-        with open("/proc/meminfo") as f:
-            ram = next(int(line.split()[1]) * 1024 for line in f if line.startswith("MemTotal:"))
-        for limit in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
-            if os.path.exists(limit):
-                with open(limit) as f:
-                    value = f.read().strip()
-                if value.isdigit():
-                    ram = min(ram, int(value))
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _cgroup_dirs(v1_controller):
+    """The cgroup folders that limit this process for one controller (cgroup v2, or v1's v1_controller), its own first
+    then each parent up to the root (a limit set on a parent holds too). Read from /proc/self/cgroup."""
+    dirs = []
+    for line in (_read("/proc/self/cgroup") or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        _, controllers, path = parts
+        if controllers == "":                                               # cgroup v2: one tree
+            root = "/sys/fs/cgroup"
+        elif v1_controller in controllers.split(","):                       # cgroup v1: one tree per controller
+            root = next((r for r in (f"/sys/fs/cgroup/{controllers}", f"/sys/fs/cgroup/{v1_controller}")
+                         if os.path.isdir(r)), None)
+            if root is None:
+                continue
+        else:
+            continue
+        here = os.path.join(root, path.lstrip("/"))
+        if not os.path.isdir(here):          # in a container the path is the host's: the container's cgroup is the root
+            here = root
+        while True:
+            dirs.append(here)
+            if os.path.normpath(here) == os.path.normpath(root):
                 break
-    except (OSError, StopIteration):
-        pass
-    return {"cpus": cpus, "ram_gb": round(ram / 1024 ** 3, 1) if ram else None}
+            here = os.path.dirname(here)
+    return dirs
+
+
+def cpu_limit():
+    """The CPU limit of this process's cgroup (container), in CPUs: its CPU time quota over the period (cgroup v2
+    cpu.max, v1 cpu.cfs_quota_us / cpu.cfs_period_us), the lowest of its own and its parents'. None: no limit."""
+    limits = []
+    for d in _cgroup_dirs("cpu"):
+        v2 = (_read(os.path.join(d, "cpu.max")) or "").split()
+        if len(v2) == 2 and v2[0].isdigit() and v2[1].isdigit() and int(v2[1]):
+            limits.append(int(v2[0]) / int(v2[1]))
+        quota, period = _read(os.path.join(d, "cpu.cfs_quota_us")), _read(os.path.join(d, "cpu.cfs_period_us"))
+        if quota and period and quota.isdigit() and period.isdigit() and int(period):    # -1 (no limit) is not digits
+            limits.append(int(quota) / int(period))
+    return round(min(limits), 2) if limits else None
+
+
+def _meminfo():
+    """/proc/meminfo in bytes: {"MemTotal": ..., "MemAvailable": ..., ...}."""
+    info = {}
+    for line in (_read("/proc/meminfo") or "").splitlines():
+        name, _, value = line.partition(":")
+        if value.split() and value.split()[0].isdigit():
+            info[name] = int(value.split()[0]) * 1024
+    return info
+
+
+def memory_limit():
+    """The memory limit of this process's cgroup (container) and the memory free under it, in bytes: (limit, free),
+    the cgroup with the lowest limit (v2 memory.max, v1 memory.limit_in_bytes; a v1 'limit' above the server's RAM
+    means none). Free = the limit - what the cgroup uses, not counting the file cache it can drop (inactive_file, as
+    docker stats counts it). (None, None): no limit."""
+    total = _meminfo().get("MemTotal")
+    best = (None, None)
+    for d in _cgroup_dirs("memory"):
+        limit, used = _read(os.path.join(d, "memory.max")), _read(os.path.join(d, "memory.current"))
+        stat_name = "inactive_file"
+        if limit is None:
+            limit, used, stat_name = (_read(os.path.join(d, "memory.limit_in_bytes")),
+                                      _read(os.path.join(d, "memory.usage_in_bytes")), "total_inactive_file")
+        if not (limit and limit.isdigit()) or (total and int(limit) >= total):
+            continue
+        stat = dict(line.split() for line in (_read(os.path.join(d, "memory.stat")) or "").splitlines()
+                    if len(line.split()) == 2)
+        cache = int(stat.get(stat_name, 0)) if str(stat.get(stat_name, 0)).isdigit() else 0
+        free = int(limit) - (int(used) - cache) if used and used.isdigit() else None
+        if best[0] is None or int(limit) < best[0]:
+            best = (int(limit), free)
+    return best
+
+
+def machine(folder=OUTPUT):
+    """The machine, read from Linux when a test starts (nothing is set by hand):
+        cpus           CPUs this process may run on (os.sched_getaffinity, else os.cpu_count)
+        cpu_limit      its container's CPU limit, in CPUs (cpu_limit), empty when there is none
+        ram_gb         the server's RAM (/proc/meminfo MemTotal)
+        ram_limit_gb   its container's memory limit (memory_limit), empty when there is none
+        ram_free_gb    the RAM free for it: /proc/meminfo MemAvailable, or less when the container's limit leaves less
+        disk_gb, disk_free_gb   the size and free space of the disk of the folder `folder` (shutil.disk_usage)
+    Each is empty when it can't be read."""
+    import shutil
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+    info = _meminfo()
+    limit, limit_free = memory_limit()
+    free = [v for v in (info.get("MemAvailable"), limit_free) if v is not None]
+    disk = (None, None)
+    try:
+        import dataiku
+        usage = shutil.disk_usage(local_path(dataiku.Folder(folder)))
+        disk = (usage.total, usage.free)
+    except Exception as e:
+        print(f"machine: the disk of the folder {folder} could not be read: {e}", flush=True)
+    gb = lambda v: round(v / GB, 1) if v is not None else None  # noqa: E731
+    return {"cpus": cpus, "cpu_limit": cpu_limit(), "ram_gb": gb(info.get("MemTotal")), "ram_limit_gb": gb(limit),
+            "ram_free_gb": gb(min(free)) if free else None, "disk_gb": gb(disk[0]), "disk_free_gb": gb(disk[1])}
 
 
 def size_path(test):
@@ -251,13 +346,22 @@ def final_load():
 
 def load_to_file(output=OUTPUT):
     """The final load "csv": the current forecast of the folder `output` (one Parquet file per group) into one CSV
-    file of the same folder (FINAL_FILE), replacing the previous one, one group's file at a time."""
+    file of the same folder (FINAL_FILE), replacing the previous one, one group's file at a time. Polars writes the
+    CSV (in Rust, on several threads): pandas' to_csv took most of the final load turning the numbers into text."""
     from cashflow import read_parquet
     from forecast import current_output
     folder, version, paths = current_output(output)
     with folder.get_writer(FINAL_FILE) as writer:
         for n, path in enumerate(paths):
-            writer.write(read_parquet(folder, path).to_pandas().to_csv(header=n == 0, index=False).encode())
+            writer.write(csv_bytes(read_parquet(folder, path), header=n == 0))
+
+
+def csv_bytes(frame, header=True):
+    """A Polars DataFrame as CSV bytes (dates as 2026-11-10, empty for a missing value, like pandas wrote them)."""
+    try:
+        return frame.write_csv(include_header=header).encode()
+    except TypeError:                         # Polars before 0.19.17 names it has_header
+        return frame.write_csv(has_header=header).encode()
 
 
 def run_test(test, info):

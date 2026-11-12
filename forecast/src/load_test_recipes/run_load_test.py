@@ -23,12 +23,17 @@ LOG = {"batch": "string", "test": "bigint", "run_at": "string", "status": "strin
        **{f"seconds_{k}": "double" for k in STEPS}, "seconds_forecast": "double", "seconds_sql_load": "double",
        "clients_per_second": "double", "peak_memory_mb": "bigint",
        "daily_rows_read": "bigint", "clients_ok": "bigint", "clients_not_enough_history": "bigint",
-       "clients_no_postings": "bigint", "cpus": "bigint", "ram_gb": "double", "final_load_to": "string"}
+       "clients_no_postings": "bigint", "cpus": "bigint", "ram_gb": "double", "final_load_to": "string",
+       "cpu_limit": "double", "ram_limit_gb": "double", "ram_free_gb": "double", "disk_gb": "double",
+       "disk_free_gb": "double"}       # the machine: loadtest.machine(), read from Linux as each test starts
 tests = step1_tests()
 batch = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 rows, failed = [], []
 for n, test in enumerate(tests, 1):
     row = {"batch": batch, "test": n, "run_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), **test, **machine()}
+    print(f"PROGRESS test {n}/{len(tests)}: machine at the start: " + ", ".join(
+        f"{k} {row[k]}" for k in ("cpus", "cpu_limit", "ram_gb", "ram_limit_gb", "ram_free_gb", "disk_gb",
+                                  "disk_free_gb")), flush=True)
     print(f"PROGRESS test {n}/{len(tests)}: {test['workers']} workers, {test['clients']:,} clients, {test['months']} "
           f"months, {test['postings_per_month']} postings a month, {test['clients_per_group']:,} per group", flush=True)
     info = data_info(test)
