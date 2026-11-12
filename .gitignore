@@ -13,3 +13,4 @@ __pycache__/
 
 # sandbox: the saved Free Edition licence (make wipe)
 sandbox/keep/
+*.zip

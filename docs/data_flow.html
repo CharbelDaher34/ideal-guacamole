@@ -1,0 +1,397 @@
+<title>Cash Forecast Data Flow</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&display=swap">
+<style>
+/* Layout: one vertical flow, 4 stages top to bottom; each stage is a row of blocks joined by arrows */
+:root {
+  --bg: #f5f7f8;
+  --panel: #ffffff;
+  --ink: #15232b;
+  --muted: #5b6b74;
+  --line: #d5dde1;
+  --sql: #2f5d8a;   --sql-soft: #e3ecf5;
+  --stage: #a8641a; --stage-soft: #f7ecdf;
+  --store: #1f7a6d; --store-soft: #def1ed;
+  --infer: #5a4fa8; --infer-soft: #e9e7f7;
+  --new: #c2410c;   --new-soft: #fde5d8;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10171b; --panel: #172128; --ink: #e4ebee; --muted: #93a3ab; --line: #2b3a42;
+  --sql: #7fb0e0;   --sql-soft: #1c2c3b;
+  --stage: #e3a35c; --stage-soft: #33271a;
+  --store: #5cc6b5; --store-soft: #16302c;
+  --infer: #a79ef0; --infer-soft: #25223d;
+  --new: #fb8a55;   --new-soft: #3a2117;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #10171b; --panel: #172128; --ink: #e4ebee; --muted: #93a3ab; --line: #2b3a42;
+  --sql: #7fb0e0;   --sql-soft: #1c2c3b;
+  --stage: #e3a35c; --stage-soft: #33271a;
+  --store: #5cc6b5; --store-soft: #16302c;
+  --infer: #a79ef0; --infer-soft: #25223d;
+  --new: #fb8a55;   --new-soft: #3a2117;
+  color-scheme: dark }
+
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--font-body); }
+.wrap { max-width: 1080px; margin: 0 auto; padding-block: 32px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 40px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: 2.1rem; }
+h2 { font-size: 1.45rem; }
+h3 { font-size: 1.02rem; }
+p { margin: 0; max-width: 68ch; }
+code, .mono { font-family: var(--font-mono); font-size: .86em; }
+.lead { color: var(--muted); font-size: 1.02rem; margin-top: 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 16px; font-size: .85rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+
+section { display: grid; gap: 18px; }
+.head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.num { font-family: var(--font-mono); font-size: .8rem; letter-spacing: .06em; padding: 2px 8px; border-radius: 4px;
+  color: var(--panel); background: var(--c); }
+.when { font-size: .82rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+
+/* flow of blocks */
+.flow { display: flex; align-items: stretch; gap: 0; overflow-x: auto; padding-bottom: 4px; }
+.block { flex: 1 1 0; min-width: 150px; background: var(--panel); border: 1px solid var(--line); border-top: 4px solid var(--c);
+  border-radius: 6px; padding: 12px 14px; display: grid; align-content: start; gap: 6px; }
+.block .tag { font-size: .7rem; text-transform: uppercase; letter-spacing: .09em; color: var(--c); font-weight: 600; }
+.block h3 { font-size: .98rem; }
+.block p { font-size: .84rem; color: var(--muted); }
+.block .lib { font-family: var(--font-mono); font-size: .74rem; background: var(--soft); color: var(--ink);
+  border-radius: 4px; padding: 2px 6px; justify-self: start; }
+.arrow { flex: 0 0 28px; display: grid; place-items: center; color: var(--muted); font-size: 1.1rem; }
+.sql { --c: var(--sql); --soft: var(--sql-soft); }
+.stg { --c: var(--stage); --soft: var(--stage-soft); }
+.sto { --c: var(--store); --soft: var(--store-soft); }
+.inf { --c: var(--infer); --soft: var(--infer-soft); }
+.nw  { --c: var(--new); --soft: var(--new-soft); }
+@media (max-width: 760px) {
+  .flow { flex-direction: column; overflow: visible; }
+  .block { min-width: 0; }
+  .arrow { flex-basis: 24px; transform: rotate(90deg); }
+}
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px; display: grid; gap: 12px; min-width: 0; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.note { font-size: .86rem; color: var(--muted); }
+
+/* sample rows */
+.tablebox { overflow-x: auto; }
+table { border-collapse: collapse; font-family: var(--font-mono); font-size: .8rem; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-family: var(--font-body); font-weight: 600; font-size: .74rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+td.n { text-align: right; }
+.types td { color: var(--muted); font-size: .72rem; border-bottom: 2px solid var(--line); }
+
+/* file grid */
+.grid-wrap { overflow-x: auto; }
+.fgrid { display: grid; grid-template-columns: 86px repeat(var(--m), minmax(14px, 1fr)); gap: 3px; min-width: 520px; font-family: var(--font-mono); font-size: .7rem; }
+.fgrid .rl { color: var(--muted); align-self: center; white-space: nowrap; }
+.fgrid .ml { color: var(--muted); text-align: center; font-size: .62rem; white-space: nowrap; }
+.cell { height: 18px; border-radius: 3px; background: var(--store-soft); border: 1px solid color-mix(in srgb, var(--store) 40%, transparent); }
+.cell.cur { background: var(--new-soft); border-color: var(--new); }
+.cell.gap { background: none; border: none; display: grid; place-items: center; color: var(--muted); }
+.tree { font-family: var(--font-mono); font-size: .8rem; line-height: 1.7; white-space: pre; overflow-x: auto; margin: 0; }
+.tree b { color: var(--store); font-weight: 500; }
+.tree i { color: var(--muted); font-style: normal; }
+.stats { display: flex; flex-wrap: wrap; gap: 10px; }
+.stat { background: var(--soft); border-radius: 6px; padding: 8px 12px; display: grid; }
+.stat strong { font-family: var(--font-display); font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+.stat span { font-size: .78rem; color: var(--muted); }
+
+/* timeline */
+.timeline { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; }
+.day { height: 34px; border-radius: 4px; background: var(--store-soft); display: grid; place-items: center;
+  font-family: var(--font-mono); font-size: .7rem; color: var(--muted); }
+.day.new { background: var(--new); color: var(--panel); font-weight: 500; }
+.day.today { background: none; border: 1px dashed var(--line); }
+.tl-labels { display: flex; justify-content: space-between; font-size: .78rem; color: var(--muted); gap: 12px; flex-wrap: wrap; }
+.steps { display: grid; gap: 8px; counter-reset: s; margin: 0; padding: 0; list-style: none; }
+.steps li { display: grid; grid-template-columns: 26px 1fr; gap: 10px; align-items: start; font-size: .9rem; }
+.steps li::before { counter-increment: s; content: counter(s); font-family: var(--font-mono); font-size: .75rem;
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--soft); color: var(--c); font-weight: 600; }
+
+/* workers */
+.sim { display: grid; gap: 14px; }
+.queue { display: flex; flex-wrap: wrap; gap: 3px; }
+.chip { width: 22px; height: 18px; border-radius: 3px; font-family: var(--font-mono); font-size: .58rem; display: grid; place-items: center;
+  background: var(--panel); border: 1px solid var(--line); color: var(--muted); transition: background .25s, color .25s, border-color .25s; }
+.chip.run { background: var(--infer); border-color: var(--infer); color: var(--panel); }
+.chip.done { background: var(--infer-soft); border-color: transparent; color: var(--infer); }
+.lanes { display: grid; gap: 6px; }
+.lane { display: grid; grid-template-columns: 78px 64px 1fr; gap: 10px; align-items: center; font-size: .8rem; }
+.lane .who { font-weight: 600; }
+.lane .grp { font-family: var(--font-mono); color: var(--infer); }
+.bar { display: grid; grid-template-columns: 9fr 44fr 39fr 6fr 2fr; height: 20px; border-radius: 4px; overflow: hidden; background: var(--bg); border: 1px solid var(--line); }
+.bar i { display: block; opacity: .18; transition: opacity .2s; }
+.bar i.on { opacity: 1; }
+.bar i:nth-child(1) { background: var(--sql); }
+.bar i:nth-child(2) { background: var(--stage); }
+.bar i:nth-child(3) { background: var(--infer); }
+.bar i:nth-child(4) { background: var(--store); }
+.bar i:nth-child(5) { background: var(--new); }
+.controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: .85rem; color: var(--muted); }
+button { font: 600 .85rem var(--font-body); color: var(--panel); background: var(--infer); border: 0; border-radius: 5px; padding: 7px 14px; cursor: pointer; }
+button:focus-visible { outline: 3px solid var(--infer-soft); outline-offset: 2px; }
+.wsteps { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.ws { border-radius: 6px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--c); display: grid; gap: 4px; }
+.ws .pct { font-family: var(--font-mono); font-size: .75rem; color: var(--c); }
+.ws h3 { font-size: .92rem; }
+.ws p { font-size: .8rem; color: var(--muted); }
+.k-read { --c: var(--sql); } .k-prep { --c: var(--stage); } .k-model { --c: var(--infer); } .k-fmt { --c: var(--store); } .k-write { --c: var(--new); }
+.end { display: flex; flex-wrap: wrap; gap: 0; align-items: stretch; }
+@media (prefers-reduced-motion: reduce) { .chip, .bar i { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Cash forecast data flow</h1>
+    <p class="lead">From the bank's warehouse to the nightly forecast: how the data is read, how it is stored as Parquet files, what changes each night, and what each inference worker does.</p>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--sql)"></i>SQL / warehouse</span>
+      <span><i class="dot" style="background:var(--stage)"></i>Staging code</span>
+      <span><i class="dot" style="background:var(--store)"></i>Stored files</span>
+      <span><i class="dot" style="background:var(--new)"></i>New tonight</span>
+      <span><i class="dot" style="background:var(--infer)"></i>Inference</span>
+    </div>
+  </header>
+
+  <!-- 1 -->
+  <section class="sql">
+    <div class="head"><span class="num" style="--c:var(--sql)">1</span><h2>Read from the warehouse</h2><span class="when">staging · recipe stage_tables</span></div>
+    <div class="flow">
+      <div class="block sql"><span class="tag">Warehouse (Oracle)</span><h3>2 tables, read-only</h3>
+        <p><code>DIM_CUSTOMER</code>: the clients (business clients kept).<br><code>FCT_STATEMENT_ENTRY</code>: every posting.</p></div>
+      <div class="arrow">→</div>
+      <div class="block sql"><span class="tag">One SQL query</span><h3>The database adds up</h3>
+        <p>Postings summed per client, day and category. Reversals and own-account transfers are removed. Only the totals travel.</p>
+        <span class="lib">warehouse.py</span></div>
+      <div class="arrow">→</div>
+      <div class="block stg"><span class="tag">Batches</span><h3>200,000 rows at a time</h3>
+        <p>Rows stream in; memory never holds the whole result.</p>
+        <span class="lib">Dataiku SQLExecutor2 → pandas</span></div>
+      <div class="arrow">→</div>
+      <div class="block stg"><span class="tag">Sort by group</span><h3>Into group buckets</h3>
+        <p>Each row goes to its client's group, in temp files on local disk.</p>
+        <span class="lib">Spread (temp files)</span></div>
+      <div class="arrow">→</div>
+      <div class="block sto"><span class="tag">Save</span><h3>Parquet files</h3>
+        <p>One group at a time: split by month, one file per group per month.</p>
+        <span class="lib">Polars write_parquet</span></div>
+    </div>
+    <div class="card">
+      <h3>What comes back from the query: one row per client, day and category</h3>
+      <div class="tablebox"><table>
+        <thead><tr><th>client_no</th><th>day</th><th>category</th><th>money_in</th><th>money_out</th><th>postings</th></tr></thead>
+        <tbody>
+          <tr class="types"><td>text</td><td>date</td><td>text</td><td>number (SAR)</td><td>number (SAR)</td><td>count</td></tr>
+          <tr><td>100245</td><td>2026-11-09</td><td>CUSTOMER_RECEIPTS</td><td class="n">182,400.00</td><td class="n">0.00</td><td class="n">14</td></tr>
+          <tr><td>100245</td><td>2026-11-09</td><td>SALARIES</td><td class="n">0.00</td><td class="n">96,000.00</td><td class="n">1</td></tr>
+          <tr><td>100245</td><td>2026-11-10</td><td>SUPPLIERS</td><td class="n">0.00</td><td class="n">41,250.50</td><td class="n">3</td></tr>
+          <tr><td>100318</td><td>2026-11-10</td><td>FEES</td><td class="n">0.00</td><td class="n">35.00</td><td class="n">2</td></tr>
+        </tbody>
+      </table></div>
+      <p class="note">Example values. A client with no posting on a day has no row for that day. Categories come from the transaction type (TRNS_TYP).</p>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section class="sto">
+    <div class="head"><span class="num" style="--c:var(--store)">2</span><h2>How it is stored</h2><span class="when">folder daily_flows</span></div>
+    <div class="cols">
+      <div class="card sto">
+        <h3>Clients split into groups, files split by month</h3>
+        <div class="stats">
+          <div class="stat"><strong>400,000</strong><span>clients</span></div>
+          <div class="stat"><strong>÷ 5,000</strong><span>clients per group</span></div>
+          <div class="stat"><strong>80</strong><span>groups</span></div>
+          <div class="stat"><strong>≈ 2,000</strong><span>files (80 × 25 months)</span></div>
+        </div>
+        <p class="note">The group of a client is fixed: a hash of its client number (CRC32) modulo 80. The same client is always in the same group, so its rows are always in the same files.</p>
+      </div>
+      <div class="card sto">
+        <h3>The folder</h3>
+<pre class="tree">daily_flows/
+├── <b>manifest.json</b>            <i>the index: group → month → file</i>
+├── first_days_&lt;run&gt;.parquet   <i>each client's first posting day</i>
+├── group_0000/
+│   ├── 2024-11_&lt;run&gt;.parquet  <i>~5,000 clients, 1 month</i>
+│   ├── 2024-12_&lt;run&gt;.parquet
+│   └── … 2026-11_&lt;run&gt;.parquet
+├── group_0001/ …
+└── group_0079/ …</pre>
+      </div>
+    </div>
+    <div class="card sto">
+      <h3>Every square is one Parquet file</h3>
+      <div class="grid-wrap"><div class="fgrid" id="fgrid"></div></div>
+      <p class="note">Rows: groups of about 5,000 clients. Columns: calendar months. Orange: the current month, the only files that change during the month.</p>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section class="nw">
+    <div class="head"><span class="num" style="--c:var(--new)">3</span><h2>Each night, only the new days</h2><span class="when">staging, every night</span></div>
+    <div class="card nw">
+      <h3>Already stored up to 9 Nov. Tonight's cut-off is yesterday, 10 Nov.</h3>
+      <div class="timeline" id="timeline"></div>
+      <div class="tl-labels"><span>Already in daily_flows</span><span>Read tonight: only the days after the last stored day, up to yesterday</span></div>
+    </div>
+    <div class="cols">
+      <div class="card nw">
+        <h3>What happens to the files</h3>
+        <ol class="steps">
+          <li><span>The query reads <strong>only 10 Nov</strong> (a date filter on the value date).</span></li>
+          <li><span>For each group, its <strong>Nov file</strong> is read, the new day is added, and the result is written as a <strong>new file</strong>. The files of older months are not touched.</span></li>
+          <li><span>The <strong>manifest</strong> switches to the new files, only after every file is written.</span></li>
+          <li><span>The old Nov files are then deleted.</span></li>
+        </ol>
+      </div>
+      <div class="card nw">
+        <h3>Special cases</h3>
+        <ol class="steps">
+          <li><span><strong>First run or Full rebuild:</strong> the whole history is read (the setting history_months), and every file is written from nothing.</span></li>
+          <li><span><strong>Nothing new:</strong> daily_flows is not touched.</span></li>
+          <li><span><strong>A failed night:</strong> the manifest still points to the old files, so the data stays as it was. The next night reads the same days again.</span></li>
+          <li><span><strong>A new month starts:</strong> each group gets a new month file.</span></li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section class="inf">
+    <div class="head"><span class="num" style="--c:var(--infer)">4</span><h2>Nightly forecast: workers take one group each</h2><span class="when">recipe nightly_forecast</span></div>
+    <div class="card inf sim">
+      <h3>80 groups, 4 workers: each worker takes the next waiting group</h3>
+      <div class="queue" id="queue" aria-label="Groups of clients"></div>
+      <div class="lanes" id="lanes"></div>
+      <div class="controls"><button type="button" id="replay">Replay</button><span id="simstatus"></span></div>
+      <p class="note">Workers are threads (setting inference_workers). Each holds one group in memory, so memory grows with the number of workers. In the load test, 4 workers was the fastest on the shared server.</p>
+    </div>
+    <div class="card inf">
+      <h3>What one worker does with one group (about 5,000 clients)</h3>
+      <div class="wsteps">
+        <div class="ws k-read"><span class="pct">1 · 9% of the time</span><h3>Read</h3><p>Only its group's last 13 month files, straight from disk. Keeps the last 365 days.</p><span class="lib mono">Polars read_parquet</span></div>
+        <div class="ws k-prep"><span class="pct">2 · 44%</span><h3>Prepare</h3><p>Drops clients with too little history. Builds 3 rows per client and category (one per window), with day_365 … day_1.</p></div>
+        <div class="ws k-model"><span class="pct">3 · 39%</span><h3>Model</h3><p>Gives P10, EV and P90 for every row. Uses its share of the CPU cores.</p><span class="lib mono">CatBoost</span></div>
+        <div class="ws k-fmt"><span class="pct">4 · 6%</span><h3>Format</h3><p>One wide row per client, with a status: OK, NOT_ENOUGH_HISTORY or NO_POSTINGS.</p></div>
+        <div class="ws k-write"><span class="pct">5 · 1%</span><h3>Write</h3><p>One file, <code>part_00007.parquet</code>. One worker writes at a time.</p></div>
+      </div>
+      <p class="note">Shares measured in the load test: 400,000 clients, 4 workers, about 56 seconds of forecasting.</p>
+    </div>
+    <div class="flow">
+      <div class="block inf"><span class="tag">All 80 groups done</span><h3>80 result files</h3><p>In <code>forecast/forecast_&lt;date&gt;_&lt;model&gt;/</code></p></div>
+      <div class="arrow">→</div>
+      <div class="block sto"><span class="tag">Switch</span><h3>current.txt</h3><p>Points to tonight's results. A failed night keeps the previous forecast.</p></div>
+      <div class="arrow">→</div>
+      <div class="block sql"><span class="tag">SQL load</span><h3>final_forecast</h3><p>The files are loaded into the SQL table, one per group, one row per client.</p></div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  // file grid: a few groups x 25 months
+  var g = document.getElementById("fgrid");
+  var months = [], d = new Date(2024, 10, 1);
+  for (var i = 0; i < 25; i++) { months.push(new Date(d.getFullYear(), d.getMonth() + i, 1)); }
+  g.style.setProperty("--m", months.length);
+  var html = '<div class="rl"></div>';
+  var names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  months.forEach(function (m, i) {
+    var show = i === 0 || m.getMonth() === 0 || i === months.length - 1;
+    html += '<div class="ml">' + (show ? names[m.getMonth()] + " " + String(m.getFullYear()).slice(2) : "") + "</div>";
+  });
+  ["group 0000", "group 0001", "group 0002", "…", "group 0079"].forEach(function (r) {
+    html += '<div class="rl">' + r + "</div>";
+    months.forEach(function (m, i) {
+      if (r === "…") { html += '<div class="cell gap">' + (i % 6 === 0 ? "⋮" : "") + "</div>"; return; }
+      html += '<div class="cell' + (i === months.length - 1 ? " cur" : "") + '" title="' + r + ", " + names[m.getMonth()] + " " + m.getFullYear() + '"></div>';
+    });
+  });
+  g.innerHTML = html;
+
+  // timeline: 30 Oct .. 10 Nov stored, 10 Nov new, 11 Nov today
+  var t = document.getElementById("timeline"), th = "";
+  var days = ["31 Oct","1 Nov","2","3","4","5","6","7","8","9","10","11 today"];
+  days.forEach(function (x, i) {
+    var cls = i === 10 ? "day new" : i === 11 ? "day today" : "day";
+    th += '<div class="' + cls + '">' + x + "</div>";
+  });
+  t.innerHTML = th;
+
+  // workers simulation
+  var N = 80, W = 4, STEPS = [9, 44, 39, 6, 2], TOTAL = 100;
+  var queue = document.getElementById("queue"), lanes = document.getElementById("lanes"), status = document.getElementById("simstatus");
+  var chips = [];
+  for (var c = 0; c < N; c++) {
+    var el = document.createElement("div"); el.className = "chip"; el.textContent = c; el.title = "group " + c;
+    queue.appendChild(el); chips.push(el);
+  }
+  var laneEls = [];
+  for (var w = 0; w < W; w++) {
+    var lane = document.createElement("div"); lane.className = "lane";
+    lane.innerHTML = '<span class="who">Worker ' + (w + 1) + '</span><span class="grp"></span><div class="bar"><i></i><i></i><i></i><i></i><i></i></div>';
+    lanes.appendChild(lane); laneEls.push(lane);
+  }
+  var state, timer;
+  function reset(doneCount) {
+    state = { next: 0, done: 0, workers: [] };
+    chips.forEach(function (ch) { ch.className = "chip"; });
+    for (var i = 0; i < doneCount; i++) { chips[i].className = "chip done"; }
+    state.next = doneCount; state.done = doneCount;
+    for (var w = 0; w < W; w++) {
+      // staggered progress so the lanes differ
+      state.workers.push({ group: null, p: 0, speed: 0.9 + ((w * 37) % 10) / 25 });
+      take(w, (w * 23) % TOTAL);
+    }
+    draw();
+  }
+  function take(w, p) {
+    var wk = state.workers[w];
+    if (state.next >= N) { wk.group = null; return; }
+    wk.group = state.next++; wk.p = p || 0;
+    chips[wk.group].className = "chip run";
+  }
+  function stepOf(p) { var acc = 0; for (var i = 0; i < STEPS.length; i++) { acc += STEPS[i]; if (p < acc) return i; } return STEPS.length - 1; }
+  function draw() {
+    state.workers.forEach(function (wk, w) {
+      var lane = laneEls[w], bars = lane.querySelectorAll(".bar i");
+      lane.querySelector(".grp").textContent = wk.group === null ? "idle" : "group " + wk.group;
+      var s = wk.group === null ? -1 : stepOf(wk.p);
+      bars.forEach(function (b, i) { b.className = i === s ? "on" : ""; });
+    });
+    status.textContent = state.done + " of " + N + " groups done";
+  }
+  function tick() {
+    var busy = false;
+    state.workers.forEach(function (wk, w) {
+      if (wk.group === null) return;
+      busy = true;
+      wk.p += 4 * wk.speed;
+      if (wk.p >= TOTAL) {
+        chips[wk.group].className = "chip done"; state.done++;
+        take(w, 0);
+      }
+    });
+    draw();
+    if (!busy) { clearInterval(timer); status.textContent = "All 80 groups done → current.txt → SQL load"; }
+  }
+  function play() {
+    clearInterval(timer); reset(0);
+    timer = setInterval(tick, 90);
+  }
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  reset(12);                       // a readable resting state first
+  if (!reduce) { setTimeout(function () { timer = setInterval(tick, 90); }, 1200); }
+  document.getElementById("replay").addEventListener("click", play);
+})();
+</script>
