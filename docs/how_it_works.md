@@ -26,7 +26,7 @@ flowchart TB
   V[("saved model cash_forecast<br/>one version per model")]
   C["Step 3 · champion_challenger<br/>+ promote if better"]
   F["Step 4 · nightly_forecast, load_forecast_sql<br/>forecasts every active client, loads it into SQL"]
-  O[("forecast (Parquet, by night)<br/>final_forecast (SQL)<br/>inference_log")]
+  O[("forecast (Parquet, by night)<br/>final_forecast (SQL: EDW_AI.FINAL_FORECAST)<br/>inference_log")]
   L["Lab notebook · data scientist<br/>tries models (outside the flow)"]
 
   W --> S --> D
@@ -124,8 +124,14 @@ production model; the nightly forecast always uses it. Rolling back means activa
 ### The output: the folder `forecast`, then the SQL table `final_forecast`
 
 **One row per active client.** Each night's forecast is a subfolder of Parquet files (one per group of clients),
-`forecast_<cut-off>_<model ID>`, kept; `current.txt` points to the newest. The SQL table `final_forecast`
-(`OUTPUT_SQL_CONNECTION`) holds the current one.
+`forecast_<cut-off>_<model ID>`, kept; `current.txt` points to the newest. The SQL table of the setup's
+`FORECAST_SCHEMA` and `FORECAST_TABLE` on `FORECAST_CONNECTION` (by default `EDW_AI.FINAL_FORECAST` on `cm_test_env`;
+in the Flow, the dataset `final_forecast`, linked to it) holds the current one. The setup creates that table with SQL
+when it is not there (and adds the columns a newer version writes), with the settings' name, not one Dataiku picks.
+On Oracle the recipe writes it with `oracledb` (in the code env), logging in with the connection's login, which
+Dataiku gives only if the connection's "Details readable by" includes your group; on another database, through
+Dataiku's writer into `final_forecast`. The recipe reads where to write from the project variables
+`forecast_sql_connection`, `forecast_sql_schema` and `forecast_sql_table`, which the setup sets.
 
 | Columns | Meaning |
 |---|---|
@@ -147,6 +153,10 @@ production model; the nightly forecast always uses it. Rolling back means activa
   `SELECT`s (`table_query`, `daily_totals_query` in `warehouse.py`). They name the columns, so they don't depend on
   the column list Dataiku keeps for each table (an empty list there caused "Invalid number of columns" in the old
   project). Each query is printed in the job log (`PROGRESS SQL:`).
+- **Which tables:** the setup's settings `CLIENTS_SCHEMA`, `CLIENTS_TABLE`, `POSTINGS_SCHEMA`, `POSTINGS_TABLE` (by
+  default `EDW.DIM_CUSTOMER` and `EDW.FCT_STATEMENT_ENTRY`), both through `EDW_CONNECTION`: one query joins them, so
+  they must be on the same connection. In the Flow they stay the datasets `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY`,
+  each linked to its table; the queries use each dataset's own table name.
 - **The warehouse does the heavy work, so little travels:**
   - Clients: the bank's own conditions (`warehouse.py`): business clients `PRIME_RM LIKE '12%' OR SCTR_DSC =
     'Sole Proprietorships'` (`CLIENTS_BUSINESS`), and only each one's current row `END_DT = DATE '2199-12-31'`
@@ -219,8 +229,8 @@ With no production model yet, the first model is promoted. Every decision, its r
 - `current.txt` points to tonight's subfolder **only once every group has worked**: a failed run leaves the previous
   forecast current.
 - Adds one row to `inference_log` (section 6).
-- **Then the SQL load**, the scenario's next step: the current subfolder into the table `final_forecast`, replacing
-  the previous one. If it fails, the forecast is still complete in the folder: build `final_forecast` alone to retry.
+- **Then the SQL load**, the scenario's next step: the current subfolder into the forecast's table (`final_forecast`),
+  replacing the previous one in one transaction on Oracle. If it fails, the forecast is still complete in the folder: build `final_forecast` alone to retry.
 
 ### The placeholder model: `daily_catboost` (option A)
 
@@ -291,8 +301,9 @@ fake clients, the earlier 3-model placeholder (12 periods of 30 days as inputs) 
   scientist's models are ready.
 - Every model is tracked, deployed as a version, and activated only if it passes the promotion rules.
 - The warehouse is only read (read-only `SELECT`s of the columns used), never written to. The daily flows and the
-  forecast are Parquet files (for speed); the forecast is then loaded into the SQL table `final_forecast` on a
-  database the project may write into (`OUTPUT_SQL_CONNECTION`); the logs and small tables are CSV files.
+  forecast are Parquet files (for speed); the forecast is then loaded into a SQL table on a database the project may
+  write into (`FORECAST_CONNECTION`, `FORECAST_SCHEMA`.`FORECAST_TABLE`, made by the setup; `final_forecast` in the
+  Flow); the logs and small tables are CSV files.
 - At least 365 days of history to get a forecast. Models are tested on the last 6 periods of 30 days.
 
 **To confirm at the bank**

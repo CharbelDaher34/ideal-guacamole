@@ -7,11 +7,12 @@ import pandas as pd
 
 if FINAL_LOAD not in ("csv", "sql"):
     raise RuntimeError(f"FINAL_LOAD is {FINAL_LOAD!r}: set it to \"csv\" or \"sql\" in the settings cell above.")
-placeholders = [name for name, value in (("CODE_ENV", CODE_ENV), ("OUTPUT_SQL_CONNECTION", OUTPUT_SQL_CONNECTION))
-                if str(value).startswith("YOUR_") and (name != "OUTPUT_SQL_CONNECTION" or FINAL_LOAD == "sql")]
+placeholders = [name for name, value in (("CODE_ENV", CODE_ENV), ("FINAL_CONNECTION", FINAL_CONNECTION),
+                                         ("FINAL_TABLE", FINAL_TABLE))
+                if (not str(value).strip() or str(value).startswith("YOUR_"))
+                and (name == "CODE_ENV" or FINAL_LOAD == "sql")]       # FINAL_*: only for the final load "sql"
 if placeholders:
     raise RuntimeError(f"Fill in {' and '.join(placeholders)} in the settings cell above, then run again.")
-check_code_env(CODE_ENV, ("polars", "catboost"))
 
 
 def load_module(name, code):
@@ -22,9 +23,31 @@ def load_module(name, code):
     return module
 
 
-for name, code in (("cashflow", LIBRARY_CODE), ("warehouse", WAREHOUSE_CODE), ("loadtest", LOADTEST_CODE)):
-    load_module(name, code)                         # to check the tests below (this notebook has no polars)
+for name, code in (("cashflow", LIBRARY_CODE), ("warehouse", WAREHOUSE_CODE), ("forecast", FORECAST_CODE),
+                   ("loadtest", LOADTEST_CODE)):
+    load_module(name, code)             # to check the tests and make the SQL tables below (this notebook has no polars)
 CHECKED = sys.modules["loadtest"].check_tests(TESTS)          # checked before anything is built (as a list)
+
+# the final load "sql": the table FINAL_SCHEMA.FINAL_TABLE, made here with SQL (forecast.ensure_table) with the
+# columns of the forecast's rows. Oracle: written by the recipe with oracledb (no dataset); else: through a dataset
+forecast = sys.modules["forecast"]
+final_sql = forecast.table_name(FINAL_SCHEMA, FINAL_TABLE) if FINAL_LOAD == "sql" else None
+final_oracle = FINAL_LOAD == "sql" and forecast.sql_dialect(FINAL_CONNECTION.strip()) == "oracle"
+check_code_env(CODE_ENV, ("polars", "catboost") + (("oracledb",) if final_oracle else ()))
+if FINAL_LOAD == "sql":
+    final_columns = forecast.output_columns({"forecaster": "string", "load_id": "string"})
+    try:
+        print(f"Final load: {forecast.ensure_table(FINAL_CONNECTION.strip(), final_sql, final_columns)}")
+    except Exception as e:
+        print("For a DBA, the table to make:\n" + forecast.create_table_sql(final_sql, final_columns,
+                                                                           "oracle" if final_oracle else "other"))
+        raise RuntimeError(f"The table {final_sql} on {FINAL_CONNECTION} could not be made or read ({e}). Check "
+                           "FINAL_CONNECTION (a SQL connection of this Dataiku) and FINAL_SCHEMA, and that the "
+                           "connection's user may create the table; or ask a DBA to run the CREATE TABLE above; or set "
+                           "FINAL_LOAD = \"csv\".") from None
+    if final_oracle:            # the login; oracledb itself is checked in the code env above (not this notebook's)
+        print("Final load: Oracle, written with oracledb; "
+              + forecast.check_table_writer(FINAL_CONNECTION.strip(), driver=False))
 
 try:                                                # needs the project's admin right
     metadata = project.get_metadata()
@@ -44,11 +67,12 @@ for file_name, code in (("cashflow.py", LIBRARY_CODE), ("warehouse.py", WAREHOUS
 print("Library: cashflow.py, warehouse.py, models.py, forecast.py (the forecast project's code) and loadtest.py")
 
 # the flow, in 2 zones: Data prep (the fake data) and Load test (the test, its log and the report).
-# Python recipes: (inputs, outputs, zone); load_test_log is a CSV; load_test_final, a table on OUTPUT_SQL_CONNECTION,
-# only for FINAL_LOAD = "sql" ("csv": a file in the folder load_test_forecast, nothing to create)
+# Python recipes: (inputs, outputs, zone); load_test_log is a CSV; load_test_final, the dataset linked to the table of
+# FINAL_LOAD = "sql" when it is not on Oracle (Oracle: no dataset; "csv": a file in the folder load_test_forecast)
+final_dataset = FINAL_LOAD == "sql" and not final_oracle
 FLOW = {"make_fake_data": ([], ["load_test_flows"], "Data prep"),
         "run_load_test": (["load_test_flows"], ["load_test_forecast", "load_test_log"]
-                          + (["load_test_final"] if FINAL_LOAD == "sql" else []), "Load test"),
+                          + (["load_test_final"] if final_dataset else []), "Load test"),
         "load_test_report": (["load_test_log"], ["load_test_report"], "Load test")}
 FOLDERS = ["load_test_flows", "load_test_forecast", "load_test_report"]
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
@@ -68,11 +92,44 @@ folder_settings = folders["load_test_flows"].get_settings()
 folder_settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
 folder_settings.save()
 variables = project.get_variables()                  # what run_load_test reads: the final load, csv or sql
-variables["standard"]["final_load"] = FINAL_LOAD
+variables["standard"].update(final_load=FINAL_LOAD, final_connection=FINAL_CONNECTION.strip(),
+                             final_schema=FINAL_SCHEMA.strip(), final_table=FINAL_TABLE.strip())  # loadtest.final_table
+variables["standard"].update(log_sql_connection=LOG_SQL_CONNECTION.strip(), log_sql_schema=LOG_SQL_SCHEMA.strip(),
+                             log_sql_table=LOG_SQL_TABLE.strip())    # the SQL copy of load_test_log (log_to_sql)
 project.set_variables(variables)
-print(f"Final load of each test: {FINAL_LOAD}")
-if FINAL_LOAD == "sql" and "load_test_final" not in datasets:
-    project.new_managed_dataset("load_test_final").with_store_into(OUTPUT_SQL_CONNECTION).create()
+print(f"Final load of each test: {FINAL_LOAD}"
+      + (f", the table {final_sql} on {FINAL_CONNECTION}" if final_sql else ""))
+if LOG_SQL_CONNECTION.strip() and LOG_SQL_TABLE.strip():
+    loadtest = sys.modules["loadtest"]
+    log_sql = forecast.table_name(LOG_SQL_SCHEMA, LOG_SQL_TABLE)
+    try:                                             # made now, so a missing right shows before the tests run
+        print(f"SQL copy of the log: {loadtest.ensure_log_table(LOG_SQL_CONNECTION.strip(), log_sql)}")
+    except Exception as e:
+        print(f"WARNING: the SQL copy of the log, {log_sql} on {LOG_SQL_CONNECTION}, could not be made or read: {e}\n"
+              "The tests still run (their rows go to the dataset load_test_log); the job run_load_test will fail at "
+              "its end until the table can be written. To make it by hand (Oracle):")
+        print(forecast.create_table_sql(log_sql, loadtest.LOG_COLUMNS))
+else:
+    print("SQL copy of the log: none (LOG_SQL_CONNECTION is empty)")
+if final_dataset:   # load_test_final: a dataset linked to the table made above (not a managed one: no new table)
+    schema, table = FINAL_SCHEMA.strip().lower(), FINAL_TABLE.strip().lower()  # as PostgreSQL stores unquoted names
+    try:                                                                        # (Dataiku quotes them)
+        kind = client.get_connection(FINAL_CONNECTION.strip()).get_info().get_type()
+    except Exception:
+        kind = "PostgreSQL"
+    if "load_test_final" in datasets:
+        raw = project.get_dataset("load_test_final").get_settings().get_raw()
+        params = raw.get("params", {})
+        linked = (params.get("connection"), params.get("table"), params.get("schema") or "")
+        if raw.get("managed") or linked != (FINAL_CONNECTION.strip(), table, schema):
+            raise RuntimeError(f"The dataset load_test_final is not linked to the table {final_sql} on "
+                               f"{FINAL_CONNECTION} (for example the managed dataset of an older version, whose "
+                               "table Dataiku named): delete it (Flow > load_test_final > Delete, without its data), "
+                               "then run again.")
+    if "load_test_final" not in datasets:
+        project.create_sql_table_dataset("load_test_final", kind, FINAL_CONNECTION.strip(), table, schema)
+    project.get_dataset("load_test_final").autodetect_settings().save()        # its columns, read from the table
+    print(f"Dataset load_test_final: linked to the table {final_sql} on {FINAL_CONNECTION} (Dataiku's writer)")
 if "load_test_log" not in datasets:
     settings = project.new_managed_dataset("load_test_log").with_store_into(OUTPUT_CONNECTION).create().get_settings()
     settings.get_raw()["formatType"] = "csv"

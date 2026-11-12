@@ -168,7 +168,7 @@ machine = (f"<ul style='margin:2px 0 0'><li>CPUs: {cpu_text}</li><li>RAM: {ram_t
            "</ul><span style='color:#555'>Read from Linux as each test starts (/proc, the job's cgroup: the limits set "
            "on its container or service, the folder's disk), the values of the first test. The server's other jobs share them.</span>")
 final_to = sorted({str(v) for v in run.get("final_load_to", pd.Series(dtype=str)).dropna() if str(v)})
-final_to = html.escape(" / ".join(final_to) or "the SQL table load_test_final")
+final_to = html.escape(" / ".join(final_to) or "the SQL table")
 data = ("as in each setting" if data_varies else
         f"{int(first['months'])} months of daily flows per client, about {int(first['postings_per_month'])} postings "
         "a month per client")

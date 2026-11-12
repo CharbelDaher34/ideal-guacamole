@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import re
 import sys
@@ -23,7 +24,18 @@ def load_module(name, code):
 cashflow = load_module("cashflow", LIBRARY_CODE)
 warehouse = load_module("warehouse", WAREHOUSE_CODE)
 tracking = load_module("tracking", TRACKING_CODE)
-RAW = [warehouse_table for warehouse_table, _ in warehouse.TABLES.values()]
+forecast = load_module("forecast", FORECAST_CODE)  # its SQL table helpers (no polars needed)
+
+
+def shown(schema, table):
+    return f"{schema}.{table}" if schema else table
+
+
+# the 2 warehouse tables, as the settings name them: their Flow dataset (warehouse.TABLES: the name the code uses,
+# whatever the table) -> (settings' prefix, schema, table)
+SOURCES = {warehouse.TABLES["clients"][0]: ("CLIENTS", CLIENTS_SCHEMA.strip(), CLIENTS_TABLE.strip()),
+           warehouse.TABLES["transactions"][0]: ("POSTINGS", POSTINGS_SCHEMA.strip(), POSTINGS_TABLE.strip())}
+RAW = list(SOURCES)
 
 # the input, checked before anything is built: the 2 warehouse tables, read-only through EDW_CONNECTION (SQL only)
 try:
@@ -33,27 +45,57 @@ except Exception as e:
                        "admin for a read-only database connection to the warehouse, usable by your group.") from None
 print(f"Input: {database} connection {EDW_CONNECTION}, read-only")
 for table, (name, _) in warehouse.TABLES.items():
+    prefix, schema, table_in = SOURCES[name]
     columns = warehouse.read_columns(table)
-    query = warehouse.table_query(table, f'"{EDW_SCHEMA}"."{name}"', end=pd.Timestamp.now())
+    quoted = (f'"{schema}".' if schema else "") + f'"{table_in}"'
+    query = warehouse.table_query(table, quoted, end=pd.Timestamp.now())
     try:
         dataiku.SQLExecutor2(connection=EDW_CONNECTION).query_to_df(f"SELECT * FROM ({query}) q WHERE 1 = 0")
     except Exception as e:
         found = re.search(r"(ORA-\d+[^\\\n']*|ERROR: [^\\\n']*)", str(e))    # the database's own message
         reason = found.group(1).strip() if found else str(e).splitlines()[0][:200]
-        raise RuntimeError(f"Cannot read {EDW_SCHEMA}.{name} through {EDW_CONNECTION} ({reason}). Check EDW_SCHEMA, "
-                           f"that the table exists with the columns {', '.join(columns)}, and that the connection's "
-                           "user may read it.") from None
-    print(f"   {EDW_SCHEMA}.{name}: can be read ({len(columns)} columns used)")
+        raise RuntimeError(f"Cannot read {shown(schema, table_in)} through {EDW_CONNECTION} ({reason}). Check "
+                           f"{prefix}_SCHEMA and {prefix}_TABLE (the name as the database shows it, capitals "
+                           f"included), that the table exists with the columns {', '.join(columns)}, and that the "
+                           "connection's user may read it.") from None
+    print(f"   {shown(schema, table_in)}: can be read ({len(columns)} columns used), the dataset {name}")
+
+# the output, checked and made before anything is built: the forecast's table on FORECAST_CONNECTION, created here
+# with SQL if it is not there (with the name of the settings, not one Dataiku would pick)
 try:
-    client.get_connection(OUTPUT_SQL_CONNECTION).get_info()
+    output_type = client.get_connection(FORECAST_CONNECTION).get_info().get_type()
 except Exception as e:
-    raise RuntimeError(f"Cannot use the connection {OUTPUT_SQL_CONNECTION!r} ({e}). Check OUTPUT_SQL_CONNECTION: a "
-                       "database connection your group may write into (never the warehouse).") from None
-print(f"Output: the table final_forecast on {OUTPUT_SQL_CONNECTION}, datasets on {OUTPUT_CONNECTION}, folders on "
-      f"{OUTPUT_FOLDER_CONNECTION}")
+    raise RuntimeError(f"Cannot use the connection {FORECAST_CONNECTION!r} ({e}). Check FORECAST_CONNECTION: a "
+                       "database connection your group may write into (never the warehouse), whose \"Details "
+                       "readable by\" includes your group (ask a Dataiku admin).") from None
+FORECAST = forecast.table_name(FORECAST_SCHEMA.strip(), FORECAST_TABLE.strip())    # SCHEMA.TABLE, unquoted
+print(f"Output: the forecast into {FORECAST} on the {output_type} connection {FORECAST_CONNECTION} (the dataset "
+      f"final_forecast)")
+FORECAST_COLUMNS = forecast.output_columns({"forecaster": "string", "load_id": "string"})
+try:
+    print("   " + forecast.ensure_table(FORECAST_CONNECTION, FORECAST, FORECAST_COLUMNS))
+except Exception as e:
+    found = re.search(r"(ORA-\d+[^\\\n']*|ERROR: [^\\\n']*)", str(e))
+    reason = found.group(1).strip() if found else str(e).splitlines()[0][:200]
+    print(forecast.create_table_sql(FORECAST, FORECAST_COLUMNS, "oracle" if output_type == "Oracle" else "other"))
+    raise RuntimeError(f"Cannot create or read the table {FORECAST} on {FORECAST_CONNECTION} ({reason}). Check "
+                       "FORECAST_SCHEMA (it must exist) and that the connection's user may create tables there, or "
+                       "ask the database's owner to create it (the CREATE TABLE above), then run again.") from None
+if output_type == "Oracle":                     # the recipe load_forecast_sql writes into Oracle with oracledb
+    check_code_env(CODE_ENV, ("oracledb",))
+# the forecast's writer: on Oracle, the connection's login must be readable by your group, and oracledb in the code
+# env. This notebook's Python may have no oracledb (the recipes run on CODE_ENV): then only the login is checked here.
+driver = importlib.util.find_spec("oracledb") is not None
+try:
+    done = forecast.check_table_writer(FORECAST_CONNECTION, driver=driver)
+except RuntimeError as e:
+    raise RuntimeError(f"The forecast cannot be written into {FORECAST} on {FORECAST_CONNECTION}: {e}") from None
+if done:
+    print(f"   {done}" + ("" if driver else f" (oracledb: in {CODE_ENV}, checked above; the recipe logs in with it)"))
+print(f"Other outputs: datasets on {OUTPUT_CONNECTION}, folders on {OUTPUT_FOLDER_CONNECTION}")
 CSV = {"style": "excel", "charset": "utf8", "separator": ",", "quoteChar": '"', "escapeChar": "\\",
        "dateSerializationFormat": "ISO", "arrayMapFormat": "json", "parseHeaderRow": True, "compress": ""}
-SQL = ["final_forecast"]              # a table on OUTPUT_SQL_CONNECTION; every other dataset is a CSV file
+SQL_OUTPUT = "final_forecast"         # linked to the table FORECAST below; every other dataset is a CSV file
 
 # Python recipes: (inputs, outputs, flow zone). daily_flows (Parquet files, read far faster than a dataset),
 # experiments and forecast (Parquet, one subfolder per night) are folders; cash_forecast is the saved model.
@@ -114,6 +156,9 @@ months = cashflow.whole_number("HISTORY_MONTHS", HISTORY_MONTHS)
 limit = cashflow.whole_number("CLIENTS_LIMIT", CLIENTS_LIMIT)
 variables["standard"].pop("history_years", None)                 # the older setting
 variables["standard"].update(history_months="" if months is None else months, clients_limit="" if limit is None else limit)
+# forecast_sql_*: always the setup's settings too (where the recipe load_forecast_sql writes the forecast)
+variables["standard"].update(forecast_sql_connection=FORECAST_CONNECTION, forecast_sql_schema=FORECAST_SCHEMA.strip(),
+                             forecast_sql_table=FORECAST_TABLE.strip())
 project.set_variables(variables)
 print("History read the first time (and by Full rebuild):",
       "the whole history" if months is None else f"the last {months} months up to the cut-off day",
@@ -133,45 +178,79 @@ recipes = {r["name"] for r in project.list_recipes()}
 
 
 def new_dataset(name):
-    """Managed dataset of the project: a table on OUTPUT_SQL_CONNECTION (SQL), else a CSV file (comma-separated, with a
-    header row) on OUTPUT_CONNECTION. Kept if it exists."""
+    """Managed dataset of the project: a CSV file (comma-separated, with a header row) on OUTPUT_CONNECTION. Kept if it
+    exists. (final_forecast is not one: it is linked to its table below.)"""
     if name in datasets:
         return name
     datasets.add(name)
-    dataset = project.new_managed_dataset(name).with_store_into(
-        OUTPUT_SQL_CONNECTION if name in SQL else OUTPUT_CONNECTION).create()
+    dataset = project.new_managed_dataset(name).with_store_into(OUTPUT_CONNECTION).create()
     settings = dataset.get_settings()
-    if name not in SQL:
-        settings.get_raw()["formatType"] = "csv"
-        settings.get_raw()["formatParams"].update(CSV)
+    settings.get_raw()["formatType"] = "csv"
+    settings.get_raw()["formatParams"].update(CSV)
     if name in BUILT_BY_NAME:
         settings.get_raw()["flowOptions"]["rebuildBehavior"] = "EXPLICIT"
     settings.save()
     return name
 
 
-# the 2 warehouse tables: datasets linked read-only to the tables of EDW_SCHEMA through EDW_CONNECTION (nothing is
-# created or written there). One already in the project is kept only if it is that table (a run of the setup again);
-# anything else (fake data, CSV, an old project's table) stops the setup before it is used.
+def linked_to(name):
+    """(connection, schema, table) of a dataset already in the project, and what it is (for a message)."""
+    raw = project.get_dataset(name).get_settings().get_raw()
+    params = raw.get("params", {})
+    where = (params.get("connection"), params.get("schema") or "", params.get("table"))
+    if raw.get("managed"):
+        return where, f"a managed {raw.get('type')} dataset on {where[0]}, its table named by Dataiku"
+    return where, f"{raw.get('type')} on {where[0]}" + (f", table {shown(*where[1:])}" if where[2] else "")
+
+
+# the 2 warehouse tables: datasets linked read-only to the settings' tables through EDW_CONNECTION (nothing is created
+# or written there). Their Flow names stay DIM_CUSTOMER and FCT_STATEMENT_ENTRY whatever the tables (the code uses
+# them; staging reads each dataset's own table). One already in the project is kept only if it is that table (a run
+# of the setup again); anything else (fake data, CSV, an old project's table, another table) stops the setup before
+# it is used.
 for name in RAW:
+    prefix, schema, table_in = SOURCES[name]
     if name in datasets:
-        raw = project.get_dataset(name).get_settings().get_raw()
-        params = raw.get("params", {})
-        if (params.get("connection"), params.get("schema"), params.get("table")) != (EDW_CONNECTION, EDW_SCHEMA, name):
-            raise RuntimeError(f"The project already has a dataset {name} that is not the table {EDW_SCHEMA}.{name} "
-                               f"of {EDW_CONNECTION} (it is {raw.get('type')} on {params.get('connection')}): fake or "
-                               f"old data. Delete it (Flow > {name} > Delete), or use a new empty project, then run "
-                               "the setup again.")
-        print(f"{name}: already linked to {EDW_SCHEMA}.{name} of {EDW_CONNECTION}")
+        where, what = linked_to(name)
+        if where != (EDW_CONNECTION, schema, table_in):
+            raise RuntimeError(f"The project already has a dataset {name} that is not the table "
+                               f"{shown(schema, table_in)} of {EDW_CONNECTION} ({prefix}_SCHEMA, {prefix}_TABLE): it "
+                               f"is {what}. Delete it (Flow > {name} > Delete, without deleting its data: only the "
+                               "link goes), or use a new empty project, then run the setup again.")
+        print(f"{name}: already linked to {shown(schema, table_in)} of {EDW_CONNECTION}")
         continue
     datasets.add(name)
-    dataset = project.create_sql_table_dataset(name, database, EDW_CONNECTION, name, EDW_SCHEMA)
+    dataset = project.create_sql_table_dataset(name, database, EDW_CONNECTION, table_in, schema or None)
     dataset.autodetect_settings().save()           # the table's columns, read from the database
     if not dataset.get_settings().get_raw().get("schema", {}).get("columns"):
         # staging reads with its own SELECT, so it still works; only Dataiku's view of the table would fail
-        print(f"WARNING: Dataiku could not read the columns of {EDW_SCHEMA}.{name}: opening the dataset in Dataiku "
-              "will fail. Fix: the dataset's Settings > Test table & get schema > Save.")
-    print(f"{name}: linked to {EDW_SCHEMA}.{name} of {EDW_CONNECTION}")
+        print(f"WARNING: Dataiku could not read the columns of {shown(schema, table_in)}: opening the dataset in "
+              "Dataiku will fail. Fix: the dataset's Settings > Test table & get schema > Save.")
+    print(f"{name}: linked to {shown(schema, table_in)} of {EDW_CONNECTION}")
+
+# final_forecast: a dataset linked to the forecast's table, made above. Dataiku quotes the names it is given, while
+# the table was made with unquoted names, which Oracle stores in capitals and PostgreSQL in small letters: so the link
+# uses the names as the database stores them. A final_forecast already in the project is kept only if it is that
+# table; an older managed one (Dataiku named its table) or one linked elsewhere stops the setup.
+stored = str.upper if output_type == "Oracle" else str.lower
+target = (FORECAST_CONNECTION, stored(FORECAST_SCHEMA.strip()), stored(FORECAST_TABLE.strip()))
+if SQL_OUTPUT in datasets:
+    where, what = linked_to(SQL_OUTPUT)
+    if where != target:
+        raise RuntimeError(
+            f"The project already has a dataset {SQL_OUTPUT} that is not the table {shown(*target[1:])} of "
+            f"{FORECAST_CONNECTION} (FORECAST_SCHEMA, FORECAST_TABLE): it is {what}, from an older setup or made by "
+            f"hand. Delete it (Flow > {SQL_OUTPUT} > Delete, without deleting its data: its old table stays, drop it "
+            f"later by hand if no one uses it), then run the setup again: it links {SQL_OUTPUT} to "
+            f"{shown(*target[1:])} (the table is ready) and loads the forecast there.")
+    print(f"{SQL_OUTPUT}: already linked to {shown(*target[1:])} of {FORECAST_CONNECTION}")
+    dataset = project.get_dataset(SQL_OUTPUT)
+else:
+    datasets.add(SQL_OUTPUT)
+    dataset = project.create_sql_table_dataset(SQL_OUTPUT, output_type, FORECAST_CONNECTION, target[2],
+                                               target[1] or None)
+    print(f"{SQL_OUTPUT}: linked to {shown(*target[1:])} of {FORECAST_CONNECTION}")
+dataset.autodetect_settings().save()               # the table's columns (new ones too), read from the database
 override = variables["standard"].get("cutoff_override")
 if override:
     print(f"WARNING: the project variable cutoff_override is {override}: the forecast uses that day instead of "
@@ -220,6 +299,16 @@ for name, (inputs, outputs, _) in FLOW.items():
     settings.set_code_env(code_env=CODE_ENV)
     settings.save()
     print("python recipe", name, "->", ", ".join(outputs))
+# the project's default Python: CODE_ENV, so anything that inherits it (a scenario step, a new notebook or recipe)
+# has polars, mlflow, ... and not Dataiku's built-in Python
+try:
+    project_settings = project.get_settings()
+    project_settings.set_python_code_env(CODE_ENV)
+    project_settings.save()
+    print(f"The project's default Python: the code env {CODE_ENV}")
+except Exception as e:          # needs the project's admin right: the recipes and scenario steps name CODE_ENV anyway
+    print(f"WARNING: could not make {CODE_ENV} the project's default Python ({e}). Set it by hand: Settings > Code "
+          f"env > Python > {CODE_ENV}")
 
 ZONES = {"Raw data": RAW, "Staging": list(warehouse.STAGED), "Training": [], "Inference": []}
 for _, outputs, zone_name in FLOW.values():

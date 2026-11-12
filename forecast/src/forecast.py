@@ -14,14 +14,18 @@ to end (forecast_group):
                  allows one writer per folder)
 The output folder holds one subfolder per night, forecast_<cut-off>_<model ID> (kept: the archive), and current.txt,
 which points to the newest one only once every group is written: a failed night leaves the previous forecast current.
-The SQL table final_forecast is then loaded from it (load_to_sql)."""
+The SQL table final_forecast is then loaded from it (load_to_sql, or load_to_table: see SQL tables below)."""
 import io
 import os
 import time
 
 import numpy as np
 import pandas as pd
-import polars as pl
+
+try:
+    import polars as pl
+except ImportError:         # the setup notebooks run on Dataiku's built-in Python: they only use the SQL table helpers
+    pl = None
 
 from cashflow import (DAILY_FLOWS, HORIZONS, MIN_HISTORY_DAYS, SAVED_MODEL, TOTAL, Progress, client_groups,
                       day_matrix, input_days, local_path, model_rows, peak_memory_mb, read_first_days, read_group,
@@ -208,6 +212,251 @@ def load_to_sql(dataset, output=OUTPUT):
             if writer is None:
                 sql.write_schema_from_dataframe(frame)
                 writer = sql.get_writer()
+            writer.write_dataframe(frame)
+            rows += len(frame)
+            progress.add()
+    finally:
+        if writer is not None:
+            writer.close()
+    progress.finish()
+    return rows, version
+
+
+# ── SQL tables written by code ─────────────────────────────────────────────────────────────────────────────────────
+# A table made with SQL (create_table_sql, ensure_table), then filled with the current forecast (load_to_table). On
+# Oracle (the bank) it is written with Oracle's own driver, oracledb, in batches with bind variables (about 16,000
+# rows a second; plain INSERT statements through Dataiku: under 1,000, Oracle parses each one), and no Dataiku dataset
+# is needed (the bank's licence caps them). Any other database (PostgreSQL in the sandbox): through Dataiku's writer
+# into a Dataiku dataset linked to the table.
+SQL_TYPES = {"oracle": {"string": "VARCHAR2(4000)", "bigint": "NUMBER(19)", "double": "NUMBER", "date": "DATE"},
+             "other": {"string": "VARCHAR(4000)", "bigint": "BIGINT", "double": "DOUBLE PRECISION", "date": "DATE"}}
+BATCH_ROWS = 5000       # rows sent to Oracle at a time
+
+
+def table_name(schema, table):
+    """"SCHEMA.TABLE", or "TABLE" when the schema is empty (the connection's own)."""
+    schema, table = str(schema or "").strip(), str(table or "").strip()
+    return f"{schema}.{table}" if schema else table
+
+
+def sql_dialect(connection):
+    """"oracle" when the Dataiku connection's database answers SELECT ... FROM DUAL (Oracle), else "other"."""
+    import dataiku
+    try:
+        dataiku.SQLExecutor2(connection=connection).query_to_df("SELECT 1 AS one FROM DUAL")
+        return "oracle"
+    except Exception:
+        return "other"
+
+
+def run_sql(connection, statements, dialect=None):
+    """Runs the statements on the Dataiku connection, then COMMIT (Dataiku runs them before a query that returns rows:
+    SELECT 1). dialect: sql_dialect(connection), asked when not given."""
+    import dataiku
+    dialect = dialect or sql_dialect(connection)
+    dataiku.SQLExecutor2(connection=connection).query_to_df(
+        "SELECT 1 AS one FROM DUAL" if dialect == "oracle" else "SELECT 1 AS one",
+        pre_queries=list(statements), post_queries=["COMMIT"])
+
+
+def output_columns(extra=None):
+    """{column: kind} of the forecast's rows, in their order (kinds: string, bigint, double, date): those of
+    output_rows (client_no, cutoff_date, w1_start ... w3_end, status, history_days, value_columns()), then those
+    forecast_all adds to every row: model_id, then `extra` (its `columns`, e.g. {"forecaster": "string"})."""
+    dates = ["cutoff_date"] + [f"w{h}_{edge}" for h in HORIZONS for edge in ("start", "end")]
+    return {"client_no": "string", **{d: "date" for d in dates}, "status": "string", "history_days": "bigint",
+            **{c: "double" for c in value_columns()}, "model_id": "string", **(extra or {})}
+
+
+def create_table_sql(table, columns, dialect="oracle"):
+    """The CREATE TABLE statement of `table` ("SCHEMA.TABLE") with `columns` ({name: kind}, see SQL_TYPES)."""
+    types = SQL_TYPES[dialect]
+    body = ",\n".join(f"    {name} {types[kind]}" for name, kind in columns.items())
+    return f"CREATE TABLE {table} (\n{body}\n)"
+
+
+def _table_columns(connection, table, dialect):
+    """The columns of `table` (lower case), read from the database's catalog, or None when it is not there."""
+    import dataiku
+    schema, _, name = table.rpartition(".")
+    quoted = lambda v: "'" + v.replace("'", "''") + "'"  # noqa: E731
+    if dialect == "oracle":         # unquoted names are stored in upper case
+        query = (f"SELECT column_name FROM all_tab_columns WHERE table_name = UPPER({quoted(name)}) AND owner = "
+                 + (f"UPPER({quoted(schema)})" if schema else "USER"))
+    else:                           # PostgreSQL: in lower case
+        query = (f"SELECT column_name FROM information_schema.columns WHERE LOWER(table_name) = LOWER({quoted(name)}) "
+                 + (f"AND LOWER(table_schema) = LOWER({quoted(schema)})" if schema
+                    else "AND table_schema = current_schema()"))
+    found = dataiku.SQLExecutor2(connection=connection).query_to_df(query)
+    names = {str(n).lower() for n in found.iloc[:, 0]} if len(found.columns) else set()
+    return names or None
+
+
+def ensure_table(connection, table, columns):
+    """Creates `table` ("SCHEMA.TABLE") on the Dataiku connection when it is not there; when it is, adds the columns
+    of `columns` ({name: kind}) it lacks (a newer version of the code). Returns a sentence saying what was done."""
+    dialect = sql_dialect(connection)
+    have = _table_columns(connection, table, dialect)
+    if have is None:
+        run_sql(connection, [create_table_sql(table, columns, dialect)], dialect)
+        return f"created the table {table} on {connection}"
+    missing = [c for c in columns if c.lower() not in have]
+    if not missing:
+        return f"the table {table} on {connection} is there, with every column"
+    add = "ALTER TABLE {} ADD ({} {})" if dialect == "oracle" else "ALTER TABLE {} ADD COLUMN {} {}"
+    run_sql(connection, [add.format(table, c, SQL_TYPES[dialect][columns[c]]) for c in missing], dialect)
+    return (f"added {len(missing)} column{'s' if len(missing) > 1 else ''} to the table {table} on {connection}: "
+            f"{', '.join(missing)}")
+
+
+def _oracle_dsn(params):
+    """The address of an Oracle Dataiku connection for oracledb, from its params: its JDBC URL (useURL:
+    jdbc:oracle:thin:@//host:port/service, @host:port/service, @host:port:SID or @(DESCRIPTION=...)), else its host,
+    port and db, which Dataiku joins as host:port:db (db: the SID)."""
+    if params.get("useURL"):
+        dsn = str(params.get("url") or "").strip()
+        dsn = dsn.split("@", 1)[1] if "@" in dsn else dsn
+    else:
+        dsn = f"{params.get('host')}:{params.get('port') or 1521}:{params.get('db')}"
+    dsn = dsn[2:] if dsn.startswith("//") else dsn
+    parts = dsn.split(":")
+    if not dsn.startswith("(") and "/" not in dsn and len(parts) == 3:          # host:port:SID
+        return (f"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={parts[0]})(PORT={parts[1]}))"
+                f"(CONNECT_DATA=(SID={parts[2]})))")
+    return dsn
+
+
+def _oracle_login(connection):
+    """(user, password, address) of an Oracle Dataiku connection, read from Dataiku: the connection's details must be
+    readable by one of the user's groups."""
+    import dataiku
+    ask = (f"Ask a Dataiku admin to add your group to 'Details readable by' of the connection {connection} "
+           "(Administration > Connections > the connection > Security)")
+    try:
+        info = dataiku.api_client().get_connection(connection).get_info()
+    except Exception as e:
+        raise RuntimeError(f"Cannot read the details of the connection {connection} ({e}). {ask}.") from None
+    params = info.get("params") or {}
+    try:
+        login = info.get_basic_credential()
+    except Exception:           # not given: the params may hold them
+        login = {"user": params.get("user"), "password": params.get("password")}
+    if not login.get("user") or not login.get("password"):
+        raise RuntimeError(f"Dataiku did not give the user and password of the connection {connection}. {ask}; if it "
+                           "uses per-user credentials, enter yours (Profile > Credentials).")
+    return login["user"], login["password"], _oracle_dsn(params)
+
+
+def _oracle_connect(connection):
+    """An oracledb connection (not in autocommit) with the login of the Oracle Dataiku connection."""
+    import oracledb
+    user, password, dsn = _oracle_login(connection)
+    return oracledb.connect(user=user, password=password, dsn=dsn)
+
+
+def check_table_writer(connection, driver=True):
+    """For an Oracle connection, checks load_to_table can write there: the package oracledb is in this Python and logs
+    in (driver=False: not checked, for a notebook running on another Python than the recipes), and the connection's
+    user and password can be read. Raises a RuntimeError saying what to ask the admin. Returns a sentence, or None
+    for another database (Dataiku's writer: nothing to check)."""
+    if sql_dialect(connection) != "oracle":
+        return None
+    if driver:
+        try:
+            import oracledb
+        except ImportError:
+            raise RuntimeError("The package oracledb (Oracle's Python driver) is not in this code env: ask a Dataiku "
+                               "admin to add oracledb to it. The forecast is written into the Oracle table with it "
+                               "(no Dataiku dataset).") from None
+    user, password, dsn = _oracle_login(connection)
+    if not driver:
+        return f"the login of {connection} can be read (user {user})"
+    try:
+        oracledb.connect(user=user, password=password, dsn=dsn).close()
+    except Exception as e:
+        raise RuntimeError(f"oracledb could not log in to {dsn} as {user}, the login of {connection} ({e}). With "
+                           "DPY-3010 or DPY-3015 (an older Oracle), oracledb needs its thick mode: ask the admin for "
+                           "the Oracle Instant Client on the Dataiku server.") from None
+    return f"oracledb logs in to {connection} (user {user})"
+
+
+def _kind(dtype):
+    """The kind (SQL_TYPES) of a Polars column type."""
+    name = str(dtype).lower()
+    if name.startswith(("int", "uint")) or name == "boolean":
+        return "bigint"
+    return "double" if name.startswith("float") else "date" if name.startswith("date") else "string"
+
+
+def load_to_table(connection, table, dataset=None, output=OUTPUT):
+    """Loads the current forecast of the folder `output` (one Parquet file per group: current_output) into `table`
+    ("SCHEMA.TABLE") on the Dataiku connection, replacing its rows, one group's file at a time. Returns the rows
+    loaded and the subfolder, like load_to_sql.
+        Oracle      oracledb (check_table_writer): the table is made or given the columns it lacks first
+                    (ensure_table, with the Parquet's columns), then its rows are deleted and the new ones inserted in
+                    batches of BATCH_ROWS, all in one transaction: readers see the old rows until the one commit at
+                    the end, and a failure leaves them.
+        other       Dataiku's writer into `dataset`, a Dataiku dataset linked to the table (needed), which keeps the
+                    table made by SQL (its schema is not rewritten)."""
+    folder, version, paths = current_output(output)
+    if sql_dialect(connection) != "oracle":
+        return _load_with_dataset(dataset, table, connection, folder, version, paths)
+    import oracledb
+    binds = {"string": oracledb.DB_TYPE_VARCHAR, "bigint": oracledb.DB_TYPE_NUMBER,
+             "double": oracledb.DB_TYPE_NUMBER, "date": oracledb.DB_TYPE_DATE}
+    if not paths:
+        print(ensure_table(connection, table, output_columns()))
+    rows, progress = 0, Progress(f"loading {version} into {table} on {connection} (files, oracledb)", len(paths))
+    db = _oracle_connect(connection)
+    try:
+        cursor = db.cursor()
+        for n, path in enumerate(paths):
+            frame = read_parquet(folder, path)
+            frame = frame.with_columns(pl.col(pl.Float32, pl.Float64).fill_nan(None))     # NaN: empty
+            kinds = {c: _kind(t) for c, t in frame.schema.items()}
+            if n == 0:
+                print(ensure_table(connection, table, kinds), flush=True)
+                cursor.execute(f"DELETE FROM {table}")          # undone if anything below fails
+            insert = (f"INSERT INTO {table} ({', '.join(kinds)}) "
+                      f"VALUES ({', '.join(f':{i}' for i in range(1, len(kinds) + 1))})")
+            cursor.setinputsizes(*[binds[k] for k in kinds.values()])
+            data = frame.rows()
+            for start in range(0, len(data), BATCH_ROWS):
+                cursor.executemany(insert, data[start:start + BATCH_ROWS])
+            rows += len(data)
+            progress.add()
+        if not paths:
+            cursor.execute(f"DELETE FROM {table}")
+        db.commit()
+    finally:
+        db.close()                  # without the commit: rolled back
+    progress.finish()
+    return rows, version
+
+
+def _load_with_dataset(dataset, table, connection, folder, version, paths):
+    """load_to_table on a database other than Oracle: Dataiku's writer into `dataset`, linked to the table (its
+    schema is not written: the table keeps the types it was made with)."""
+    import dataiku
+    if not dataset:
+        raise ValueError(f"The table {table} on {connection} is not on Oracle: it is written through a Dataiku dataset "
+                         "linked to it, and none was given (dataset=...)")
+    # the writer matches columns by their exact name, and the database keeps unquoted names in its own case
+    # (PostgreSQL: total_w1_ev for TOTAL_w1_ev): each column is renamed to the dataset's own name, case aside
+    names = [c["name"] for c in dataiku.Dataset(dataset).read_schema()]
+    by_lower = {n.lower(): n for n in names}
+    writer, rows = None, 0
+    progress = Progress(f"loading {version} into {table} on {connection} (files, Dataiku's writer)", len(paths))
+    try:
+        writer = dataiku.Dataset(dataset).get_writer()
+        for path in paths:
+            frame = read_parquet(folder, path).to_pandas()
+            unknown = [c for c in frame.columns if c.lower() not in by_lower]
+            if unknown:
+                raise ValueError(f"The table {table} (dataset {dataset}) has no column {', '.join(unknown)}: run the "
+                                 "setup notebook again (it adds the columns a newer version of the code writes)")
+            frame = frame.rename(columns={c: by_lower[c.lower()] for c in frame.columns})
+            frame = frame.reindex(columns=names)                # the table's order (a column not written: empty)
             writer.write_dataframe(frame)
             rows += len(frame)
             progress.add()

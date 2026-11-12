@@ -10,13 +10,15 @@ The forecast reads 2 tables of the bank's warehouse, read-only, and creates or w
                           date filter on VAL_DT (table_query): the last HISTORY_MONTHS months the first time (or after
                           the scenario Full rebuild), then only the days after the last day already in daily_flows.
 Always through the database connection to the warehouse (the setup's EDW_CONNECTION: Oracle at the bank, read-only;
-a local PostgreSQL with fake data on the test machine): the same code, only the connection differs. If a name or a
-code differs at the bank, only this file changes.
-"""
+a local PostgreSQL with fake data on the test machine): the same code, only the connection differs. The schemas and
+tables are the setup's settings (CLIENTS_*, POSTINGS_*); if a column or a code differs at the bank, only this file
+changes."""
 import numpy as np
 import pandas as pd
 
-# the tables the project reads. standard name: (table, where it is)
+# the tables the project reads. standard name: (its dataset in the Flow, the table by default). The setup links each
+# dataset to the table its settings name (CLIENTS_SCHEMA, CLIENTS_TABLE, POSTINGS_SCHEMA, POSTINGS_TABLE); staging reads
+# the dataset's own table, so only the settings change if the bank's names differ
 TABLES = {
     "clients": ("DIM_CUSTOMER", "EDW.DIM_CUSTOMER"),
     "transactions": ("FCT_STATEMENT_ENTRY", "EDW.FCT_STATEMENT_ENTRY"),

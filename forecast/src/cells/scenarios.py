@@ -10,10 +10,11 @@ def step(n, label, what, mode=None):
               "runConditionStatuses": ["SUCCESS", "WARNING"]}
     if isinstance(what, dict):          # variables for the next steps, edited on the scenario's page
         return {**common, "type": "define_vars", "params": {"variables": what, "definitions": []}}
-    if isinstance(what, str):           # a Python step: library function to call
+    if isinstance(what, str):           # a Python step: library function to call, on CODE_ENV (polars, mlflow, ...)
         module = "warehouse" if what in ("set_cutoff", "check_warehouse_loaded", "clear_daily_flows") else "tracking"
         return {**common, "type": "custom_python", "params": {
-            "script": f"from {module} import {what}\n\n{what}()\n", "envSelection": {"envMode": "INHERIT"},
+            "script": f"from {module} import {what}\n\n{what}()\n",
+            "envSelection": {"envMode": "EXPLICIT_ENV", "envName": CODE_ENV},
             "proceedOnFailure": False, "handleWarningsAs": "WARNING"}}
     kind = lambda i: ("MANAGED_FOLDER", folders[i].id) if i in folders else ("DATASET", i)
     builds = [{"type": t, "itemId": item, "partitionsSpec": ""} for t, item in map(kind, what)]

@@ -17,6 +17,8 @@ def check_code_env(name, packages):
         return
     missing = [p for p in packages if p.split("=")[0].split(">")[0] not in listed]
     if missing:
-        raise RuntimeError(f"Code env {name} lacks {', '.join(missing)}. {request}")
+        raise RuntimeError(f"Code env {name} lacks {', '.join(missing)}. Ask a Dataiku admin to add "
+                           f"{'it' if len(missing) == 1 else 'them'} to it (Administration > Code envs > {name} > "
+                           "Packages to install, then Update). Or set CODE_ENV to an existing env that has them.")
     print(f"Code env {name} has {', '.join(packages)}")
 

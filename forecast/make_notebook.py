@@ -54,16 +54,22 @@ write("build_forecast_project.ipynb", [
 
 This notebook sets up the Digital Cash Management Forecast in this Dataiku project (it also gives the project
 that name), the way it runs in production. The daily flows and the forecast are Parquet files in folders (for speed),
-the forecast is then loaded into a SQL table, `final_forecast` (`OUTPUT_SQL_CONNECTION`); the logs and small tables
-are CSV files.
+the forecast is then loaded into a SQL table, `FORECAST_SCHEMA`.`FORECAST_TABLE` on `FORECAST_CONNECTION` (by
+default `EDW_AI.FINAL_FORECAST` on `cm_test_env`; in the Flow, the dataset `final_forecast`), which this notebook
+creates with SQL when it is not there; the logs and small tables are CSV files. For an Oracle output, the code env
+also needs `oracledb` (the forecast is written with it) and the output connection's "Details readable by" must include
+your group (its login is read from Dataiku).
 It reads 2 warehouse tables, read-only, and creates or writes nothing in the warehouse: the clients
-(`EDW.DIM_CUSTOMER`) and the daily postings (`EDW.FCT_STATEMENT_ENTRY`), which the staging recipe sums per client,
-day and category in Dataiku. The first run reads each client's whole history; after that, each run reads only the
-new days (through the database connection, a `SELECT` with a date filter) and adds them to `daily_flows`. It always
+(`CLIENTS_SCHEMA`.`CLIENTS_TABLE`, by default `EDW.DIM_CUSTOMER`) and the daily postings
+(`POSTINGS_SCHEMA`.`POSTINGS_TABLE`, by default `EDW.FCT_STATEMENT_ENTRY`), both through `EDW_CONNECTION` (staging
+joins them in one query); in the Flow they are the datasets `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` whatever the
+tables. The staging recipe sums the postings per client, day and category in Dataiku. The first run reads each
+client's whole history; after that, each run reads only the new days (through the database connection, a `SELECT`
+with a date filter) and adds them to `daily_flows`. It always
 reads them through SQL, through the read-only database connection `EDW_CONNECTION`: at the bank, the warehouse;
 on the test machine, a local test database with fake data (`warehouse_simulator.ipynb`). The same code, only the
-connection differs. Names, codes and the categories (a mock list until the bank's transaction types are known):
-`python/warehouse.py` in the project library.
+connection differs. Column names, codes and the categories (a mock list until the bank's transaction types are
+known): `python/warehouse.py` in the project library.
 
 It forecasts, per client, per category and in TOTAL (all categories together), the net cash flow (money in minus
 money out) of each of the next 30, 60 and 90 days after the cut-off day (yesterday: days 1-30, 31-60, 61-90), as
@@ -80,7 +86,7 @@ P10, EV and P90, from each client's daily flows of the last 365 days. It builds 
   (every row says which model and which load produced it), Polars from start to end: the groups of clients of
   `daily_flows` run side by side (project variable `inference_workers`), each read (its last months only),
   prepared, forecast and written on its own into the folder `forecast` (one subfolder per night, kept). Then it is
-  loaded into the SQL table `final_forecast`. The inference log has one row per run, with timings and memory.
+  loaded into the SQL table (`final_forecast`). The inference log has one row per run, with timings and memory.
 The data scientist tries new forecasters outside the flow, in the notebook `forecast_lab.ipynb` (it never touches
 production), then sets the project variable `forecaster` and runs **Retrain, test and promote**.
 
@@ -102,8 +108,12 @@ It then trains, tests and promotes a first model, and runs the first nightly bat
 
 **How to use it (at the bank):** in a new empty project, import this notebook only (Notebooks > New notebook >
 Import), fill in the settings below (`EDW_CONNECTION`, `CODE_ENV`, ...) and run all cells (Cell > Run All). It first
-checks it can read the 2 warehouse tables, and stops with a clear message if not. It can be run again in the same
-project: what exists is kept (data, saved model versions, zones, scenario history), and the recipes' code is updated.
+checks it can read the 2 warehouse tables and write the forecast's table (made if missing), and stops with a clear
+message if not. It can be run again in the same project: what exists is kept (data, saved model versions, zones,
+scenario history), and the recipes' code is updated. A dataset `DIM_CUSTOMER`, `FCT_STATEMENT_ENTRY` or
+`final_forecast` already in the project must be the table of the settings: otherwise (for example the managed
+`final_forecast` of an older version, whose table Dataiku named) the setup stops and says to delete that dataset
+(without its data), then run again.
 
 On the test machine only: run `warehouse_simulator.ipynb` first (it writes fake tables into the local test
 database), then this notebook with `EDW_CONNECTION` set to that database's connection.
@@ -113,8 +123,10 @@ database), then this notebook with `EDW_CONNECTION` set to that database's conne
 ## 1. Code environment
 
 The recipes need CatBoost (the placeholder model), scikit-learn, and MLflow for Dataiku's Experiment Tracking, in an existing code env (`CODE_ENV`
-above). This notebook does not create it: an admin creates it once. This checks it is there with those packages,
-and otherwise stops with the request to send the admin.
+above), and oracledb when the forecast goes to Oracle (checked in section 3, once the output connection is known). This notebook does not create it: an admin creates it once. This checks it is there with those packages,
+and otherwise stops with the request to send the admin. This notebook itself runs on that code env too (its kernel,
+**Python (env cashflow_forecast)**): the first run tracks and promotes the first model from here, with MLflow. If
+your code env has another name, pick its kernel (Kernel > Change kernel); on Dataiku's built-in Python this stops.
 """),
     code(read("cells/check_code_env.py") + "\n\n" + read("cells/code_env.py")),
     md("""
@@ -143,11 +155,13 @@ Each recipe below becomes a Python recipe in the flow.
     md("""
 ## 3. Build the flow
 
-Uses the simulated warehouse tables, or links the warehouse's (read-only), and creates the Python recipes and their
-datasets (CSV files, and the SQL table `final_forecast`), the folders `daily_flows` (Parquet files), `experiments`
+Links the 2 warehouse tables of the settings (read-only), creates the forecast's table if it is not there (SQL, with
+the settings' name) and links `final_forecast` to it, and creates the Python recipes and their datasets (CSV files),
+the folders `daily_flows` (Parquet files), `experiments`
 (tracked models) and `forecast` (Parquet, one subfolder per night), the saved model `cash_forecast`, and the project
 variables `forecaster` (`daily_catboost`), `inference_workers` (4) and the promotion rules (`promotion_*`) if they are
-not set yet, in 4 zones.
+not set yet, in 4 zones. The project variables `forecast_sql_connection`, `forecast_sql_schema` and
+`forecast_sql_table` always take the settings (where the recipe `load_forecast_sql` writes).
 Training (folder `experiments`) and the promotion log are only rebuilt when asked by name, so the nightly batch never
 retrains by accident.
 """),
@@ -156,7 +170,7 @@ retrains by accident.
 ## 4. First run
 
 Builds the daily flows (the whole history, the first time), trains, tests and deploys a model, runs champion / challenger (with no production model yet,
-the first model is promoted, with a warning in promotion_log if its checks fail), then runs the nightly batch:
+the first model is promoted, with a warning in promotion_log if its checks fail; its run is tagged `production`), then runs the nightly batch:
 forecast, log, SQL load.
 """),
     code(read("cells/build_job.py") + "\n\n" + read("cells/first_run.py")),
@@ -164,7 +178,7 @@ forecast, log, SQL load.
 ## 5. Scenarios
 
 - **Nightly batch**: set the cut-off, add the new days to the daily flows, forecast with the production model and
-  log the run, then load the forecast into the SQL table `final_forecast`. It never trains.
+  log the run, then load the forecast into the SQL table (`final_forecast`). It never trains.
 - **Retrain, test and promote**: set the cut-off, add the new days to the daily flows, train, test and deploy a new model with
   the forecaster the project variable `forecaster` names, champion / challenger with the promotion rules, activate
   it if it passes. It does not forecast: the next Nightly batch uses the new active version.
@@ -173,7 +187,8 @@ forecast, log, SQL load.
   whole history again. For example after a reversal cancels a posting from a day already staged.
 
 Their triggers (daily at 06:00 and monthly on the 5th, Riyadh time) are created switched off; switch them on
-in production.
+in production. Their Python steps run on `CODE_ENV` (as the recipes do), which is also made the project's default
+Python.
 """),
     code(read("cells/scenarios.py")),
     md("""
@@ -183,7 +198,8 @@ To use another model (for example to roll back), activate its version in the sav
 the Nightly batch. To change when a model is promoted, change the project variables `promotion_*` (no code change).
 """),
     code(read("cells/results.py")),
-])
+], kernel={"display_name": "Python (env cashflow_forecast)", "language": "python",    # the code env's own kernel:
+           "name": "py-dku-venv-cashflow_forecast"})                                # mlflow, polars, oracledb
 
 write_if_present("build_load_test_project.ipynb", "load_test_cells", lambda: [
     md("""
@@ -213,7 +229,8 @@ Change them there, then Run. It runs, in 2 zones:
   days as inputs) fitted on 2 clients only (its forecasts mean nothing, its prediction time is real), then the nightly
   forecast of every fake client, `workers` groups of clients at a time, as production runs it, then its final load,
   timed: set by `FINAL_LOAD`, `"csv"` (a CSV file in the folder `load_test_forecast`: no table, no new dataset) or
-  `"sql"` (the SQL table `load_test_final`, as production). The times: the forecast, the final load, and the share
+  `"sql"` (the table `FINAL_SCHEMA`.`FINAL_TABLE` on `FINAL_CONNECTION`, by default `EDW_AI.LOAD_TEST_FINAL` on
+  `cm_test_env`, its rows replaced, as production). The times: the forecast, the final load, and the share
   of each step of the forecast (reading, preparing,
   model, formatting, writing). Each test runs in its own process: its memory is measured on its own, and running out
   of memory is logged as a failed test (the next test still runs).
@@ -221,10 +238,25 @@ Change them there, then Run. It runs, in 2 zones:
   `load_test_report`. The number of clients is not a setting, so each client count has its own table and chart,
   and only the settings (workers, clients per group) are compared there. Then where the forecast's time goes, and
   each setting's time per 100,000 clients at each client count. Every test: one row of the
-  dataset `load_test_log` (its `batch`: the run it was part of).
+  dataset `load_test_log` (its `batch`: the run it was part of), and, when `LOG_SQL_CONNECTION` is set, the same rows
+  added to a database table (`LOG_SQL_SCHEMA`.`LOG_SQL_TABLE`, by default `EDW_AI.LOAD_TEST_LOG` on the connection
+  `cm_test_env`), with SQL statements only: no Dataiku dataset. This notebook creates the table when it is not there
+  (and adds the columns a newer version of the code logs); if it can't, it prints the `CREATE TABLE` to run by hand.
+
+**The final load `"sql"`:** this notebook makes the table with SQL when it is not there (the forecast's columns; it
+adds the columns a newer version of the code writes); if it can't, it stops and prints the `CREATE TABLE` for a DBA.
+On Oracle (the bank) the recipe writes the table with Oracle's own driver, `oracledb`, in batches with bind variables
+(no Dataiku dataset: none is created), in one transaction: a failed load leaves the previous rows. At the bank, first:
+- the package `oracledb` in the code env `CODE_ENV` (a Dataiku admin adds it; this notebook checks the env lists it);
+- the connection's **Details readable by** (Administration > Connections > the connection > Security) includes your
+  group: the recipe reads the connection's user and password from Dataiku to log in with `oracledb`;
+- the connection's user may create the table (or a DBA makes it), delete its rows and insert into it.
+
+On another database (PostgreSQL in the sandbox), a dataset `load_test_final` linked to the table is made here, and
+the recipe fills it with Dataiku's writer.
 
 **How to use it:** in a new empty project, import this notebook (Notebooks > New notebook > Import), fill in
-`CODE_ENV`, `FINAL_LOAD` (and `OUTPUT_SQL_CONNECTION` for `"sql"`), and the scenario's first tests if you like, and run all cells (Cell > Run
+`CODE_ENV`, `FINAL_LOAD` (and `FINAL_*` for `"sql"`), `LOG_SQL_*` (or `LOG_SQL_CONNECTION = ""`), and the scenario's first tests if you like, and run all cells (Cell > Run
 All). It sets up the project, then (`RUN_NOW`) runs what the scenario runs and shows the result. Later: change the
 tests in step 1 of the scenario, then Run. Run this notebook again after the forecast code changes, so the load test
 times the new code: it keeps the tests set on the scenario.

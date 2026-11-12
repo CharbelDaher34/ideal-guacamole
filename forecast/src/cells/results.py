@@ -11,7 +11,8 @@ else:
     print("Test on the last 6 periods of 30 days: TOTAL rows (net per client), category rows, and ALL together, by window (1 = days 1-30, 2 = 31-60, 3 = 61-90):")
     display(dataiku.Dataset("test_results").get_dataframe()[
         ["level", "window", "rows", "wape_model", "wape_baseline", "coverage_p10_p90", "below_p10", "above_p90"]])
-    final = dataiku.Dataset("final_forecast").get_dataframe()
+    final = dataiku.Dataset("final_forecast").get_dataframe()   # the table FORECAST (Oracle: names in capitals)
+    final.columns = [str(c).lower() for c in final.columns]
     print(f"Final forecast: one row per active client, {len(final)} rows, {final.shape[1]} columns. Status:",
           final["status"].value_counts().to_dict())
     one = final[final["status"] == "OK"].iloc[0]

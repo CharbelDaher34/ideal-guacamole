@@ -5,27 +5,20 @@
 # written together at the end.
 # A test (loadtest.run_test): the placeholder model fitted on 2 clients, then the nightly forecast of every fake
 # client with the forecast project's own code (forecast.forecast_all: `workers` groups of clients at a time, each
-# read, prepared, forecast and written on its own), then the final load (a CSV file or the SQL table load_test_final,
-# as set by FINAL_LOAD in the setup notebook: loadtest.run_test). Its seconds:
+# read, prepared, forecast and written on its own), then the final load (a CSV file, or the table FINAL_SCHEMA.
+# FINAL_TABLE on FINAL_CONNECTION, as set by FINAL_LOAD and FINAL_* in the setup notebook: loadtest.run_test; on Oracle
+# with oracledb, else through the dataset load_test_final, an output of this recipe then). Its seconds:
 #   reading, preparing, model, formatting, writing   added up over the groups (so over the workers too)
 #   forecast                                         from start to end of the forecast (the wall clock)
-#   sql_load                                         the final load (the CSV file, or the SQL table)
+#   sql_load                                         the final load (the CSV file, or the table)
 import pandas as pd
 
 from cashflow import append_row
 from forecast import STEPS
-from loadtest import data_info, in_own_process, machine, run_test, size_path, step1_tests
+from loadtest import LOG_COLUMNS, data_info, in_own_process, log_to_sql, machine, run_test, size_path, step1_tests
 
-LOG = {"batch": "string", "test": "bigint", "run_at": "string", "status": "string", "error": "string",
-       "workers": "bigint", "clients": "bigint", "months": "bigint", "postings_per_month": "bigint",
-       "clients_per_group": "bigint", "groups": "bigint", "model": "string", "input_days": "bigint",
-       "cutoff_date": "string", "daily_rows": "bigint", "data_mb": "double", "seconds_fitting_2_clients": "double",
-       **{f"seconds_{k}": "double" for k in STEPS}, "seconds_forecast": "double", "seconds_sql_load": "double",
-       "clients_per_second": "double", "peak_memory_mb": "bigint",
-       "daily_rows_read": "bigint", "clients_ok": "bigint", "clients_not_enough_history": "bigint",
-       "clients_no_postings": "bigint", "cpus": "bigint", "ram_gb": "double", "final_load_to": "string",
-       "cpu_limit": "double", "ram_limit_gb": "double", "ram_free_gb": "double", "disk_gb": "double",
-       "disk_free_gb": "double"}       # the machine: loadtest.machine(), read from Linux as each test starts
+LOG = LOG_COLUMNS        # load_test_log's columns (loadtest.py), also those of its SQL copy (log_to_sql)
+assert all(f"seconds_{k}" in LOG for k in STEPS), "loadtest.LOG_COLUMNS lacks a step of forecast.STEPS"
 tests = step1_tests()
 batch = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 rows, failed = [], []
@@ -54,5 +47,11 @@ for n, test in enumerate(tests, 1):
         print(f"PROGRESS test {n}/{len(tests)}: FAILED: {result[1]}\n{result[2]}", flush=True)
     rows.append(row)
 append_row("load_test_log", LOG, rows)
+try:                                # the SQL copy of the log, when the setup notebook set one (LOG_SQL_*)
+    done = log_to_sql(rows, LOG)
+    print(f"PROGRESS the SQL log: {done or 'none set (LOG_SQL_CONNECTION in the setup notebook)'}", flush=True)
+except Exception as e:              # the rows are in load_test_log all the same; the job fails below to show it
+    failed.append(f"the SQL log could not be written ({type(e).__name__}: {str(e)[:500]})")
+    print(f"PROGRESS the SQL log: FAILED: {e}", flush=True)
 if failed:
-    raise RuntimeError(f"{len(failed)} of {len(tests)} tests failed (the report still runs): " + "; ".join(failed))
+    raise RuntimeError(f"{len(failed)} problem(s) (the report still runs): " + "; ".join(failed))

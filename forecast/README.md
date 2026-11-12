@@ -6,19 +6,27 @@ as P10 / EV / P90. How it works, step by step: [`docs/how_it_works.md`](../docs/
 
 ## Before you start (ask once)
 
-1. **A Python code env** named `cashflow_forecast` (Python 3.9 or later) with `polars`, `catboost`, `scikit-learn` and `mlflow==2.22.0`.
+1. **A Python code env** named `cashflow_forecast` (Python 3.9 or later) with `polars`, `catboost`, `scikit-learn` and `mlflow==2.22.0`
+   (and `oracledb` when the forecast goes to Oracle).
    Only a Dataiku admin can create it. The setup notebook checks it and, if something is missing, prints the request
    to send the admin.
 2. **A read-only database connection** to the warehouse (Oracle), usable by your group, for example `EDW`. The
-   project only reads `EDW.DIM_CUSTOMER` and `EDW.FCT_STATEMENT_ENTRY`, with a `SELECT` of only the columns used. It never
-   writes there.
-3. **An empty Dataiku project** where you are at least a designer. Don't reuse a project from an older version.
+   project only reads `EDW.DIM_CUSTOMER` and `EDW.FCT_STATEMENT_ENTRY` (or the tables the settings name), with a
+   `SELECT` of only the columns used. It never writes there.
+3. **A database connection the forecast goes to** (by default `cm_test_env`, schema `EDW_AI`), where your group may
+   create and write a table. If it is Oracle: `oracledb` in the code env (the forecast is written with it), and the
+   connection's **Details readable by** must include your group (the login is read from Dataiku). The setup checks
+   both and says what to ask the admin.
+4. **An empty Dataiku project** where you are at least a designer. Don't reuse a project from an older version.
 
 ## Set it up (once)
 
 You only need `build_forecast_project.ipynb`: it holds all the code and creates the whole project.
 
-1. **Import** `build_forecast_project.ipynb` into a new, empty project (Notebooks → New notebook → Import).
+1. **Import** `build_forecast_project.ipynb` into a new, empty project (Notebooks → New notebook → Import). It opens
+   on the code env's kernel, **Python (env cashflow_forecast)**: the first run tracks and promotes the first model
+   with MLflow. If your code env has another name, pick its kernel (Kernel → Change kernel); on Dataiku's built-in
+   Python the first cell stops and says so.
 2. **Put the bank's codes in its cell `WAREHOUSE_CODE = r'''`** (section 2, Code):
    - `CATEGORY_OF_TYPE`: the real transaction types (`TRNS_TYP`) and their category. Today it's a mock list.
    - `CLIENTS_BUSINESS` and `CLIENTS_CURRENT_ROW`: which rows of `DIM_CUSTOMER` are read, as SQL conditions. Already
@@ -40,20 +48,23 @@ You only need `build_forecast_project.ipynb`: it holds all the code and creates 
    | Setting | What it is | At the bank |
    |---|---|---|
    | `EDW_CONNECTION` | **input**: the Dataiku connection to the warehouse (read-only) | for example `"EDW_AI"` |
-   | `EDW_SCHEMA` | **input**: the schema of `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` | `"EDW"` |
+   | `CLIENTS_SCHEMA`, `CLIENTS_TABLE` | **input**: the clients' table, as the database names it (same connection) | `"EDW"`, `"DIM_CUSTOMER"` |
+   | `POSTINGS_SCHEMA`, `POSTINGS_TABLE` | **input**: the daily postings' table (same connection: staging joins them) | `"EDW"`, `"FCT_STATEMENT_ENTRY"` |
    | `HISTORY_MONTHS` | **input**: months of postings read the first time, up to yesterday; `-1` reads everything. Under 18 months, the setup only stages the data (training needs 18) | for example `24`, or `3` to test fast |
    | `CLIENTS_LIMIT` | **input**: how many business clients to read (the lowest customer numbers); `-1` all | `-1`, or for example `1000` to test fast |
-   | `OUTPUT_SQL_CONNECTION` | **output**: the database the forecast goes to, the table `final_forecast` (a connection you may write into, never the warehouse) | your output database |
+   | `FORECAST_CONNECTION` | **output**: the database connection the forecast goes to (one you may write into, never the warehouse) | `"cm_test_env"` |
+   | `FORECAST_SCHEMA`, `FORECAST_TABLE` | **output**: the forecast's table, made by the setup if it is not there (letters, digits, `_`); in the Flow, the dataset `final_forecast` | `"EDW_AI"`, `"FINAL_FORECAST"` |
    | `OUTPUT_CONNECTION` | **output**: where the project writes its other datasets (CSV: clients, logs) | `"filesystem_managed"` |
    | `OUTPUT_FOLDER_CONNECTION` | **output**: where it writes its folders (Parquet: `daily_flows`, `forecast`; models) | `"filesystem_folders"` |
    | `CODE_ENV` | the Python code env | for example `"cashflow_forecast"` |
 
-   The project reads the warehouse through SQL only: there is no CSV input.
+   The project reads the warehouse through SQL only: there is no CSV input. In the Flow, the input datasets keep
+   the names `DIM_CUSTOMER` and `FCT_STATEMENT_ENTRY` whatever the tables.
 
-4. **Run All.** It first checks it can read both warehouse tables (it stops with a clear message if not). Then it
-   builds the flow, reads the history once (the last `HISTORY_MONTHS` months), trains and promotes a first model, and
+4. **Run All.** It first checks it can read both warehouse tables and write the forecast's table (made if missing;
+   it stops with a clear message if not). Then it builds the flow, reads the history once (the last `HISTORY_MONTHS` months), trains and promotes a first model, and
    runs the first forecast. This first read is the long part. Check it printed `DIM_CUSTOMER: linked to EDW.DIM_CUSTOMER
-   of <your connection>` (and the same for `FCT_STATEMENT_ENTRY`).
+   of <your connection>` (and the same for `FCT_STATEMENT_ENTRY`, and `final_forecast: linked to EDW_AI.FINAL_FORECAST`).
 5. **Check the last cell:** the production model, its test scores, `final_forecast` (one row per active client)
    and the logs.
 6. **Switch on the scenario triggers** (Scenarios → each scenario → Settings): they are created switched off.
@@ -87,8 +98,10 @@ The test-machine notebook `warehouse_simulator.ipynb` is not part of the bank's 
 | The Nightly batch's last step (SQL load) FAILED | the forecast is complete in the folder `forecast`: fix the database, then build `final_forecast` alone |
 | "No production model yet" | run **Retrain, test and promote** |
 | The setup stops on the code env | send the admin the request it printed |
-| The setup says "Cannot read EDW.<table>" | check `EDW_CONNECTION`, `EDW_SCHEMA`, the table's columns, and that the connection's user may read it |
-| The setup says "already has a dataset ... that is not the table" | fake or old data in the project: delete that dataset, or use a new empty project |
+| The setup says "Cannot read EDW.<table>" | check `EDW_CONNECTION`, `CLIENTS_*` / `POSTINGS_*` (names as the database shows them), the table's columns, and that the connection's user may read it |
+| The setup says "already has a dataset ... that is not the table" | fake or old data, another table, or the managed `final_forecast` of an older version: delete that dataset (without its data), or use a new empty project |
+| The setup says "Cannot create or read the table" | check `FORECAST_SCHEMA` exists and the connection's user may create tables there, or have the printed `CREATE TABLE` run for you |
+| The setup or `load_forecast_sql` asks for `oracledb` or "Details readable by" | send the admin that request (Oracle output only) |
 | Opening a warehouse dataset says "Invalid number of columns" | the dataset's Settings → **Test table & get schema** → Save (the recipes don't need it) |
 | A wrong forecast after a model change | activate the previous version of the saved model `cash_forecast`, run the Nightly batch |
 

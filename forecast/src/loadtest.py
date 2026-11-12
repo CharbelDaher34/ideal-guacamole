@@ -20,7 +20,9 @@ Zone Load test (recipe run_load_test, then load_test_report): each test on its s
 forecast of every fake client (forecast.forecast_all) into the folder load_test_forecast, then its final load, timed
 (run_test), in its own process (in_own_process). The final load is set by FINAL_LOAD in the setup notebook (the project
 variable final_load): "csv", one CSV file in the folder load_test_forecast (load_to_file: no table, no dataset), or
-"sql", the SQL table load_test_final (forecast.load_to_sql, as production loads final_forecast)."""
+"sql", the table FINAL_SCHEMA.FINAL_TABLE on FINAL_CONNECTION (the project variables final_*: final_table), made by
+the setup notebook with SQL and loaded by forecast.load_to_table: on Oracle with oracledb (no Dataiku dataset), on
+another database through the dataset load_test_final linked to it."""
 import itertools
 import json
 import multiprocessing
@@ -37,7 +39,7 @@ from warehouse import CATEGORY_OF_TYPE, COLUMNS, OTHER
 SCENARIO = "Run the load test"
 FLOWS = "load_test_flows"         # folder: the fake daily flows, laid out like daily_flows
 OUTPUT = "load_test_forecast"     # folder: the forecast, like the folder forecast
-SQL = "load_test_final"           # final load "sql": the SQL table, like final_forecast
+SQL = "load_test_final"           # final load "sql", not on Oracle: the dataset linked to the table (final_table)
 FINAL_FILE = "/final/load_test_final.csv"    # final load "csv": this file of the folder OUTPUT
 MIN_MONTHS = -(-(INPUT_DAYS + PERIOD_DAYS * 3) // PERIOD_DAYS)    # a year of input and 3 windows: 16 months
 SIZE = ("clients", "months", "postings_per_month", "clients_per_group")     # the fake data's size
@@ -92,6 +94,84 @@ def step1_variables():
 def step1_tests():
     """The tests set in step 1 of the scenario, as a list, each checked."""
     return check_tests(step1_variables().get("tests"))
+
+
+# load_test_log: its columns and their Dataiku types (string, bigint, double). run_load_test writes them into the
+# dataset load_test_log, and into the SQL table set by the project variables log_sql_* when there is one (log_to_sql).
+LOG_COLUMNS = {
+    "batch": "string", "test": "bigint", "run_at": "string", "status": "string", "error": "string",
+    "workers": "bigint", "clients": "bigint", "months": "bigint", "postings_per_month": "bigint",
+    "clients_per_group": "bigint", "groups": "bigint", "model": "string", "input_days": "bigint",
+    "cutoff_date": "string", "daily_rows": "bigint", "data_mb": "double", "seconds_fitting_2_clients": "double",
+    **{f"seconds_{k}": "double" for k in ("reading", "preparing", "model", "formatting", "writing")},  # forecast.STEPS
+    "seconds_forecast": "double", "seconds_sql_load": "double", "clients_per_second": "double",
+    "peak_memory_mb": "bigint", "daily_rows_read": "bigint", "clients_ok": "bigint",
+    "clients_not_enough_history": "bigint", "clients_no_postings": "bigint", "cpus": "bigint", "ram_gb": "double",
+    "final_load_to": "string",
+    "cpu_limit": "double", "ram_limit_gb": "double", "ram_free_gb": "double", "disk_gb": "double",
+    "disk_free_gb": "double"}       # the machine: machine(), read from Linux as each test starts
+
+# The SQL copy of load_test_log (log_to_sql): a table the project's user may create and insert into, set by the
+# setup notebook (LOG_SQL_CONNECTION, LOG_SQL_SCHEMA, LOG_SQL_TABLE) as the project variables log_sql_*. Made and
+# written with SQL statements on the connection (forecast.ensure_table, forecast.run_sql: dataiku.SQLExecutor2), not
+# through a Dataiku dataset: no dataset is created. The tables' helpers are forecast.py's (shared with production).
+
+
+def sql_target(prefix):
+    """(connection, "SCHEMA.TABLE") set by the project variables <prefix>_connection, _schema, _table, or None when
+    the connection or the table is empty."""
+    import dataiku
+    from forecast import table_name
+    variables = dataiku.get_custom_variables()
+    connection, schema, table = (str(variables.get(f"{prefix}_{k}") or "").strip()
+                                 for k in ("connection", "schema", "table"))
+    return (connection, table_name(schema, table)) if connection and table else None
+
+
+def log_table():
+    """(connection, "SCHEMA.TABLE") of the SQL copy of load_test_log, from the project variables, or None (not set)."""
+    return sql_target("log_sql")
+
+
+def ensure_log_table(connection, table, columns=None):
+    """Creates the table when it is not there; when it is, adds the columns it lacks (a newer version of the code).
+    Returns what was done."""
+    from forecast import ensure_table
+    return ensure_table(connection, table, columns or LOG_COLUMNS)
+
+
+def sql_value(value, kind):
+    """A value as an SQL literal: NULL when missing, a quoted string (quotes doubled, at most 1,000 characters), or a
+    number."""
+    try:
+        if value is None or pd.isna(value):
+            return "NULL"
+    except (TypeError, ValueError):
+        pass
+    if kind == "string":
+        text = str(value)[:1000].replace("'", "''")
+        return f"'{text}'" if text else "NULL"
+    number = float(value)
+    if not np.isfinite(number):
+        return "NULL"
+    return str(int(round(number))) if kind == "bigint" else repr(number)
+
+
+def log_to_sql(rows, columns=None):
+    """Adds the rows (this run's tests) to the SQL copy of load_test_log, made first if needed (ensure_log_table).
+    Returns what was done, or None when no table is set (the project variables log_sql_*)."""
+    from forecast import run_sql
+    target = log_table()
+    if target is None:
+        return None
+    columns = columns or LOG_COLUMNS
+    connection, table = target
+    done = ensure_log_table(connection, table, columns)
+    names = ", ".join(columns)
+    run_sql(connection, [f"INSERT INTO {table} ({names}) VALUES "
+                         f"({', '.join(sql_value(row.get(c), kind) for c, kind in columns.items())})"
+                         for row in rows])
+    return f"{done}; {len(rows)} rows added"
 
 
 GB = 1024 ** 3
@@ -341,7 +421,21 @@ def prepare_data(tests, cutoff):
 def final_load():
     """The final load of the tests, "csv" or "sql": the project variable final_load (set by the setup notebook)."""
     import dataiku
-    return dataiku.get_custom_variables().get("final_load", "sql")
+    return dataiku.get_custom_variables().get("final_load", "csv")
+
+
+def final_table():
+    """The final load "sql": (connection, "SCHEMA.TABLE", the Dataiku dataset linked to it or None, how it is
+    written), from the project variables final_* (FINAL_CONNECTION, FINAL_SCHEMA, FINAL_TABLE of the setup notebook).
+    Oracle: oracledb, no dataset; another database: Dataiku's writer into the dataset load_test_final (SQL)."""
+    from forecast import sql_dialect
+    target = sql_target("final")
+    if target is None:
+        raise ValueError("The final load is \"sql\" but FINAL_CONNECTION or FINAL_TABLE is empty: set them in the "
+                         "setup notebook and run it again")
+    connection, table = target
+    oracle = sql_dialect(connection) == "oracle"
+    return connection, table, None if oracle else SQL, "oracledb in bulk" if oracle else "Dataiku's writer"
 
 
 def load_to_file(output=OUTPUT):
@@ -367,10 +461,14 @@ def csv_bytes(frame, header=True):
 def run_test(test, info):
     """Zone Load test: one test, on the fake data of its size in load_test_flows (info: its data.json): fit option A
     on 2 clients, forecast every fake client as the nightly forecast does with `workers`, then load the forecast into
-    the CSV file or the SQL table (final_load). Returns the values for load_test_log."""
+    the CSV file or the SQL table (final_load, final_table). Returns the values for load_test_log."""
     from cashflow import read_group, read_manifest
-    from forecast import STEPS, forecast_all, load_to_sql
+    from forecast import STEPS, check_table_writer, forecast_all, load_to_table
     from models import DailyCatBoost
+    to_csv = final_load() == "csv"
+    if not to_csv:                  # before the forecast: a table that can't be written fails the test at once
+        connection, table, dataset, how = final_table()
+        check_table_writer(connection)
     cutoff = pd.Timestamp(info["cutoff"])
     print("PROGRESS fitting the model on 2 clients only (no real training: only the forecast is timed)", flush=True)
     ticked = time.time()
@@ -385,11 +483,14 @@ def run_test(test, info):
 
     done = forecast_all(model, "load_test", fake_clients(info["clients"]), cutoff, test["workers"], FLOWS, OUTPUT,
                         {"forecaster": model.name, "load_id": "load_test"}, prefix)
-    to_csv = final_load() == "csv"
     ticked = time.time()
-    load_to_file(OUTPUT) if to_csv else load_to_sql(SQL, OUTPUT)
+    if to_csv:
+        load_to_file(OUTPUT)
+        log["final_load_to"] = f"a CSV file ({OUTPUT}{FINAL_FILE})"
+    else:
+        load_to_table(connection, table, dataset, OUTPUT)
+        log["final_load_to"] = f"the table {table} on {connection} ({how})"
     seconds_sql = time.time() - ticked
-    log["final_load_to"] = f"a CSV file ({OUTPUT}{FINAL_FILE})" if to_csv else f"the SQL table {SQL}"
     log.update({f"seconds_{k}": round(done[k], 1) for k in STEPS}, groups=done["groups"],
                daily_rows_read=done["daily_rows"], seconds_forecast=round(done["seconds"], 1),
                seconds_sql_load=round(seconds_sql, 1), clients_ok=done.get("OK", 0),
